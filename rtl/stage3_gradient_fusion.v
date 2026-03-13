@@ -59,6 +59,10 @@ module stage3_gradient_fusion #(
     reg [GRAD_WIDTH:0]            grad_sum;
     reg                            valid_s3;
 
+    // Sorting network temporary variables (declared outside always block)
+    reg [GRAD_WIDTH-1:0] t0, t1, t2, t3, t4;
+    reg [GRAD_WIDTH-1:0] tmp;
+
     // Stage 1: Buffer inputs and compute directional gradients
     // For boundary handling, use current gradient when at edge
     always @(posedge clk or negedge rst_n) begin
@@ -126,6 +130,32 @@ module stage3_gradient_fusion #(
         end
     end
 
+    // Combinational sorting logic
+    always @(*) begin
+        // Load inputs
+        t0 = grad_c_s1;
+        t1 = grad_u_s1;
+        t2 = grad_d_s1;
+        t3 = grad_l_s1;
+        t4 = grad_r_s1;
+
+        // Bubble sort (ascending order for inverse weighting)
+        // Pass 1
+        if (t0 > t1) begin tmp = t0; t0 = t1; t1 = tmp; end
+        if (t1 > t2) begin tmp = t1; t1 = t2; t2 = tmp; end
+        if (t2 > t3) begin tmp = t2; t2 = t3; t3 = tmp; end
+        if (t3 > t4) begin tmp = t3; t3 = t4; t4 = tmp; end
+        // Pass 2
+        if (t0 > t1) begin tmp = t0; t0 = t1; t1 = tmp; end
+        if (t1 > t2) begin tmp = t1; t1 = t2; t2 = tmp; end
+        if (t2 > t3) begin tmp = t2; t2 = t3; t3 = tmp; end
+        // Pass 3
+        if (t0 > t1) begin tmp = t0; t0 = t1; t1 = tmp; end
+        if (t1 > t2) begin tmp = t1; t1 = t2; t2 = tmp; end
+        // Pass 4
+        if (t0 > t1) begin tmp = t0; t0 = t1; t1 = tmp; end
+    end
+
     // Stage 2: Sort gradients (inverse sort: smallest first)
     // Using a simple insertion sort network
     always @(posedge clk or negedge rst_n) begin
@@ -159,35 +189,7 @@ module stage3_gradient_fusion #(
             avg1_l_s2 <= avg1_l_s1;
             avg1_r_s2 <= avg1_r_s1;
 
-            // Sort 5 values using sorting network
-            // We want inverse sort (smallest first for weighted average)
-            // Input: grad_c_s1, grad_u_s1, grad_d_s1, grad_l_s1, grad_r_s1
-            reg [GRAD_WIDTH-1:0] t0, t1, t2, t3, t4;
-            reg [GRAD_WIDTH-1:0] tmp;
-
-            // Load inputs
-            t0 = grad_c_s1;
-            t1 = grad_u_s1;
-            t2 = grad_d_s1;
-            t3 = grad_l_s1;
-            t4 = grad_r_s1;
-
-            // Bubble sort (ascending order for inverse weighting)
-            // Pass 1
-            if (t0 > t1) begin tmp = t0; t0 = t1; t1 = tmp; end
-            if (t1 > t2) begin tmp = t1; t1 = t2; t2 = tmp; end
-            if (t2 > t3) begin tmp = t2; t2 = t3; t3 = tmp; end
-            if (t3 > t4) begin tmp = t3; t3 = t4; t4 = tmp; end
-            // Pass 2
-            if (t0 > t1) begin tmp = t0; t0 = t1; t1 = tmp; end
-            if (t1 > t2) begin tmp = t1; t1 = t2; t2 = tmp; end
-            if (t2 > t3) begin tmp = t2; t2 = t3; t3 = tmp; end
-            // Pass 3
-            if (t0 > t1) begin tmp = t0; t0 = t1; t1 = tmp; end
-            if (t1 > t2) begin tmp = t1; t1 = t2; t2 = tmp; end
-            // Pass 4
-            if (t0 > t1) begin tmp = t0; t0 = t1; t1 = tmp; end
-
+            // Store sorted gradients
             grad_s0_s2 <= t0;  // Smallest
             grad_s1_s2 <= t1;
             grad_s2_s2 <= t2;

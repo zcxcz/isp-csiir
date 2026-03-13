@@ -171,13 +171,13 @@ module stage1_gradient #(
             // Window size LUT based on gradient thresholds
             // Simplified: win_size = 16 + (grad_max / 8)
             // This maps to the clip_y values from the algorithm
-            if (grad_max_s4 < {GRAD_WIDTH-4{1'b0}, win_size_clip_y_0, 4'b0000}) begin
+            if (grad_max_s4 < {4'b0, win_size_clip_y_0}) begin
                 win_size_lut <= 6'd16;
-            end else if (grad_max_s4 < {GRAD_WIDTH-4{1'b0}, win_size_clip_y_1, 4'b0000}) begin
+            end else if (grad_max_s4 < {4'b0, win_size_clip_y_1}) begin
                 win_size_lut <= 6'd24;
-            end else if (grad_max_s4 < {GRAD_WIDTH-4{1'b0}, win_size_clip_y_2, 4'b0000}) begin
+            end else if (grad_max_s4 < {4'b0, win_size_clip_y_2}) begin
                 win_size_lut <= 6'd32;
-            end else if (grad_max_s4 < {GRAD_WIDTH-4{1'b0}, win_size_clip_y_3, 4'b0000}) begin
+            end else if (grad_max_s4 < {4'b0, win_size_clip_y_3}) begin
                 win_size_lut <= 6'd40;
             end else begin
                 win_size_lut <= 6'd40;

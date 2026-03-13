@@ -9,7 +9,7 @@ VERIF_DIR   = verification
 BUILD_DIR   = build
 
 # Simulator selection (override with SIM=<simulator>)
-SIM ?= vcs
+SIM ?= iverilog
 
 # Compiler settings based on simulator
 ifeq ($(SIM),vcs)
@@ -27,8 +27,12 @@ else ifeq ($(SIM),xcelium)
     XRUN = xrun
     XRUN_FLAGS = -sv -debug
     SIM_FLAGS = $(XRUN_FLAGS)
+else ifeq ($(SIM),iverilog)
+    IVERILOG = iverilog
+    IVERILOG_FLAGS = -g2012 -Wall -I$(RTL_DIR)
+    SIM_FLAGS = $(IVERILOG_FLAGS)
 else
-    $(error "Unknown simulator: $(SIM). Use vcs, questa, or xcelium")
+    $(error "Unknown simulator: $(SIM). Use vcs, questa, xcelium, or iverilog")
 endif
 
 # RTL source files
@@ -71,6 +75,13 @@ else ifeq ($(SIM),questa)
 	$(VLOG) $(VLOG_FLAGS) $(RTL_SOURCES)
 else ifeq ($(SIM),xcelium)
 	$(XRUN) $(XRUN_FLAGS) -lint $(RTL_SOURCES)
+else ifeq ($(SIM),iverilog)
+	$(IVERILOG) $(IVERILOG_FLAGS) -t null $(RTL_SOURCES) 2>&1 | tee syntax_check.log
+	@if [ ! -s syntax_check.log ] || ! grep -q "error" syntax_check.log; then \
+		echo "Syntax check PASSED"; \
+	else \
+		echo "Syntax check FAILED"; \
+	fi
 endif
 
 # Compile RTL only
