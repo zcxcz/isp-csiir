@@ -1,5 +1,10 @@
-# Stage1
+# ISP-CSIIR 算法参考文档
 
+## Stage 1: 梯度计算与窗口大小确定
+
+### Sobel 滤波器
+
+```python
 sobel_x = [
     [1, 1, 1, 1, 1],
     [0, 0, 0, 0, 0],
@@ -15,21 +20,35 @@ sobel_y = [
     [1, 0, 0, 0, -1],
     [1, 0, 0, 0, -1]
 ]
-reg_siir_win_size_clip_y    = [15, 23, 31, 39]
-reg_siir_win_size_clip_sft  = [2, 2, 2, 2]
+```
 
-grad_h(i, j) = (src_uv_5x5(i, j) * sobel_x)
-grad_v(i, j) = (src_uv_5x5(i, j) * sobel_y)
-grad(i, j) = abs(grad_h) / 5 + abs(grad_v) / 5
-mot_sft[4] = { 2,2,2,2 }
-win_size_grad   = LUT(  Max( grad(i-1, j), grad(i, j), grad(i+1, j) ), reg_siir_win_size_clip_y, reg_siir_win_size_clip_sft  )
-win_size_motion = LUT( motion(i, j), reg_siir_mot_protect, mot_sft )
-win_size(i, j) = win_size_grad + win_size_motion
-win_size_clip(i, j) = clip( win_size(i, j), , 16, 40 )
+### 梯度计算
 
+```
+grad_h(i, j) = (src_uv_5x5 * sobel_x) / 5
+grad_v(i, j) = (src_uv_5x5 * sobel_y) / 5
+grad(i, j) = |grad_h| + |grad_v|
+```
 
-# stage2
+### 窗口大小 LUT
 
+```
+win_size_clip_y    = [15, 23, 31, 39]
+win_size_clip_sft  = [2, 2, 2, 2]
+
+win_size_grad = LUT(Max(grad(i-1,j), grad(i,j), grad(i+1,j)),
+                    win_size_clip_y, win_size_clip_sft)
+win_size_clip(i, j) = clip(win_size(i, j), 16, 40)
+```
+
+---
+
+## Stage 2: 多尺度方向性平均
+
+### 平均因子核
+
+```python
+# 2x2 核
 avg_factor_c_2x2 = [
     [0, 0, 0, 0, 0],
     [0, 1, 2, 1, 0],
@@ -38,6 +57,7 @@ avg_factor_c_2x2 = [
     [0, 0, 0, 0, 0]
 ]
 
+# 3x3 核
 avg_factor_c_3x3 = [
     [0, 0, 0, 0, 0],
     [0, 1, 1, 1, 0],
@@ -46,6 +66,7 @@ avg_factor_c_3x3 = [
     [0, 0, 0, 0, 0]
 ]
 
+# 4x4 核
 avg_factor_c_4x4 = [
     [1, 1, 2, 1, 1],
     [1, 2, 4, 2, 1],
@@ -54,6 +75,7 @@ avg_factor_c_4x4 = [
     [1, 1, 2, 1, 1]
 ]
 
+# 5x5 核
 avg_factor_c_5x5 = [
     [1, 1, 1, 1, 1],
     [1, 1, 1, 1, 1],
@@ -61,114 +83,127 @@ avg_factor_c_5x5 = [
     [1, 1, 1, 1, 1],
     [1, 1, 1, 1, 1]
 ]
+```
 
-avg_factor_mask_r = [
+### 方向掩码
+
+```python
+avg_factor_mask_r = [  # 右
     [0, 0, 1, 1, 1],
     [0, 0, 1, 1, 1],
     [0, 0, 1, 1, 1],
     [0, 0, 1, 1, 1],
     [0, 0, 1, 1, 1]
 ]
-avg_factor_mask_l = [
+
+avg_factor_mask_l = [  # 左
     [1, 1, 1, 0, 0],
     [1, 1, 1, 0, 0],
     [1, 1, 1, 0, 0],
     [1, 1, 1, 0, 0],
     [1, 1, 1, 0, 0]
 ]
-avg_factor_mask_u = [
+
+avg_factor_mask_u = [  # 上
     [1, 1, 1, 1, 1],
     [1, 1, 1, 1, 1],
     [1, 1, 1, 1, 1],
     [0, 0, 0, 0, 0],
     [0, 0, 0, 0, 0]
 ]
-avg_factor_mask_d = [
+
+avg_factor_mask_d = [  # 下
     [0, 0, 0, 0, 0],
     [0, 0, 0, 0, 0],
     [1, 1, 1, 1, 1],
     [1, 1, 1, 1, 1],
     [1, 1, 1, 1, 1]
 ]
+```
 
-if (win_size_clip(i, j) < reg_win_size_thresh0) 
+### 核选择逻辑
+
+```
+if (win_size_clip < thresh0):
     avg0_factor_c = zeros(5, 5)
     avg1_factor_c = avg_factor_c_2x2
-if (win_size_clip(i, j) >= reg_win_size_thresh0 && win_size_clip(i, j) < reg_win_size_thresh1) 
+elif (win_size_clip < thresh1):
     avg0_factor_c = avg_factor_c_2x2
     avg1_factor_c = avg_factor_c_3x3
-if (win_size_clip(i, j) >= reg_win_size_thresh1 && win_size_clip(i, j) < reg_win_size_thresh2) 
+elif (win_size_clip < thresh2):
     avg0_factor_c = avg_factor_c_3x3
     avg1_factor_c = avg_factor_c_4x4
-if (win_size_clip(i, j) >= reg_win_size_thresh2 && win_size_clip(i, j) < reg_win_size_thresh3) 
+elif (win_size_clip < thresh3):
     avg0_factor_c = avg_factor_c_4x4
     avg1_factor_c = avg_factor_c_5x5
-if (win_size_clip(i, j) >= reg_win_size_thresh3)
+else:
     avg0_factor_c = avg_factor_c_5x5
     avg1_factor_c = zeros(5, 5)
+```
 
-avg0_factor_u = avg0_factor_c * avg_factor_mask_u
-avg0_factor_d = avg0_factor_c * avg_factor_mask_d
-avg0_factor_l = avg0_factor_c * avg_factor_mask_l
-avg0_factor_r = avg0_factor_c * avg_factor_mask_r
+### 平均值计算
 
-avg1_factor_u = avg1_factor_c * avg_factor_mask_u
-avg1_factor_d = avg1_factor_c * avg_factor_mask_d
-avg1_factor_l = avg1_factor_c * avg_factor_mask_l
-avg1_factor_r = avg1_factor_c * avg_factor_mask_r
+```
+avg_value_c = sum(window * factor) / sum(factor)
+avg_value_u = sum(window * factor_u) / sum(factor_u)
+avg_value_d = sum(window * factor_d) / sum(factor_d)
+avg_value_l = sum(window * factor_l) / sum(factor_l)
+avg_value_r = sum(window * factor_r) / sum(factor_r)
+```
 
-avg0_value_c(i, j) = sum( src_uv_5x5(i, j) * avg0_factor_c(i, j) ) / sum( avg0_factor_c(i, j) )
-avg0_value_u(i, j) = sum( src_uv_5x5(i, j) * avg0_factor_u(i, j) ) / sum( avg0_factor_u(i, j) )
-avg0_value_d(i, j) = sum( src_uv_5x5(i, j) * avg0_factor_d(i, j) ) / sum( avg0_factor_d(i, j) )
-avg0_value_l(i, j) = sum( src_uv_5x5(i, j) * avg0_factor_l(i, j) ) / sum( avg0_factor_l(i, j) )
-avg0_value_r(i, j) = sum( src_uv_5x5(i, j) * avg0_factor_r(i, j) ) / sum( avg0_factor_r(i, j) )
+---
 
-avg1_value_c(i, j) = sum( src_uv_5x5(i, j) * avg1_factor_c(i, j) ) / sum( avg1_factor_c(i, j) )
-avg1_value_u(i, j) = sum( src_uv_5x5(i, j) * avg1_factor_u(i, j) ) / sum( avg1_factor_u(i, j) )
-avg1_value_d(i, j) = sum( src_uv_5x5(i, j) * avg1_factor_d(i, j) ) / sum( avg1_factor_d(i, j) )
-avg1_value_l(i, j) = sum( src_uv_5x5(i, j) * avg1_factor_l(i, j) ) / sum( avg1_factor_l(i, j) )
-avg1_value_r(i, j) = sum( src_uv_5x5(i, j) * avg1_factor_r(i, j) ) / sum( avg1_factor_r(i, j) )
+## Stage 3: 梯度加权方向融合
 
+### 边界处理
 
-# stage3
-if (j==0)
-    grad_u(i, j) = grad(i, j)
-else
-    grad_u(i, j) = grad(i, j-1)
+```
+if (j == 0): grad_u = grad(i, j)
+else:        grad_u = grad(i, j-1)
 
-if (j==reg_pic_height_m1)
-    grad_d(i, j) = grad(i, j)
-else
-    grad_d(i, j) = grad(i, j+1)
+if (j == height-1): grad_d = grad(i, j)
+else:               grad_d = grad(i, j+1)
 
-if (i==0)
-    grad_l(i, j) = grad(i, j)
-else
-    grad_l(i, j) = grad(i-1, j)
+if (i == 0): grad_l = grad(i, j)
+else:        grad_l = grad(i-1, j)
 
-if (i==reg_pic_width_m1)
-    grad_r(i, j) = grad(i, j)
-else
-    grad_r(i, j) = grad(i+1, j)
+if (i == width-1): grad_r = grad(i, j)
+else:              grad_r = grad(i+1, j)
+```
 
-grad_u(i, j), grad_d(i, j), grad_l(i, j), grad_r(i, j), grad_c(i, j) = invSort( grad_u(i, j), grad_d(i, j), grad_l(i, j), grad_r(i, j), grad_c(i, j) )
-grad_sum(i, j) = grad_u(i, j) + grad_d(i, j) + grad_l(i, j) + grad_r(i, j) + grad_c(i, j)
-if ( grad_sum(i, j)==0 )
-    blend0_dir_avg(i, j) = ( avg0_value_u(i, j) + avg0_value_d(i, j) + avg0_value_l(i, j) + avg0_value_r(i, j) + avg0_value_c(i, j) ) / 5
-    blend1_dir_avg(i, j) = ( avg1_value_u(i, j) + avg1_value_d(i, j) + avg1_value_l(i, j) + avg1_value_r(i, j) + avg1_value_c(i, j) ) / 5
-else
-    blend0_dir_avg(i, j) = ( avg0_value_u(i, j) * grad_u(i, j) + avg0_value_d(i, j) * grad_d(i, j) + avg0_value_l(i, j) * grad_l(i, j) + avg0_value_r(i, j) * grad_r(i, j) + avg0_value_c(i, j) * grad_c(i, j) ) / grad_sum(i, j)
-    blend1_dir_avg(i, j) = ( avg1_value_u(i, j) * grad_u(i, j) + avg1_value_d(i, j) * grad_d(i, j) + avg1_value_l(i, j) * grad_l(i, j) + avg1_value_r(i, j) * grad_r(i, j) + avg1_value_c(i, j) * grad_c(i, j) ) / grad_sum(i, j)
+### 梯度排序 (逆序)
 
+```
+grad_u, grad_d, grad_l, grad_r, grad_c = invSort(grad_u, grad_d, grad_l, grad_r, grad_c)
+grad_sum = grad_u + grad_d + grad_l + grad_r + grad_c
+```
 
-# stage4
+### 加权融合
 
-blend0_iir_avg(i, j) = ( reg_siir_blending_ratio[win_size_clip(i, j)/8 - 2] * blend0_dir_avg(i, j) + (64 - reg_siir_blending_ratio[win_size_clip(i, j)/8 - 2]) * avg0_value_u(i, j) ) / 64
-blend1_iir_avg(i, j) = ( reg_siir_blending_ratio[win_size_clip(i, j)/8 - 2] * blend1_dir_avg(i, j) + (64 - reg_siir_blending_ratio[win_size_clip(i, j)/8 - 2]) * avg1_value_u(i, j) ) / 64
+```
+if (grad_sum == 0):
+    blend_avg = (avg_u + avg_d + avg_l + avg_r + avg_c) / 5
+else:
+    blend_avg = (avg_u * grad_u + avg_d * grad_d + avg_l * grad_l +
+                 avg_r * grad_r + avg_c * grad_c) / grad_sum
+```
 
-blend0_uv_5x5(i, j) = src_uv_5x5(i, j)
-blend1_uv_5x5(i, j) = src_uv_5x5(i, j)
+---
 
+## Stage 4: IIR 滤波与混合输出
+
+### IIR 混合
+
+```
+blend_ratio_idx = win_size_clip / 8 - 2
+ratio = reg_siir_blending_ratio[blend_ratio_idx]
+
+blend_iir_avg = (ratio * blend_dir_avg + (64 - ratio) * avg_u) / 64
+```
+
+### 混合因子核
+
+```python
 blend_factor_2x2_h = [
     [0, 0, 0, 0, 0],
     [0, 0, 0, 0, 0],
@@ -184,57 +219,24 @@ blend_factor_2x2_v = [
     [0, 0, 1, 0, 0],
     [0, 0, 0, 0, 0]
 ]
+```
 
-if ( grad_h(i, j) >= grad_v(i, j) )
-    blend_factor_2x2 = blend_factor_2x2_h
-else
-    blend_factor_2x2 = blend_factor_2x2_v
+### 最终混合
 
-blend_factor_3x3 = [
-    [0, 0, 0, 0, 0],
-    [0, 4, 4, 4, 0],
-    [0, 4, 4, 4, 0],
-    [0, 4, 4, 4, 0],
-    [0, 0, 0, 0, 0]
-]
+```
+win_size_remain_8 = win_size_clip - (win_size_clip >> 3)
+blend_uv = blend0_uv * win_size_remain_8 + blend1_uv * (8 - win_size_remain_8)
+```
 
-blend_factor_4x4 = [
-    [1, 2, 2, 2, 1],
-    [1, 4, 4, 4, 2],
-    [1, 4, 4, 4, 2],
-    [1, 4, 4, 4, 2],
-    [1, 2, 2, 2, 1],
-]
+---
 
-blend_factor_5x5 = [
-    [1, 1, 1, 1, 1],
-    [1, 1, 1, 1, 1],
-    [1, 1, 1, 1, 1],
-    [1, 1, 1, 1, 1],
-    [1, 1, 1, 1, 1]
-]
+## 参数配置
 
-if (win_size_clip(i, j) < 16)
-    blend0_factor = zeros(5, 5)
-    blend1_factor = blend_factor_2x2
-if (win_size_clip(i, j) >= reg_win_size_thresh0 && win_size_clip(i, j) < reg_win_size_thresh1) 
-    blend0_factor = blend_factor_2x2
-    blend1_factor = blend_factor_3x3
-if (win_size_clip(i, j) >= reg_win_size_thresh1 && win_size_clip(i, j) < reg_win_size_thresh2) 
-    blend0_factor = blend_factor_3x3
-    blend1_factor = blend_factor_4x4
-if (win_size_clip(i, j) >= reg_win_size_thresh2 && win_size_clip(i, j) < reg_win_size_thresh3) 
-    blend0_factor = blend_factor_4x4
-    blend1_factor = blend_factor_5x5
-if (win_size_clip(i, j) >= reg_win_size_thresh3)
-    blend0_factor = blend_factor_5x5
-    blend1_factor = zeros(5, 5)
-
-blend0_add_avg(i, j) = blend0_iir_avg(i, j) * blend0_factor
-blend1_add_avg(i, j) = blend1_iir_avg(i, j) * blend1_factor
-
-blend0_uv_5x5 = blend0_iir_avg(i, j) * blend0_factor + （ （4-blend0_factor) * src_uv_5x5(i, j) ) 
-blend1_uv_5x5 = blend1_iir_avg(i, j) * blend1_factor + （ （4-blend1_factor) * src_uv_5x5(i, j) ) 
-
-win_size_clip_remain_8 = win_size_clip - (win_size_clip >> 3)
-blend_uv_5x5(i, j) = blend0_uv_5x5(i, j)*win_size_clip_remain_8 + blend1_uv_5x5(i, j)*(8-win_size_clip_remain_8)
+| 参数 | 默认值 | 描述 |
+|------|--------|------|
+| reg_win_size_thresh0 | 16 | 窗口大小阈值 0 |
+| reg_win_size_thresh1 | 24 | 窗口大小阈值 1 |
+| reg_win_size_thresh2 | 32 | 窗口大小阈值 2 |
+| reg_win_size_thresh3 | 40 | 窗口大小阈值 3 |
+| reg_siir_win_size_clip_y | [15, 23, 31, 39] | 梯度裁剪阈值 |
+| reg_siir_blending_ratio | [32, 32, 32, 32] | IIR 混合比例 |
