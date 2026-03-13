@@ -3,11 +3,13 @@
 // Description: Stage 4 - IIR filtering and final output blending
 //              Pure Verilog-2001 compatible
 //              Pipeline stages: 3 cycles
+//              Fully parameterized for resolution and data width
 //-----------------------------------------------------------------------------
 
 module stage4_iir_blend #(
-    parameter DATA_WIDTH = 8,
-    parameter WIN_SIZE_WIDTH = 6
+    parameter DATA_WIDTH     = 10,                      // Pixel data width
+    parameter GRAD_WIDTH     = 14,                      // Gradient width
+    parameter WIN_SIZE_WIDTH = 6                        // Window size parameter width
 )(
     input  wire                        clk,
     input  wire                        rst_n,
@@ -19,7 +21,7 @@ module stage4_iir_blend #(
     input  wire                        stage3_valid,
 
     // Stage 1 outputs (for gradient comparison)
-    input  wire [11:0]                 grad_h, grad_v,  // GRAD_WIDTH = 12
+    input  wire [GRAD_WIDTH-1:0]       grad_h, grad_v,
 
     // Stage 2 outputs for IIR blending
     input  wire [DATA_WIDTH-1:0]       avg0_u, avg1_u,

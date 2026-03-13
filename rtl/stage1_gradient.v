@@ -3,12 +3,15 @@
 // Description: Stage 1 - Sobel gradient calculation and window size determination
 //              Refactored to use common modules and combinational + pipe pattern
 //              Pipeline stages: 4 cycles
+//              Fully parameterized for resolution and data width
 //-----------------------------------------------------------------------------
 
 module stage1_gradient #(
-    parameter DATA_WIDTH = 8,
-    parameter GRAD_WIDTH = 12,
-    parameter WIN_SIZE_WIDTH = 6
+    parameter DATA_WIDTH     = 10,                      // Pixel data width
+    parameter GRAD_WIDTH     = 14,                      // Gradient width (DATA_WIDTH + margin)
+    parameter WIN_SIZE_WIDTH = 6,                       // Window size parameter width
+    parameter PIC_WIDTH_BITS  = 14,                     // log2(MAX_WIDTH) + 1
+    parameter PIC_HEIGHT_BITS = 13                      // log2(MAX_HEIGHT) + 1
 )(
     input  wire                        clk,
     input  wire                        rst_n,
@@ -22,21 +25,21 @@ module stage1_gradient #(
     input  wire [DATA_WIDTH-1:0]       window_4_0, window_4_1, window_4_2, window_4_3, window_4_4,
     input  wire                        window_valid,
 
-    // Configuration
-    input  wire [7:0]                  win_size_clip_y_0,
-    input  wire [7:0]                  win_size_clip_y_1,
-    input  wire [7:0]                  win_size_clip_y_2,
-    input  wire [7:0]                  win_size_clip_y_3,
+    // Configuration (parameterized width)
+    input  wire [DATA_WIDTH-1:0]       win_size_clip_y_0,
+    input  wire [DATA_WIDTH-1:0]       win_size_clip_y_1,
+    input  wire [DATA_WIDTH-1:0]       win_size_clip_y_2,
+    input  wire [DATA_WIDTH-1:0]       win_size_clip_y_3,
     input  wire [7:0]                  win_size_clip_sft_0,
     input  wire [7:0]                  win_size_clip_sft_1,
     input  wire [7:0]                  win_size_clip_sft_2,
     input  wire [7:0]                  win_size_clip_sft_3,
 
-    // Position info for boundary handling
-    input  wire [15:0]                 pixel_x,
-    input  wire [15:0]                 pixel_y,
-    input  wire [15:0]                 pic_width_m1,
-    input  wire [15:0]                 pic_height_m1,
+    // Position info for boundary handling (parameterized width)
+    input  wire [PIC_WIDTH_BITS-1:0]   pixel_x,
+    input  wire [PIC_HEIGHT_BITS-1:0]  pixel_y,
+    input  wire [PIC_WIDTH_BITS-1:0]   pic_width_m1,
+    input  wire [PIC_HEIGHT_BITS-1:0]  pic_height_m1,
 
     // Outputs
     output reg  [GRAD_WIDTH-1:0]       grad_h,
@@ -159,13 +162,13 @@ module stage1_gradient #(
     reg [WIN_SIZE_WIDTH-1:0] win_size_lut_comb;
 
     always @(*) begin
-        if (grad_max_s3 < {4'b0, win_size_clip_y_0})
+        if (grad_max_s3 < {{(GRAD_WIDTH-DATA_WIDTH){1'b0}}, win_size_clip_y_0})
             win_size_lut_comb = 6'd16;
-        else if (grad_max_s3 < {4'b0, win_size_clip_y_1})
+        else if (grad_max_s3 < {{(GRAD_WIDTH-DATA_WIDTH){1'b0}}, win_size_clip_y_1})
             win_size_lut_comb = 6'd24;
-        else if (grad_max_s3 < {4'b0, win_size_clip_y_2})
+        else if (grad_max_s3 < {{(GRAD_WIDTH-DATA_WIDTH){1'b0}}, win_size_clip_y_2})
             win_size_lut_comb = 6'd32;
-        else if (grad_max_s3 < {4'b0, win_size_clip_y_3})
+        else if (grad_max_s3 < {{(GRAD_WIDTH-DATA_WIDTH){1'b0}}, win_size_clip_y_3})
             win_size_lut_comb = 6'd40;
         else
             win_size_lut_comb = 6'd40;

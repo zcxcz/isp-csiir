@@ -3,12 +3,13 @@
 // Description: Stage 2 - Multi-scale directional averaging
 //              Pure Verilog-2001 compatible
 //              Pipeline stages: 6 cycles
+//              Fully parameterized for resolution and data width
 //-----------------------------------------------------------------------------
 
 module stage2_directional_avg #(
-    parameter DATA_WIDTH = 8,
-    parameter ACC_WIDTH = 20,
-    parameter WIN_SIZE_WIDTH = 6
+    parameter DATA_WIDTH     = 10,                      // Pixel data width
+    parameter ACC_WIDTH      = 20,                      // Accumulator width
+    parameter WIN_SIZE_WIDTH = 6                        // Window size parameter width
 )(
     input  wire                        clk,
     input  wire                        rst_n,

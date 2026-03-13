@@ -3,11 +3,14 @@
 // Description: 5x5 sliding window line buffer for ISP-CSIIR
 //              Generates a 5x5 pixel window centered on current pixel
 //              Pure Verilog-2001 compatible
+//              Fully parameterized for resolution and data width
 //-----------------------------------------------------------------------------
 
 module isp_csiir_line_buffer #(
-    parameter IMG_WIDTH = 1920,
-    parameter DATA_WIDTH = 8
+    parameter IMG_WIDTH         = 5472,                     // Maximum image width
+    parameter DATA_WIDTH        = 10,                       // Pixel data width
+    parameter LINE_ADDR_WIDTH   = 14,                       // log2(IMG_WIDTH) + margin
+    parameter ROW_CNT_WIDTH     = 13                        // log2(IMG_HEIGHT) + margin
 )(
     input  wire                      clk,
     input  wire                      rst_n,
@@ -21,7 +24,7 @@ module isp_csiir_line_buffer #(
     input  wire [DATA_WIDTH-1:0]     din,
     input  wire                      din_valid,
 
-    // 5x5 window output (flattened: 25 pixels = 200 bits)
+    // 5x5 window output
     output wire [DATA_WIDTH-1:0]     window_0_0, window_0_1, window_0_2, window_0_3, window_0_4,
     output wire [DATA_WIDTH-1:0]     window_1_0, window_1_1, window_1_2, window_1_3, window_1_4,
     output wire [DATA_WIDTH-1:0]     window_2_0, window_2_1, window_2_2, window_2_3, window_2_4,
@@ -36,24 +39,33 @@ module isp_csiir_line_buffer #(
     `include "isp_csiir_defines.vh"
 
     // Local parameters
-    localparam NUM_LINES = 4;
-    localparam LINE_ADDR_WIDTH = 11;  // log2(1920) rounded up
+    localparam NUM_LINES = 4;                                   // Number of line buffers (for 5x5 window)
+    localparam ROW_CNT_BITS = ROW_CNT_WIDTH;                    // Row counter width
 
-    // Line buffer memory: 4 lines of pixels
+    //=========================================================================
+    // Line Buffer Memory
+    //=========================================================================
+    // 4 lines of pixels for 5x5 window generation
+    // For 8K 10-bit: 4 * 5472 * 10 = 218,880 bits per channel
     reg [DATA_WIDTH-1:0] line_mem_0 [0:IMG_WIDTH-1];
     reg [DATA_WIDTH-1:0] line_mem_1 [0:IMG_WIDTH-1];
     reg [DATA_WIDTH-1:0] line_mem_2 [0:IMG_WIDTH-1];
     reg [DATA_WIDTH-1:0] line_mem_3 [0:IMG_WIDTH-1];
 
-    // Write pointer
+    //=========================================================================
+    // Pointers and Counters
+    //=========================================================================
     reg [LINE_ADDR_WIDTH-1:0] wr_ptr;
     reg [LINE_ADDR_WIDTH-1:0] col_cnt;
-    reg [15:0] row_cnt;
+    reg [ROW_CNT_BITS-1:0]    row_cnt;
 
     // Line valid signals
     reg [NUM_LINES-1:0] line_valid;
 
-    // Shift registers for column pixels (5 rows)
+    //=========================================================================
+    // Shift Registers for 5x5 Window
+    //=========================================================================
+    // Vertical shift registers (column pipeline)
     reg [DATA_WIDTH-1:0] col_shift_0, col_shift_1, col_shift_2, col_shift_3, col_shift_4;
 
     // Horizontal shift registers for each row (5 taps per row)
@@ -63,22 +75,21 @@ module isp_csiir_line_buffer #(
     reg [DATA_WIDTH-1:0] row3_tap0, row3_tap1, row3_tap2, row3_tap3, row3_tap4;
     reg [DATA_WIDTH-1:0] row4_tap0, row4_tap1, row4_tap2, row4_tap3, row4_tap4;
 
-    // Internal signals for memory read
-    wire [DATA_WIDTH-1:0] mem_rd_0, mem_rd_1, mem_rd_2, mem_rd_3;
-
-    // Line buffer write and address logic
+    //=========================================================================
+    // Line Buffer Write and Address Logic
+    //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            wr_ptr    <= {LINE_ADDR_WIDTH{1'b0}};
-            col_cnt   <= {LINE_ADDR_WIDTH{1'b0}};
-            row_cnt   <= 16'd0;
+            wr_ptr     <= {LINE_ADDR_WIDTH{1'b0}};
+            col_cnt    <= {LINE_ADDR_WIDTH{1'b0}};
+            row_cnt    <= {ROW_CNT_BITS{1'b0}};
             line_valid <= 4'b0000;
         end else if (enable) begin
             if (din_valid) begin
                 // Write current pixel to line 0
                 line_mem_0[wr_ptr] <= din;
 
-                // Propagate through line buffers
+                // Propagate through line buffers (FIFO behavior)
                 if (line_valid[0])
                     line_mem_1[wr_ptr] <= line_mem_0[wr_ptr];
                 if (line_valid[1])
@@ -91,8 +102,8 @@ module isp_csiir_line_buffer #(
                     wr_ptr  <= {LINE_ADDR_WIDTH{1'b0}};
                     col_cnt <= {LINE_ADDR_WIDTH{1'b0}};
                     line_valid <= {line_valid[2:0], 1'b1};
-                    if (row_cnt < 16'hFFFF)
-                        row_cnt <= row_cnt + 16'd1;
+                    if (row_cnt < {ROW_CNT_BITS{1'b1}})
+                        row_cnt <= row_cnt + {{ROW_CNT_BITS-1{1'b0}}, 1'b1};
                 end else begin
                     wr_ptr  <= wr_ptr + {{LINE_ADDR_WIDTH-1{1'b0}}, 1'b1};
                     col_cnt <= col_cnt + {{LINE_ADDR_WIDTH-1{1'b0}}, 1'b1};
@@ -101,23 +112,25 @@ module isp_csiir_line_buffer #(
 
             // Reset on SOF
             if (sof) begin
-                wr_ptr    <= {LINE_ADDR_WIDTH{1'b0}};
-                col_cnt   <= {LINE_ADDR_WIDTH{1'b0}};
-                row_cnt   <= 16'd0;
+                wr_ptr     <= {LINE_ADDR_WIDTH{1'b0}};
+                col_cnt    <= {LINE_ADDR_WIDTH{1'b0}};
+                row_cnt    <= {ROW_CNT_BITS{1'b0}};
                 line_valid <= 4'b0000;
             end
         end
     end
 
-    // Column shift register (vertical pipeline)
+    //=========================================================================
+    // Column Shift Register (Vertical Pipeline)
+    //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            col_shift_0 <= {DATA_WIDTH{1'b0}};
-            col_shift_1 <= {DATA_WIDTH{1'b0}};
-            col_shift_2 <= {DATA_WIDTH{1'b0}};
-            col_shift_3 <= {DATA_WIDTH{1'b0}};
-            col_shift_4 <= {DATA_WIDTH{1'b0}};
-            window_valid <= 1'b0;
+            col_shift_0   <= {DATA_WIDTH{1'b0}};
+            col_shift_1   <= {DATA_WIDTH{1'b0}};
+            col_shift_2   <= {DATA_WIDTH{1'b0}};
+            col_shift_3   <= {DATA_WIDTH{1'b0}};
+            col_shift_4   <= {DATA_WIDTH{1'b0}};
+            window_valid  <= 1'b0;
         end else if (enable && din_valid) begin
             // Shift column data (newest at bottom, oldest at top)
             col_shift_0 <= col_shift_1;
@@ -127,13 +140,16 @@ module isp_csiir_line_buffer #(
             col_shift_4 <= din;
 
             // Window valid after 2 rows and 2 columns filled
-            window_valid <= (row_cnt >= 16'd2) && (col_cnt >= {{LINE_ADDR_WIDTH-1{1'b0}}, 2'd2});
+            window_valid <= (row_cnt >= {{ROW_CNT_BITS-2{1'b0}}, 2'd2}) &&
+                            (col_cnt >= {{LINE_ADDR_WIDTH-2{1'b0}}, 2'd2});
         end else begin
             window_valid <= 1'b0;
         end
     end
 
-    // Horizontal shift registers for each row
+    //=========================================================================
+    // Horizontal Shift Registers for Each Row
+    //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             // Row 0
@@ -204,7 +220,9 @@ module isp_csiir_line_buffer #(
         end
     end
 
-    // Output assignments (window[r][c] = row_r_tap_c)
+    //=========================================================================
+    // Output Assignments (window[r][c] = row_r_tap_c)
+    //=========================================================================
     // Row 0
     assign window_0_0 = row0_tap0;
     assign window_0_1 = row0_tap1;

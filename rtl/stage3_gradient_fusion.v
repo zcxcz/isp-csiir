@@ -3,11 +3,14 @@
 // Description: Stage 3 - Gradient sorting and weighted directional fusion
 //              Refactored to use combinational + pipe pattern
 //              Pipeline stages: 4 cycles
+//              Fully parameterized for resolution and data width
 //-----------------------------------------------------------------------------
 
 module stage3_gradient_fusion #(
-    parameter DATA_WIDTH = 8,
-    parameter GRAD_WIDTH = 12
+    parameter DATA_WIDTH      = 10,                      // Pixel data width
+    parameter GRAD_WIDTH      = 14,                      // Gradient width
+    parameter PIC_WIDTH_BITS  = 14,                      // log2(MAX_WIDTH) + 1
+    parameter PIC_HEIGHT_BITS = 13                       // log2(MAX_HEIGHT) + 1
 )(
     input  wire                        clk,
     input  wire                        rst_n,
@@ -22,11 +25,11 @@ module stage3_gradient_fusion #(
     input  wire [GRAD_WIDTH-1:0]       grad,
     input  wire [GRAD_WIDTH-1:0]       grad_h, grad_v,
 
-    // Position info for boundary handling
-    input  wire [15:0]                 pixel_x,
-    input  wire [15:0]                 pixel_y,
-    input  wire [15:0]                 pic_width_m1,
-    input  wire [15:0]                 pic_height_m1,
+    // Position info for boundary handling (parameterized width)
+    input  wire [PIC_WIDTH_BITS-1:0]   pixel_x,
+    input  wire [PIC_HEIGHT_BITS-1:0]  pixel_y,
+    input  wire [PIC_WIDTH_BITS-1:0]   pic_width_m1,
+    input  wire [PIC_HEIGHT_BITS-1:0]  pic_height_m1,
 
     // Outputs
     output reg  [DATA_WIDTH-1:0]       blend0_dir_avg,

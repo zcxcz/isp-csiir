@@ -2,6 +2,7 @@
 // Class: isp_csiir_ref_model
 // Description: Golden reference model for ISP-CSIIR algorithm
 //              Implements the exact algorithm from isp-csiir-algorithm-reference.md
+//              Fully parameterized for different resolutions and data widths
 //-----------------------------------------------------------------------------
 
 class isp_csiir_ref_model extends uvm_component;
@@ -14,9 +15,14 @@ class isp_csiir_ref_model extends uvm_component;
     // Configuration
     isp_csiir_config cfg;
 
-    // Line buffer for 5x5 window (simplified)
-    bit [7:0] line_buffer [0:4][0:1919];  // 5 lines for 1080p max width
-    bit [7:0] window_5x5 [0:4][0:4];
+    // Parameterized line buffer for 5x5 window
+    // Using dynamic arrays for flexibility
+    bit unsigned [] line_buffer_0;
+    bit unsigned [] line_buffer_1;
+    bit unsigned [] line_buffer_2;
+    bit unsigned [] line_buffer_3;
+    bit unsigned [] line_buffer_4;
+    bit [9:0] window_5x5 [0:4][0:4];  // 10-bit max
 
     // Internal state
     int pixel_x, pixel_y;
@@ -55,6 +61,14 @@ class isp_csiir_ref_model extends uvm_component;
         if (!uvm_config_db #(isp_csiir_config)::get(this, "", "config", cfg)) begin
             `uvm_warning("NOCONFIG", "Configuration not found, using defaults")
         end
+
+        // Initialize line buffers based on image width
+        line_buffer_0 = new[cfg.img_width];
+        line_buffer_1 = new[cfg.img_width];
+        line_buffer_2 = new[cfg.img_width];
+        line_buffer_3 = new[cfg.img_width];
+        line_buffer_4 = new[cfg.img_width];
+
         pixel_x = 0;
         pixel_y = 0;
         vsync_seen = 0;
@@ -74,8 +88,14 @@ class isp_csiir_ref_model extends uvm_component;
 
         if (!item.valid) return;
 
-        // Store pixel in line buffer
-        line_buffer[line_idx][pixel_x] = item.pixel_data;
+        // Store pixel in line buffer (round-robin)
+        case (line_idx)
+            0: line_buffer_0[pixel_x] = item.pixel_data;
+            1: line_buffer_1[pixel_x] = item.pixel_data;
+            2: line_buffer_2[pixel_x] = item.pixel_data;
+            3: line_buffer_3[pixel_x] = item.pixel_data;
+            4: line_buffer_4[pixel_x] = item.pixel_data;
+        endcase
 
         // Update position
         pixel_x++;
@@ -126,9 +146,9 @@ class isp_csiir_ref_model extends uvm_component;
         // Stage 4: IIR blend and output
         final_out = iir_blend(blend0_avg, blend1_avg, window_5x5[2][2], win_size_clip);
 
-        // Create result
+        // Create result - handle data width
         result = isp_csiir_pixel_item::type_id::create("result");
-        result.result_data  = final_out[7:0];
+        result.result_data  = final_out[cfg.data_width-1:0];
         result.result_valid = 1;
 
         return result;
@@ -143,10 +163,23 @@ class isp_csiir_ref_model extends uvm_component;
             for (int c = 0; c < 5; c++) begin
                 int col = pixel_x - 2 + c;
                 if (col >= 0 && col < cfg.img_width) begin
-                    window_5x5[r][c] = line_buffer[line][col];
+                    case (line)
+                        0: window_5x5[r][c] = line_buffer_0[col];
+                        1: window_5x5[r][c] = line_buffer_1[col];
+                        2: window_5x5[r][c] = line_buffer_2[col];
+                        3: window_5x5[r][c] = line_buffer_3[col];
+                        4: window_5x5[r][c] = line_buffer_4[col];
+                    endcase
                 end else begin
                     // Boundary handling: replicate
-                    window_5x5[r][c] = line_buffer[line][(col < 0) ? 0 : cfg.img_width - 1];
+                    int clamped_col = (col < 0) ? 0 : cfg.img_width - 1;
+                    case (line)
+                        0: window_5x5[r][c] = line_buffer_0[clamped_col];
+                        1: window_5x5[r][c] = line_buffer_1[clamped_col];
+                        2: window_5x5[r][c] = line_buffer_2[clamped_col];
+                        3: window_5x5[r][c] = line_buffer_3[clamped_col];
+                        4: window_5x5[r][c] = line_buffer_4[clamped_col];
+                    endcase
                 end
             end
         end
@@ -192,7 +225,6 @@ class isp_csiir_ref_model extends uvm_component;
                                    output int avg0_c, avg0_u, avg0_d, avg0_l, avg0_r,
                                    output int avg1_c, avg1_u, avg1_d, avg1_l, avg1_r);
         // Simplified implementation - use 3x3 and 5x5 kernels
-        // For brevity, we compute center averages only
         int sum0, sum1, cnt0, cnt1;
 
         // avg0: 3x3 center

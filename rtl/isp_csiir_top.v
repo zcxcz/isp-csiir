@@ -2,12 +2,18 @@
 // Module: isp_csiir_top
 // Description: Top module integrating all ISP-CSIIR pipeline stages
 //              Pure Verilog-2001 compatible
+//              Supports configurable resolution and data width
+//              Single-channel processing (instantiate multiple for YUV)
 //-----------------------------------------------------------------------------
 
 module isp_csiir_top #(
-    parameter IMG_WIDTH  = 1920,
-    parameter IMG_HEIGHT = 1080,
-    parameter DATA_WIDTH = 8
+    // Image dimensions (configurable for different resolutions)
+    parameter IMG_WIDTH    = 5472,                      // 8K width
+    parameter IMG_HEIGHT   = 3076,                      // 8K height
+    parameter DATA_WIDTH   = 10,                        // 10-bit per channel
+    parameter GRAD_WIDTH   = 14,                        // Gradient width (DATA_WIDTH + margin)
+    parameter LINE_ADDR_WIDTH = 14,                     // log2(IMG_WIDTH) + margin
+    parameter ROW_CNT_WIDTH = 13                        // log2(IMG_HEIGHT) + margin
 )(
     input  wire                      clk,
     input  wire                      rst_n,
@@ -37,9 +43,19 @@ module isp_csiir_top #(
 
     `include "isp_csiir_defines.vh"
 
-    // Register block signals
-    wire [15:0] pic_width_m1;
-    wire [15:0] pic_height_m1;
+    //=========================================================================
+    // Local Parameters
+    //=========================================================================
+    localparam WIN_SIZE_WIDTH = 6;
+    localparam ACC_WIDTH = DATA_WIDTH + 10;
+    localparam PIC_WIDTH_BITS = $clog2(IMG_WIDTH) + 1;
+    localparam PIC_HEIGHT_BITS = $clog2(IMG_HEIGHT) + 1;
+
+    //=========================================================================
+    // Register Block Signals
+    //=========================================================================
+    wire [PIC_WIDTH_BITS-1:0]  pic_width_m1;
+    wire [PIC_HEIGHT_BITS-1:0] pic_height_m1;
     wire [15:0] win_size_thresh0;
     wire [15:0] win_size_thresh1;
     wire [15:0] win_size_thresh2;
@@ -48,10 +64,10 @@ module isp_csiir_top #(
     wire [7:0]  blending_ratio_1;
     wire [7:0]  blending_ratio_2;
     wire [7:0]  blending_ratio_3;
-    wire [7:0]  win_size_clip_y_0;
-    wire [7:0]  win_size_clip_y_1;
-    wire [7:0]  win_size_clip_y_2;
-    wire [7:0]  win_size_clip_y_3;
+    wire [DATA_WIDTH-1:0] win_size_clip_y_0;
+    wire [DATA_WIDTH-1:0] win_size_clip_y_1;
+    wire [DATA_WIDTH-1:0] win_size_clip_y_2;
+    wire [DATA_WIDTH-1:0] win_size_clip_y_3;
     wire [7:0]  win_size_clip_sft_0;
     wire [7:0]  win_size_clip_sft_1;
     wire [7:0]  win_size_clip_sft_2;
@@ -64,7 +80,9 @@ module isp_csiir_top #(
     wire        bypass;
     wire        regs_updated;
 
-    // Line buffer window outputs
+    //=========================================================================
+    // Line Buffer Window Outputs
+    //=========================================================================
     wire [DATA_WIDTH-1:0] window_0_0, window_0_1, window_0_2, window_0_3, window_0_4;
     wire [DATA_WIDTH-1:0] window_1_0, window_1_1, window_1_2, window_1_3, window_1_4;
     wire [DATA_WIDTH-1:0] window_2_0, window_2_1, window_2_2, window_2_3, window_2_4;
@@ -72,52 +90,69 @@ module isp_csiir_top #(
     wire [DATA_WIDTH-1:0] window_4_0, window_4_1, window_4_2, window_4_3, window_4_4;
     wire                  window_valid;
 
-    // Stage 1 outputs
-    wire [11:0]          grad_h_s1;
-    wire [11:0]          grad_v_s1;
-    wire [11:0]          grad_s1;
-    wire [5:0]           win_size_clip_s1;
-    wire                 stage1_valid;
+    //=========================================================================
+    // Stage 1 Outputs
+    //=========================================================================
+    wire [GRAD_WIDTH-1:0]          grad_h_s1;
+    wire [GRAD_WIDTH-1:0]          grad_v_s1;
+    wire [GRAD_WIDTH-1:0]          grad_s1;
+    wire [WIN_SIZE_WIDTH-1:0]      win_size_clip_s1;
+    wire                           stage1_valid;
 
-    // Stage 2 outputs
+    //=========================================================================
+    // Stage 2 Outputs
+    //=========================================================================
     wire [DATA_WIDTH-1:0] avg0_c, avg0_u, avg0_d, avg0_l, avg0_r;
     wire [DATA_WIDTH-1:0] avg1_c, avg1_u, avg1_d, avg1_l, avg1_r;
     wire                  stage2_valid;
 
-    // Stage 3 outputs
+    //=========================================================================
+    // Stage 3 Outputs
+    //=========================================================================
     wire [DATA_WIDTH-1:0] blend0_dir_avg;
     wire [DATA_WIDTH-1:0] blend1_dir_avg;
     wire                  stage3_valid;
 
-    // Stage 4 outputs (final output)
+    //=========================================================================
+    // Stage 4 Outputs (Final)
+    //=========================================================================
     wire [DATA_WIDTH-1:0] dout_final;
     wire                  dout_final_valid;
 
-    // Video timing signals
-    reg                   sof_reg;  // Start of frame
-    reg                   eol_reg;  // End of line
-    reg [15:0]            pixel_x;
-    reg [15:0]            pixel_y;
-    reg [15:0]            pixel_cnt;
-    reg [15:0]            line_cnt;
+    //=========================================================================
+    // Video Timing Signals
+    //=========================================================================
+    reg                   sof_reg;
+    reg                   eol_reg;
+    reg [PIC_WIDTH_BITS-1:0]  pixel_x;
+    reg [PIC_HEIGHT_BITS-1:0] pixel_y;
+    reg [PIC_WIDTH_BITS-1:0]  pixel_cnt;
+    reg [PIC_HEIGHT_BITS-1:0] line_cnt;
     reg                   vsync_d1, vsync_d2;
     reg                   hsync_d1, hsync_d2;
 
-    // Bypass path
-    reg [DATA_WIDTH-1:0]  din_delay [0:20];  // Pipeline delay for bypass
+    //=========================================================================
+    // Bypass Path
+    //=========================================================================
+    reg [DATA_WIDTH-1:0]  din_delay [0:20];
     reg [20:0]            din_valid_delay;
     reg                   vsync_delay [0:20];
     reg                   hsync_delay [0:20];
     integer               i;
 
-    // Boundary mode
+    //=========================================================================
+    // Boundary Mode
+    //=========================================================================
     wire [1:0]            boundary_mode = 2'b01;  // Replicate mode
 
-    //--------------------------------------------------------------------------
+    //=========================================================================
     // Register Block Instance
-    //--------------------------------------------------------------------------
+    //=========================================================================
     isp_csiir_reg_block #(
-        .APB_ADDR_WIDTH(8)
+        .APB_ADDR_WIDTH(8),
+        .PIC_WIDTH_BITS(PIC_WIDTH_BITS),
+        .PIC_HEIGHT_BITS(PIC_HEIGHT_BITS),
+        .DATA_WIDTH(DATA_WIDTH)
     ) u_reg_block (
         .clk              (clk),
         .rst_n            (rst_n),
@@ -156,9 +191,9 @@ module isp_csiir_top #(
         .regs_updated     (regs_updated)
     );
 
-    //--------------------------------------------------------------------------
+    //=========================================================================
     // Video Timing Generation
-    //--------------------------------------------------------------------------
+    //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             vsync_d1 <= 1'b0;
@@ -167,10 +202,10 @@ module isp_csiir_top #(
             hsync_d2 <= 1'b0;
             sof_reg  <= 1'b0;
             eol_reg  <= 1'b0;
-            pixel_x  <= 16'd0;
-            pixel_y  <= 16'd0;
-            pixel_cnt <= 16'd0;
-            line_cnt <= 16'd0;
+            pixel_x  <= {PIC_WIDTH_BITS{1'b0}};
+            pixel_y  <= {PIC_HEIGHT_BITS{1'b0}};
+            pixel_cnt <= {PIC_WIDTH_BITS{1'b0}};
+            line_cnt <= {PIC_HEIGHT_BITS{1'b0}};
         end else begin
             vsync_d1 <= vsync;
             vsync_d2 <= vsync_d1;
@@ -185,31 +220,33 @@ module isp_csiir_top #(
 
             // Pixel and line counters
             if (sof_reg) begin
-                pixel_cnt <= 16'd0;
-                line_cnt <= 16'd0;
-                pixel_x <= 16'd0;
-                pixel_y <= 16'd0;
+                pixel_cnt <= {PIC_WIDTH_BITS{1'b0}};
+                line_cnt <= {PIC_HEIGHT_BITS{1'b0}};
+                pixel_x <= {PIC_WIDTH_BITS{1'b0}};
+                pixel_y <= {PIC_HEIGHT_BITS{1'b0}};
             end else if (din_valid) begin
                 if (pixel_cnt >= pic_width_m1) begin
-                    pixel_cnt <= 16'd0;
-                    pixel_x <= 16'd0;
+                    pixel_cnt <= {PIC_WIDTH_BITS{1'b0}};
+                    pixel_x <= {PIC_WIDTH_BITS{1'b0}};
                     if (line_cnt < pic_height_m1)
-                        line_cnt <= line_cnt + 16'd1;
-                    pixel_y <= line_cnt + 16'd1;
+                        line_cnt <= line_cnt + {{PIC_HEIGHT_BITS-1{1'b0}}, 1'b1};
+                    pixel_y <= line_cnt + {{PIC_HEIGHT_BITS-1{1'b0}}, 1'b1};
                 end else begin
-                    pixel_cnt <= pixel_cnt + 16'd1;
-                    pixel_x <= pixel_cnt + 16'd1;
+                    pixel_cnt <= pixel_cnt + {{PIC_WIDTH_BITS-1{1'b0}}, 1'b1};
+                    pixel_x <= pixel_cnt + {{PIC_WIDTH_BITS-1{1'b0}}, 1'b1};
                 end
             end
         end
     end
 
-    //--------------------------------------------------------------------------
+    //=========================================================================
     // Line Buffer Instance
-    //--------------------------------------------------------------------------
+    //=========================================================================
     isp_csiir_line_buffer #(
-        .IMG_WIDTH (IMG_WIDTH),
-        .DATA_WIDTH(DATA_WIDTH)
+        .IMG_WIDTH(IMG_WIDTH),
+        .DATA_WIDTH(DATA_WIDTH),
+        .LINE_ADDR_WIDTH(LINE_ADDR_WIDTH),
+        .ROW_CNT_WIDTH(ROW_CNT_WIDTH)
     ) u_line_buffer (
         .clk           (clk),
         .rst_n         (rst_n),
@@ -247,13 +284,15 @@ module isp_csiir_top #(
         .boundary_mode (boundary_mode)
     );
 
-    //--------------------------------------------------------------------------
+    //=========================================================================
     // Stage 1: Gradient Calculation
-    //--------------------------------------------------------------------------
+    //=========================================================================
     stage1_gradient #(
-        .DATA_WIDTH    (DATA_WIDTH),
-        .GRAD_WIDTH    (12),
-        .WIN_SIZE_WIDTH(6)
+        .DATA_WIDTH(DATA_WIDTH),
+        .GRAD_WIDTH(GRAD_WIDTH),
+        .WIN_SIZE_WIDTH(WIN_SIZE_WIDTH),
+        .PIC_WIDTH_BITS(PIC_WIDTH_BITS),
+        .PIC_HEIGHT_BITS(PIC_HEIGHT_BITS)
     ) u_stage1 (
         .clk              (clk),
         .rst_n            (rst_n),
@@ -303,13 +342,13 @@ module isp_csiir_top #(
         .stage1_valid     (stage1_valid)
     );
 
-    //--------------------------------------------------------------------------
+    //=========================================================================
     // Stage 2: Directional Averaging
-    //--------------------------------------------------------------------------
+    //=========================================================================
     stage2_directional_avg #(
-        .DATA_WIDTH    (DATA_WIDTH),
-        .ACC_WIDTH     (20),
-        .WIN_SIZE_WIDTH(6)
+        .DATA_WIDTH(DATA_WIDTH),
+        .ACC_WIDTH(ACC_WIDTH),
+        .WIN_SIZE_WIDTH(WIN_SIZE_WIDTH)
     ) u_stage2 (
         .clk              (clk),
         .rst_n            (rst_n),
@@ -359,12 +398,12 @@ module isp_csiir_top #(
         .stage2_valid     (stage2_valid)
     );
 
-    //--------------------------------------------------------------------------
+    //=========================================================================
     // Stage 3: Gradient Fusion
-    //--------------------------------------------------------------------------
+    //=========================================================================
     stage3_gradient_fusion #(
-        .DATA_WIDTH (DATA_WIDTH),
-        .GRAD_WIDTH (12)
+        .DATA_WIDTH(DATA_WIDTH),
+        .GRAD_WIDTH(GRAD_WIDTH)
     ) u_stage3 (
         .clk             (clk),
         .rst_n           (rst_n),
@@ -392,12 +431,13 @@ module isp_csiir_top #(
         .stage3_valid    (stage3_valid)
     );
 
-    //--------------------------------------------------------------------------
+    //=========================================================================
     // Stage 4: IIR Blend and Output
-    //--------------------------------------------------------------------------
+    //=========================================================================
     stage4_iir_blend #(
-        .DATA_WIDTH    (DATA_WIDTH),
-        .WIN_SIZE_WIDTH(6)
+        .DATA_WIDTH(DATA_WIDTH),
+        .GRAD_WIDTH(GRAD_WIDTH),
+        .WIN_SIZE_WIDTH(WIN_SIZE_WIDTH)
     ) u_stage4 (
         .clk              (clk),
         .rst_n            (rst_n),
@@ -423,9 +463,9 @@ module isp_csiir_top #(
         .dout_valid       (dout_final_valid)
     );
 
-    //--------------------------------------------------------------------------
+    //=========================================================================
     // Bypass Path (delay line to match pipeline latency)
-    //--------------------------------------------------------------------------
+    //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             for (i = 0; i <= 20; i = i + 1) begin
@@ -449,12 +489,12 @@ module isp_csiir_top #(
         end
     end
 
-    //--------------------------------------------------------------------------
+    //=========================================================================
     // Output Mux (bypass or processed)
-    //--------------------------------------------------------------------------
+    //=========================================================================
     assign dout       = bypass ? din_delay[17] : dout_final;
     assign dout_valid = bypass ? din_valid_delay[17] : dout_final_valid;
-    assign dout_vsync = bypass ? vsync_delay[17] : vsync;  // Simplified
-    assign dout_hsync = bypass ? hsync_delay[17] : hsync;  // Simplified
+    assign dout_vsync = bypass ? vsync_delay[17] : vsync;
+    assign dout_hsync = bypass ? hsync_delay[17] : hsync;
 
 endmodule
