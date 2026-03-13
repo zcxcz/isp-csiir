@@ -148,6 +148,26 @@ video:
 # Run all tests
 all_tests: smoke random video
 
+# Simple testbench for Icarus Verilog (no UVM)
+simple_tb: $(RTL_SOURCES)
+	@echo "Running simple testbench with $(SIM)..."
+ifeq ($(SIM),iverilog)
+	@mkdir -p $(BUILD_DIR)
+	$(IVERILOG) $(IVERILOG_FLAGS) -o $(BUILD_DIR)/isp_csiir_sim \
+		$(RTL_SOURCES) verification/tb/isp_csiir_simple_tb.v
+	cd $(BUILD_DIR) && ./isp_csiir_sim
+else
+	@echo "Simple testbench is designed for iverilog. Use: make simple_tb SIM=iverilog"
+endif
+
+# View waveform
+view_wave:
+ifeq ($(SIM),iverilog)
+	gtkwave $(BUILD_DIR)/isp_csiir_simple_tb.vcd &
+else
+	@echo "Use: make wave SIM=vcs for VCS waveform"
+endif
+
 # Clean build artifacts
 clean:
 	rm -rf $(BUILD_DIR)

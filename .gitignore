@@ -1,0 +1,27 @@
+# Build artifacts
+build/
+*.log
+syntax_check.log
+
+# Simulation outputs
+*.vcd
+*.vvp
+simv*
+DVE*
+*.vpd
+*.key
+*.vdb
+csrc/
+INCA_libs/
+irun.key
+irun.log
+*.history
+
+# IDE/Editor
+*.swp
+*~
+.vscode/
+.idea/
+
+# OMC state (local)
+.omc/
