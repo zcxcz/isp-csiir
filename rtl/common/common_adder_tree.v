@@ -2,7 +2,7 @@
 // Module: common_adder_tree
 // Description: Balanced adder tree for multi-input summation
 //              Optimized for timing by using tree structure
-//              Supports configurable number of inputs and pipeline stages
+//              Pure Verilog-2001 compatible (flattened input bus)
 //-----------------------------------------------------------------------------
 
 module common_adder_tree #(
@@ -13,7 +13,7 @@ module common_adder_tree #(
     input  wire                          clk,
     input  wire                          rst_n,
     input  wire                          enable,
-    input  wire [DATA_WIDTH-1:0]         din [0:NUM_INPUTS-1],
+    input  wire [NUM_INPUTS*DATA_WIDTH-1:0] din,  // Flattened input bus
     input  wire                          valid_in,
 
     output wire [DATA_WIDTH+$clog2(NUM_INPUTS)-1:0] dout,
@@ -21,7 +21,7 @@ module common_adder_tree #(
 );
 
     // Local parameters
-    localparam TREE_DEPTH = $clog2(NUM_INPUTS);
+    localparam TREE_DEPTH = (NUM_INPUTS > 1) ? $clog2(NUM_INPUTS) : 1;
     localparam OUT_WIDTH  = DATA_WIDTH + TREE_DEPTH;
 
     // Calculate next power of 2
@@ -35,20 +35,21 @@ module common_adder_tree #(
         end
     endfunction
 
-    localparam NUM_PADDED = next_pow2(NUM_INPUTS);
+    localparam NUM_PADDED = (NUM_INPUTS > 1) ? next_pow2(NUM_INPUTS) : 1;
 
-    // Internal signals for each tree level
-    reg [OUT_WIDTH-1:0] level_data [0:TREE_DEPTH][0:NUM_PADDED-1];
-    reg                 valid_pipe [0:TREE_DEPTH];
+    // Internal signals - use wires for each level
+    wire [OUT_WIDTH-1:0] level0_data [0:NUM_PADDED-1];
+    reg [OUT_WIDTH-1:0] level_data [1:TREE_DEPTH][0:NUM_PADDED-1];
+    reg                  valid_pipe [0:TREE_DEPTH];
 
-    // Input padding and width expansion
+    // Extract inputs from flattened bus
     genvar i;
     generate
         for (i = 0; i < NUM_PADDED; i = i + 1) begin : gen_input_pad
             if (i < NUM_INPUTS)
-                assign level_data[0][i] = {{TREE_DEPTH{1'b0}}, din[i]};
+                assign level0_data[i] = {{TREE_DEPTH{1'b0}}, din[(i+1)*DATA_WIDTH-1 : i*DATA_WIDTH]};
             else
-                assign level_data[0][i] = {(OUT_WIDTH){1'b0}};
+                assign level0_data[i] = {(OUT_WIDTH){1'b0}};
         end
     endgenerate
 
@@ -74,14 +75,23 @@ module common_adder_tree #(
                         if (!rst_n) begin
                             level_data[level+1][pair] <= {(OUT_WIDTH){1'b0}};
                         end else if (enable && valid_pipe[level]) begin
-                            level_data[level+1][pair] <=
-                                level_data[level][pair*2] + level_data[level][pair*2+1];
+                            if (level == 0)
+                                level_data[level+1][pair] <= level0_data[pair*2] + level0_data[pair*2+1];
+                            else
+                                level_data[level+1][pair] <= level_data[level][pair*2] + level_data[level][pair*2+1];
                         end
                     end
                 end else begin : gen_combinational
-                    always @(*) begin
-                        level_data[level+1][pair] =
-                            level_data[level][pair*2] + level_data[level][pair*2+1];
+                    // Combinational not supported in this version - use pipelined
+                    always @(posedge clk or negedge rst_n) begin
+                        if (!rst_n) begin
+                            level_data[level+1][pair] <= {(OUT_WIDTH){1'b0}};
+                        end else if (enable && valid_pipe[level]) begin
+                            if (level == 0)
+                                level_data[level+1][pair] <= level0_data[pair*2] + level0_data[pair*2+1];
+                            else
+                                level_data[level+1][pair] <= level_data[level][pair*2] + level_data[level][pair*2+1];
+                        end
                     end
                 end
             end
@@ -99,7 +109,7 @@ module common_adder_tree #(
     endgenerate
 
     // Output assignment
-    assign dout     = level_data[TREE_DEPTH][0];
+    assign dout     = (TREE_DEPTH > 0) ? level_data[TREE_DEPTH][0] : level0_data[0];
     assign valid_out = valid_pipe[TREE_DEPTH];
 
 endmodule

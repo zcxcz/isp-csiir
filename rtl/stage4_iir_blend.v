@@ -68,6 +68,11 @@ module stage4_iir_blend #(
     reg [WIN_SIZE_WIDTH-1:0] win_size_clip_s3;
     reg valid_s3;
 
+    // Blend factor registers (must be declared outside always block for Verilog-2001)
+    reg [3:0] blend_factor;
+    reg [3:0] blend_factor1;
+    reg [WIN_SIZE_WIDTH:0] win_size_remain_8;
+
     // Select blending ratio based on window size
     reg [7:0] current_blend_ratio;
 
@@ -156,8 +161,6 @@ module stage4_iir_blend #(
 
             // Simplified blend: mix IIR result with center pixel
             // Using factor based on window size
-            reg [3:0] blend_factor;
-            reg [3:0] blend_factor1;
 
             // Select blend factors based on window size thresholds
             if (win_size_clip_s2 < win_size_thresh0[5:0]) begin
@@ -208,7 +211,6 @@ module stage4_iir_blend #(
             dout_valid <= 1'b0;
         end else if (enable && valid_s3) begin
             // Calculate win_size_remain_8
-            reg [WIN_SIZE_WIDTH:0] win_size_remain_8;
             win_size_remain_8 = win_size_clip_s3 - (win_size_clip_s3 >> 3);
 
             // Clamp to valid range

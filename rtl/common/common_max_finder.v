@@ -2,6 +2,7 @@
 // Module: common_max_finder
 // Description: Find maximum value among multiple inputs using tree structure
 //              Optimized for timing with optional pipelining
+//              Pure Verilog-2001 compatible (flattened input bus)
 //-----------------------------------------------------------------------------
 
 module common_max_finder #(
@@ -12,7 +13,7 @@ module common_max_finder #(
     input  wire                          clk,
     input  wire                          rst_n,
     input  wire                          enable,
-    input  wire [DATA_WIDTH-1:0]         din [0:NUM_INPUTS-1],
+    input  wire [NUM_INPUTS*DATA_WIDTH-1:0] din,  // Flattened input bus
     input  wire                          valid_in,
 
     output wire [DATA_WIDTH-1:0]         max_out,
@@ -20,7 +21,7 @@ module common_max_finder #(
 );
 
     // Local parameters
-    localparam TREE_DEPTH = $clog2(NUM_INPUTS);
+    localparam TREE_DEPTH = (NUM_INPUTS > 1) ? $clog2(NUM_INPUTS) : 1;
 
     // Calculate next power of 2
     function integer next_pow2;
@@ -33,20 +34,21 @@ module common_max_finder #(
         end
     endfunction
 
-    localparam NUM_PADDED = next_pow2(NUM_INPUTS);
+    localparam NUM_PADDED = (NUM_INPUTS > 1) ? next_pow2(NUM_INPUTS) : 1;
 
     // Internal signals
-    reg [DATA_WIDTH-1:0] level_max [0:TREE_DEPTH][0:NUM_PADDED-1];
+    wire [DATA_WIDTH-1:0] level0_max [0:NUM_PADDED-1];
+    reg [DATA_WIDTH-1:0] level_max [1:TREE_DEPTH][0:NUM_PADDED-1];
     reg                  valid_pipe [0:TREE_DEPTH];
 
-    // Input padding
+    // Extract inputs from flattened bus
     genvar i;
     generate
         for (i = 0; i < NUM_PADDED; i = i + 1) begin : gen_input_pad
             if (i < NUM_INPUTS)
-                assign level_max[0][i] = din[i];
+                assign level0_max[i] = din[(i+1)*DATA_WIDTH-1 : i*DATA_WIDTH];
             else
-                assign level_max[0][i] = {DATA_WIDTH{1'b0}};
+                assign level0_max[i] = {DATA_WIDTH{1'b0}};
         end
     endgenerate
 
@@ -72,16 +74,33 @@ module common_max_finder #(
                         if (!rst_n) begin
                             level_max[level+1][pair] <= {DATA_WIDTH{1'b0}};
                         end else if (enable && valid_pipe[level]) begin
-                            level_max[level+1][pair] <=
-                                (level_max[level][pair*2] > level_max[level][pair*2+1]) ?
-                                level_max[level][pair*2] : level_max[level][pair*2+1];
+                            if (level == 0) begin
+                                level_max[level+1][pair] <=
+                                    (level0_max[pair*2] > level0_max[pair*2+1]) ?
+                                    level0_max[pair*2] : level0_max[pair*2+1];
+                            end else begin
+                                level_max[level+1][pair] <=
+                                    (level_max[level][pair*2] > level_max[level][pair*2+1]) ?
+                                    level_max[level][pair*2] : level_max[level][pair*2+1];
+                            end
                         end
                     end
                 end else begin : gen_combinational
-                    always @(*) begin
-                        level_max[level+1][pair] =
-                            (level_max[level][pair*2] > level_max[level][pair*2+1]) ?
-                            level_max[level][pair*2] : level_max[level][pair*2+1];
+                    // Combinational not supported in this version
+                    always @(posedge clk or negedge rst_n) begin
+                        if (!rst_n) begin
+                            level_max[level+1][pair] <= {DATA_WIDTH{1'b0}};
+                        end else if (enable && valid_pipe[level]) begin
+                            if (level == 0) begin
+                                level_max[level+1][pair] <=
+                                    (level0_max[pair*2] > level0_max[pair*2+1]) ?
+                                    level0_max[pair*2] : level0_max[pair*2+1];
+                            end else begin
+                                level_max[level+1][pair] <=
+                                    (level_max[level][pair*2] > level_max[level][pair*2+1]) ?
+                                    level_max[level][pair*2] : level_max[level][pair*2+1];
+                            end
+                        end
                     end
                 end
             end
@@ -97,7 +116,7 @@ module common_max_finder #(
     endgenerate
 
     // Output assignment
-    assign max_out   = level_max[TREE_DEPTH][0];
+    assign max_out   = (TREE_DEPTH > 0) ? level_max[TREE_DEPTH][0] : level0_max[0];
     assign valid_out = valid_pipe[TREE_DEPTH];
 
 endmodule

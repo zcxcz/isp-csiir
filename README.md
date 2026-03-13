@@ -23,7 +23,14 @@ isp-csiir/
 │   ├── stage1_gradient.v          # Stage 1: 梯度计算
 │   ├── stage2_directional_avg.v   # Stage 2: 方向性平均
 │   ├── stage3_gradient_fusion.v   # Stage 3: 梯度融合
-│   └── stage4_iir_blend.v         # Stage 4: IIR 混合
+│   ├── stage4_iir_blend.v         # Stage 4: IIR 混合
+│   └── common/                    # 通用可复用模块
+│       ├── common_pipe.v          # 流水寄存器
+│       ├── common_counter.v       # 计数器
+│       ├── common_fifo.v          # 同步 FIFO
+│       ├── common_adder_tree.v    # 平衡加法树
+│       ├── common_max_finder.v    # 最大值查找
+│       └── common_delay_line.v    # 延迟线
 ├── verification/                  # 验证环境
 │   ├── isp_csiir_pkg.sv           # UVM 包
 │   ├── tb/                        # 测试平台
@@ -105,6 +112,49 @@ make sim SIM=vcs TEST=isp_csiir_smoke_test
 - **Synopsys VCS** (推荐): `SIM=vcs`
 - **Mentor Questa**: `SIM=questa`
 - **Cadence Xcelium**: `SIM=xcelium`
+- **Icarus Verilog** (语法检查): `iverilog`
+
+### 使用 Icarus Verilog 语法检查
+
+```bash
+# 检查 RTL 语法
+iverilog -t null -g2001 -I rtl rtl/isp_csiir_top.v rtl/*.v rtl/common/*.v
+
+# 检查 common 模块
+iverilog -t null -g2001 rtl/common/*.v
+```
+
+## Common 模块
+
+通用可复用模块位于 `rtl/common/` 目录，遵循以下设计原则：
+
+### 模块列表
+
+| 模块 | 功能 | 关键参数 |
+|------|------|----------|
+| `common_pipe` | 流水寄存器 | DATA_WIDTH, STAGES, RESET_VAL |
+| `common_counter` | 上下计数器 | DATA_WIDTH, COUNT_MIN, COUNT_MAX |
+| `common_fifo` | 同步 FIFO | DATA_WIDTH, DEPTH |
+| `common_adder_tree` | 平衡加法树 | NUM_INPUTS, DATA_WIDTH, PIPELINE |
+| `common_max_finder` | 最大值查找 | NUM_INPUTS, DATA_WIDTH |
+| `common_delay_line` | 延迟线 | DATA_WIDTH, DELAY |
+
+### 使用示例
+
+```verilog
+// 4级流水寄存器
+common_pipe #(.DATA_WIDTH(12), .STAGES(4)) u_pipe (
+    .clk(clk), .rst_n(rst_n), .enable(1'b1),
+    .din(data_in), .dout(data_out)
+);
+
+// 5输入加法树（带流水）
+common_adder_tree #(.NUM_INPUTS(5), .DATA_WIDTH(8), .PIPELINE(1)) u_adder (
+    .clk(clk), .rst_n(rst_n), .enable(1'b1),
+    .din({d4, d3, d2, d1, d0}),  // 扁平化输入
+    .valid_in(valid), .dout(sum), .valid_out(valid_sum)
+);
+```
 
 ## 资源估算 (1080p)
 
