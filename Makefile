@@ -37,6 +37,12 @@ endif
 
 # RTL source files
 RTL_SOURCES = $(RTL_DIR)/isp_csiir_defines.vh \
+              $(RTL_DIR)/common/common_pipe.v \
+              $(RTL_DIR)/common/common_counter.v \
+              $(RTL_DIR)/common/common_fifo.v \
+              $(RTL_DIR)/common/common_adder_tree.v \
+              $(RTL_DIR)/common/common_delay_line.v \
+              $(RTL_DIR)/common/common_max_finder.v \
               $(RTL_DIR)/isp_csiir_reg_block.v \
               $(RTL_DIR)/isp_csiir_line_buffer.v \
               $(RTL_DIR)/stage1_gradient.v \

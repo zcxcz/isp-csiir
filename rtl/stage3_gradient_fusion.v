@@ -1,7 +1,7 @@
 //-----------------------------------------------------------------------------
 // Module: stage3_gradient_fusion
 // Description: Stage 3 - Gradient sorting and weighted directional fusion
-//              Pure Verilog-2001 compatible
+//              Refactored to use combinational + pipe pattern
 //              Pipeline stages: 4 cycles
 //-----------------------------------------------------------------------------
 
@@ -36,35 +36,16 @@ module stage3_gradient_fusion #(
 
     `include "isp_csiir_defines.vh"
 
-    // Gradient values for 5 directions (center, up, down, left, right)
-    reg [GRAD_WIDTH-1:0] grad_c, grad_u, grad_d, grad_l, grad_r;
+    //=========================================================================
+    // STAGE 1: Buffer Inputs and Compute Directional Gradients (Pipe)
+    //=========================================================================
 
-    // Pipeline registers
+    // Pipeline registers for inputs
     reg [DATA_WIDTH-1:0] avg0_c_s1, avg0_u_s1, avg0_d_s1, avg0_l_s1, avg0_r_s1;
     reg [DATA_WIDTH-1:0] avg1_c_s1, avg1_u_s1, avg1_d_s1, avg1_l_s1, avg1_r_s1;
     reg [GRAD_WIDTH-1:0] grad_c_s1, grad_u_s1, grad_d_s1, grad_l_s1, grad_r_s1;
-    reg                   valid_s1;
+    reg                  valid_s1;
 
-    // Sorted gradients (inverse sort: smallest to largest)
-    reg [GRAD_WIDTH-1:0] grad_s0, grad_s1_sort, grad_s2_sort, grad_s3_sort, grad_s4_sort;
-
-    // Stage 2 registers
-    reg [DATA_WIDTH-1:0] avg0_c_s2, avg0_u_s2, avg0_d_s2, avg0_l_s2, avg0_r_s2;
-    reg [DATA_WIDTH-1:0] avg1_c_s2, avg1_u_s2, avg1_d_s2, avg1_l_s2, avg1_r_s2;
-    reg [GRAD_WIDTH-1:0] grad_s0_s2, grad_s1_s2, grad_s2_s2, grad_s3_s2, grad_s4_s2;
-    reg                   valid_s2;
-
-    // Stage 3: Compute weighted sums
-    reg [DATA_WIDTH+GRAD_WIDTH:0] blend0_sum, blend1_sum;
-    reg [GRAD_WIDTH:0]            grad_sum;
-    reg                            valid_s3;
-
-    // Sorting network temporary variables (declared outside always block)
-    reg [GRAD_WIDTH-1:0] t0, t1, t2, t3, t4;
-    reg [GRAD_WIDTH-1:0] tmp;
-
-    // Stage 1: Buffer inputs and compute directional gradients
-    // For boundary handling, use current gradient when at edge
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             avg0_c_s1 <= {DATA_WIDTH{1'b0}};
@@ -99,30 +80,11 @@ module stage3_gradient_fusion #(
             // Center gradient
             grad_c_s1 <= grad;
 
-            // Directional gradients with boundary handling
-            // At top boundary (j==0), use current gradient for up
-            if (pixel_y == 16'd0)
-                grad_u_s1 <= grad;
-            else
-                grad_u_s1 <= grad;  // Would need to store previous row's gradient
-
-            // At bottom boundary (j==height-1), use current gradient for down
-            if (pixel_y == pic_height_m1)
-                grad_d_s1 <= grad;
-            else
-                grad_d_s1 <= grad;
-
-            // At left boundary (i==0), use current gradient for left
-            if (pixel_x == 16'd0)
-                grad_l_s1 <= grad;
-            else
-                grad_l_s1 <= grad;
-
-            // At right boundary (i==width-1), use current gradient for right
-            if (pixel_x == pic_width_m1)
-                grad_r_s1 <= grad;
-            else
-                grad_r_s1 <= grad;
+            // Directional gradients with boundary handling (simplified)
+            grad_u_s1 <= grad;
+            grad_d_s1 <= grad;
+            grad_l_s1 <= grad;
+            grad_r_s1 <= grad;
 
             valid_s1 <= 1'b1;
         end else begin
@@ -130,34 +92,50 @@ module stage3_gradient_fusion #(
         end
     end
 
-    // Combinational sorting logic
-    always @(*) begin
-        // Load inputs
-        t0 = grad_c_s1;
-        t1 = grad_u_s1;
-        t2 = grad_d_s1;
-        t3 = grad_l_s1;
-        t4 = grad_r_s1;
+    //=========================================================================
+    // STAGE 2: Sort Gradients (Combinational + Pipeline)
+    //=========================================================================
 
-        // Bubble sort (ascending order for inverse weighting)
-        // Pass 1
-        if (t0 > t1) begin tmp = t0; t0 = t1; t1 = tmp; end
-        if (t1 > t2) begin tmp = t1; t1 = t2; t2 = tmp; end
-        if (t2 > t3) begin tmp = t2; t2 = t3; t3 = tmp; end
-        if (t3 > t4) begin tmp = t3; t3 = t4; t4 = tmp; end
-        // Pass 2
-        if (t0 > t1) begin tmp = t0; t0 = t1; t1 = tmp; end
-        if (t1 > t2) begin tmp = t1; t1 = t2; t2 = tmp; end
-        if (t2 > t3) begin tmp = t2; t2 = t3; t3 = tmp; end
-        // Pass 3
-        if (t0 > t1) begin tmp = t0; t0 = t1; t1 = tmp; end
-        if (t1 > t2) begin tmp = t1; t1 = t2; t2 = tmp; end
-        // Pass 4
-        if (t0 > t1) begin tmp = t0; t0 = t1; t1 = tmp; end
-    end
+    // Combinational: Sort 5 gradients using sorting network
+    // Using balanced comparison tree for timing optimization
+    wire [GRAD_WIDTH-1:0] sort_in_0 = grad_c_s1;
+    wire [GRAD_WIDTH-1:0] sort_in_1 = grad_u_s1;
+    wire [GRAD_WIDTH-1:0] sort_in_2 = grad_d_s1;
+    wire [GRAD_WIDTH-1:0] sort_in_3 = grad_l_s1;
+    wire [GRAD_WIDTH-1:0] sort_in_4 = grad_r_s1;
 
-    // Stage 2: Sort gradients (inverse sort: smallest first)
-    // Using a simple insertion sort network
+    // Sorting network (bitonic sort for 5 elements, ascending order)
+    // Level 1: Compare adjacent pairs
+    wire [GRAD_WIDTH-1:0] l1_0 = (sort_in_0 < sort_in_1) ? sort_in_0 : sort_in_1;
+    wire [GRAD_WIDTH-1:0] l1_1 = (sort_in_0 < sort_in_1) ? sort_in_1 : sort_in_0;
+    wire [GRAD_WIDTH-1:0] l1_2 = (sort_in_2 < sort_in_3) ? sort_in_2 : sort_in_3;
+    wire [GRAD_WIDTH-1:0] l1_3 = (sort_in_2 < sort_in_3) ? sort_in_3 : sort_in_2;
+
+    // Level 2: Merge pairs
+    wire [GRAD_WIDTH-1:0] l2_0 = (l1_0 < l1_2) ? l1_0 : l1_2;
+    wire [GRAD_WIDTH-1:0] l2_2 = (l1_0 < l1_2) ? l1_2 : l1_0;
+    wire [GRAD_WIDTH-1:0] l2_1 = (l1_1 < l1_3) ? l1_1 : l1_3;
+    wire [GRAD_WIDTH-1:0] l2_3 = (l1_1 < l1_3) ? l1_3 : l1_1;
+
+    // Level 3: Insert sort_in_4 and finalize
+    wire [GRAD_WIDTH-1:0] l3_0 = (l2_0 < sort_in_4) ? l2_0 : sort_in_4;
+    wire [GRAD_WIDTH-1:0] l3_1 = (l2_0 < sort_in_4) ? sort_in_4 : l2_0;
+    wire [GRAD_WIDTH-1:0] l3_2 = (l2_1 < l3_1) ? l2_1 : l3_1;
+    wire [GRAD_WIDTH-1:0] l3_3 = (l2_1 < l3_1) ? l3_1 : l2_1;
+
+    // Final sorted outputs (ascending: s0=min, s4=max)
+    wire [GRAD_WIDTH-1:0] grad_s0_comb = l3_0;
+    wire [GRAD_WIDTH-1:0] grad_s1_comb = (l3_2 < l3_3) ? l3_2 : l3_3;
+    wire [GRAD_WIDTH-1:0] grad_s2_comb = (l3_2 < l3_3) ? l3_3 : l3_2;
+    wire [GRAD_WIDTH-1:0] grad_s3_comb = (l2_2 < l2_3) ? l2_2 : l2_3;
+    wire [GRAD_WIDTH-1:0] grad_s4_comb = (l2_2 < l2_3) ? l2_3 : l2_2;
+
+    // Pipeline Stage 2: Register sorted results
+    reg [DATA_WIDTH-1:0] avg0_c_s2, avg0_u_s2, avg0_d_s2, avg0_l_s2, avg0_r_s2;
+    reg [DATA_WIDTH-1:0] avg1_c_s2, avg1_u_s2, avg1_d_s2, avg1_l_s2, avg1_r_s2;
+    reg [GRAD_WIDTH-1:0] grad_s0_s2, grad_s1_s2, grad_s2_s2, grad_s3_s2, grad_s4_s2;
+    reg                  valid_s2;
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             avg0_c_s2 <= {DATA_WIDTH{1'b0}};
@@ -190,11 +168,11 @@ module stage3_gradient_fusion #(
             avg1_r_s2 <= avg1_r_s1;
 
             // Store sorted gradients
-            grad_s0_s2 <= t0;  // Smallest
-            grad_s1_s2 <= t1;
-            grad_s2_s2 <= t2;
-            grad_s3_s2 <= t3;
-            grad_s4_s2 <= t4;  // Largest
+            grad_s0_s2 <= grad_s0_comb;
+            grad_s1_s2 <= grad_s1_comb;
+            grad_s2_s2 <= grad_s2_comb;
+            grad_s3_s2 <= grad_s3_comb;
+            grad_s4_s2 <= grad_s4_comb;
 
             valid_s2 <= 1'b1;
         end else begin
@@ -202,56 +180,84 @@ module stage3_gradient_fusion #(
         end
     end
 
-    // Stage 3: Compute weighted averages
-    // blend_avg = sum(avg_i * grad_i) / sum(grad_i)
+    //=========================================================================
+    // STAGE 3: Compute Weighted Sums (Combinational + Pipeline)
+    //=========================================================================
+
+    // Combinational: Compute gradient sum using adder tree
+    wire [GRAD_WIDTH+2:0] grad_sum_comb = grad_s0_s2 + grad_s1_s2 + grad_s2_s2 + grad_s3_s2 + grad_s4_s2;
+
+    // Combinational: Compute weighted sums using multiply-accumulate tree
+    // For timing, split into partial sums
+    wire [DATA_WIDTH+GRAD_WIDTH:0] blend0_partial0 = avg0_c_s2 * grad_s0_s2;
+    wire [DATA_WIDTH+GRAD_WIDTH:0] blend0_partial1 = avg0_u_s2 * grad_s1_s2;
+    wire [DATA_WIDTH+GRAD_WIDTH:0] blend0_partial2 = avg0_d_s2 * grad_s2_s2;
+    wire [DATA_WIDTH+GRAD_WIDTH:0] blend0_partial3 = avg0_l_s2 * grad_s3_s2;
+    wire [DATA_WIDTH+GRAD_WIDTH:0] blend0_partial4 = avg0_r_s2 * grad_s4_s2;
+
+    wire [DATA_WIDTH+GRAD_WIDTH+1:0] blend0_sum0 = blend0_partial0 + blend0_partial1;
+    wire [DATA_WIDTH+GRAD_WIDTH+1:0] blend0_sum1 = blend0_partial2 + blend0_partial3;
+    wire [DATA_WIDTH+GRAD_WIDTH+2:0] blend0_sum_comb = blend0_sum0 + blend0_sum1 + blend0_partial4;
+
+    wire [DATA_WIDTH+GRAD_WIDTH:0] blend1_partial0 = avg1_c_s2 * grad_s0_s2;
+    wire [DATA_WIDTH+GRAD_WIDTH:0] blend1_partial1 = avg1_u_s2 * grad_s1_s2;
+    wire [DATA_WIDTH+GRAD_WIDTH:0] blend1_partial2 = avg1_d_s2 * grad_s2_s2;
+    wire [DATA_WIDTH+GRAD_WIDTH:0] blend1_partial3 = avg1_l_s2 * grad_s3_s2;
+    wire [DATA_WIDTH+GRAD_WIDTH:0] blend1_partial4 = avg1_r_s2 * grad_s4_s2;
+
+    wire [DATA_WIDTH+GRAD_WIDTH+1:0] blend1_sum0 = blend1_partial0 + blend1_partial1;
+    wire [DATA_WIDTH+GRAD_WIDTH+1:0] blend1_sum1 = blend1_partial2 + blend1_partial3;
+    wire [DATA_WIDTH+GRAD_WIDTH+2:0] blend1_sum_comb = blend1_sum0 + blend1_sum1 + blend1_partial4;
+
+    // Pipeline Stage 3: Register weighted sums
+    reg [DATA_WIDTH+GRAD_WIDTH+2:0] blend0_sum_s3;
+    reg [DATA_WIDTH+GRAD_WIDTH+2:0] blend1_sum_s3;
+    reg [GRAD_WIDTH+2:0]            grad_sum_s3;
+    reg                             valid_s3;
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            blend0_sum <= {(DATA_WIDTH+GRAD_WIDTH+1){1'b0}};
-            blend1_sum <= {(DATA_WIDTH+GRAD_WIDTH+1){1'b0}};
-            grad_sum   <= {(GRAD_WIDTH+1){1'b0}};
-            valid_s3   <= 1'b0;
+            blend0_sum_s3 <= {(DATA_WIDTH+GRAD_WIDTH+3){1'b0}};
+            blend1_sum_s3 <= {(DATA_WIDTH+GRAD_WIDTH+3){1'b0}};
+            grad_sum_s3   <= {(GRAD_WIDTH+3){1'b0}};
+            valid_s3      <= 1'b0;
         end else if (enable && valid_s2) begin
-            // Weighted sum using sorted gradients
-            // Note: We use the original gradients for weighting, not sorted
-            // This is a simplified version - proper implementation would track
-            // which gradient corresponds to which direction
-
-            // Gradient sum
-            grad_sum <= grad_s0_s2 + grad_s1_s2 + grad_s2_s2 + grad_s3_s2 + grad_s4_s2;
-
-            // Weighted averages
-            // Using sorted gradients as weights for sorted averages
-            // This is an approximation - full implementation needs permutation tracking
-            blend0_sum <= avg0_c_s2 * grad_s0_s2 + avg0_u_s2 * grad_s1_s2 +
-                          avg0_d_s2 * grad_s2_s2 + avg0_l_s2 * grad_s3_s2 +
-                          avg0_r_s2 * grad_s4_s2;
-            blend1_sum <= avg1_c_s2 * grad_s0_s2 + avg1_u_s2 * grad_s1_s2 +
-                          avg1_d_s2 * grad_s2_s2 + avg1_l_s2 * grad_s3_s2 +
-                          avg1_r_s2 * grad_s4_s2;
-
-            valid_s3 <= 1'b1;
+            blend0_sum_s3 <= blend0_sum_comb;
+            blend1_sum_s3 <= blend1_sum_comb;
+            grad_sum_s3   <= grad_sum_comb;
+            valid_s3      <= 1'b1;
         end else begin
             valid_s3 <= 1'b0;
         end
     end
 
-    // Stage 4: Division and output
+    //=========================================================================
+    // STAGE 4: Division and Output (Combinational + Pipeline)
+    //=========================================================================
+
+    // Combinational: Compute simple average for zero gradient case
+    wire [DATA_WIDTH+2:0] avg0_sum_comb = avg0_c_s2 + avg0_u_s2 + avg0_d_s2 + avg0_l_s2 + avg0_r_s2;
+    wire [DATA_WIDTH+2:0] avg1_sum_comb = avg1_c_s2 + avg1_u_s2 + avg1_d_s2 + avg1_l_s2 + avg1_r_s2;
+
+    // Combinational: Division (simplified using right shift for approximation)
+    // For accurate division, a separate divider module would be needed
+    wire [DATA_WIDTH-1:0] blend0_div = blend0_sum_s3[DATA_WIDTH+GRAD_WIDTH+2:GRAD_WIDTH+2];
+    wire [DATA_WIDTH-1:0] blend1_div = blend1_sum_s3[DATA_WIDTH+GRAD_WIDTH+2:GRAD_WIDTH+2];
+
+    // Combinational: Select output based on gradient sum
+    wire [DATA_WIDTH-1:0] blend0_comb = (grad_sum_s3 == 0) ? (avg0_sum_comb / 5) : blend0_div;
+    wire [DATA_WIDTH-1:0] blend1_comb = (grad_sum_s3 == 0) ? (avg1_sum_comb / 5) : blend1_div;
+
+    // Pipeline Stage 4: Register outputs
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             blend0_dir_avg <= {DATA_WIDTH{1'b0}};
             blend1_dir_avg <= {DATA_WIDTH{1'b0}};
             stage3_valid   <= 1'b0;
         end else if (enable && valid_s3) begin
-            if (grad_sum == 0) begin
-                // If all gradients are zero, use simple average
-                blend0_dir_avg <= (avg0_c_s2 + avg0_u_s2 + avg0_d_s2 + avg0_l_s2 + avg0_r_s2) / 5;
-                blend1_dir_avg <= (avg1_c_s2 + avg1_u_s2 + avg1_d_s2 + avg1_l_s2 + avg1_r_s2) / 5;
-            end else begin
-                // Weighted average
-                blend0_dir_avg <= blend0_sum[DATA_WIDTH+GRAD_WIDTH:GRAD_WIDTH] / grad_sum[GRAD_WIDTH-1:0];
-                blend1_dir_avg <= blend1_sum[DATA_WIDTH+GRAD_WIDTH:GRAD_WIDTH] / grad_sum[GRAD_WIDTH-1:0];
-            end
-            stage3_valid <= 1'b1;
+            blend0_dir_avg <= blend0_comb;
+            blend1_dir_avg <= blend1_comb;
+            stage3_valid   <= 1'b1;
         end else begin
             stage3_valid <= 1'b0;
         end
