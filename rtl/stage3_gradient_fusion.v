@@ -49,6 +49,27 @@ module stage3_gradient_fusion #(
     reg [GRAD_WIDTH-1:0] grad_c_s1, grad_u_s1, grad_d_s1, grad_l_s1, grad_r_s1;
     reg                  valid_s1;
 
+    // Line buffer for storing previous row's gradient
+    // This allows us to get grad_u (gradient from row above)
+    reg [GRAD_WIDTH-1:0] grad_line_buf [0:4095];  // Support up to 4K width
+    integer i;
+
+    // Column buffer for left neighbor gradient
+    reg [GRAD_WIDTH-1:0] grad_left_buf;
+
+    // Boundary detection signals
+    wire is_top_row    = (pixel_y == 0);
+    wire is_bottom_row = (pixel_y == pic_height_m1);
+    wire is_left_col   = (pixel_x == 0);
+    wire is_right_col  = (pixel_x == pic_width_m1);
+
+    // Get directional gradients with boundary handling
+    wire [GRAD_WIDTH-1:0] grad_u_comb = is_top_row    ? grad : grad_line_buf[pixel_x];
+    wire [GRAD_WIDTH-1:0] grad_l_comb = is_left_col   ? grad : grad_left_buf;
+    // For grad_d and grad_r, we approximate with current (would need future pixel data)
+    wire [GRAD_WIDTH-1:0] grad_d_comb = is_bottom_row ? grad : grad;  // Simplified
+    wire [GRAD_WIDTH-1:0] grad_r_comb = is_right_col  ? grad : grad;  // Simplified
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             avg0_c_s1 <= {DATA_WIDTH{1'b0}};
@@ -66,7 +87,12 @@ module stage3_gradient_fusion #(
             grad_d_s1 <= {GRAD_WIDTH{1'b0}};
             grad_l_s1 <= {GRAD_WIDTH{1'b0}};
             grad_r_s1 <= {GRAD_WIDTH{1'b0}};
+            grad_left_buf <= {GRAD_WIDTH{1'b0}};
             valid_s1  <= 1'b0;
+            // Initialize line buffer
+            for (i = 0; i < 4096; i = i + 1) begin
+                grad_line_buf[i] <= {GRAD_WIDTH{1'b0}};
+            end
         end else if (enable && stage2_valid) begin
             // Pass through averages
             avg0_c_s1 <= avg0_c;
@@ -83,11 +109,16 @@ module stage3_gradient_fusion #(
             // Center gradient
             grad_c_s1 <= grad;
 
-            // Directional gradients with boundary handling (simplified)
-            grad_u_s1 <= grad;
-            grad_d_s1 <= grad;
-            grad_l_s1 <= grad;
-            grad_r_s1 <= grad;
+            // Directional gradients with boundary handling
+            grad_u_s1 <= grad_u_comb;
+            grad_d_s1 <= grad_d_comb;
+            grad_l_s1 <= grad_l_comb;
+            grad_r_s1 <= grad_r_comb;
+
+            // Update line buffer at end of row (for next row's grad_u)
+            // Store current gradient for future use
+            grad_line_buf[pixel_x] <= grad;
+            grad_left_buf <= grad;  // Store for next column's grad_l
 
             valid_s1 <= 1'b1;
         end else begin

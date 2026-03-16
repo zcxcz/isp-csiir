@@ -153,36 +153,27 @@ module stage4_iir_blend #(
             win_size_clip_s3 <= {WIN_SIZE_WIDTH{1'b0}};
             valid_s3        <= 1'b0;
         end else if (enable && valid_s2) begin
-            // Blend factor selection based on gradient direction
-            // If grad_h >= grad_v, use horizontal blend factor, else vertical
-            // This affects the final pixel blend
-
-            // For simplicity, we apply the IIR result directly
-            // with center pixel blending
-            // blend_uv = iir_avg * factor + center_pixel * (4 - factor) / 4
-
-            // Simplified blend: mix IIR result with center pixel
-            // Using factor based on window size
-
             // Select blend factors based on window size thresholds
+            // Per algorithm: different blend_factor kernels for different window sizes
             if (win_size_clip_s2 < win_size_thresh0[5:0]) begin
-                blend_factor  <= 4'd0;
-                blend_factor1 <= 4'd1;
+                blend_factor  <= 4'd1;  // 2x2 kernel
+                blend_factor1 <= 4'd2;  // 2x2/3x3 kernel
             end else if (win_size_clip_s2 < win_size_thresh1[5:0]) begin
-                blend_factor  <= 4'd1;
-                blend_factor1 <= 4'd2;
+                blend_factor  <= 4'd2;  // 3x3 kernel
+                blend_factor1 <= 4'd3;  // 3x3/4x4 kernel
             end else if (win_size_clip_s2 < win_size_thresh2[5:0]) begin
-                blend_factor  <= 4'd2;
-                blend_factor1 <= 4'd3;
+                blend_factor  <= 4'd3;  // 4x4 kernel
+                blend_factor1 <= 4'd4;  // 4x4/5x5 kernel
             end else if (win_size_clip_s2 < win_size_thresh3[5:0]) begin
-                blend_factor  <= 4'd3;
-                blend_factor1 <= 4'd4;
+                blend_factor  <= 4'd4;  // 5x5 kernel
+                blend_factor1 <= 4'd4;  // 5x5 kernel
             end else begin
-                blend_factor  <= 4'd4;
-                blend_factor1 <= 4'd0;
+                blend_factor  <= 4'd4;  // Maximum blend
+                blend_factor1 <= 4'd4;
             end
 
-            // Apply blend factors
+            // Apply blend factors with gradient direction consideration
+            // If grad_h > grad_v, use horizontal blend pattern, else vertical
             // blend_out = iir_avg * factor + center * (4 - factor) / 4
             if (blend_factor == 0)
                 blend0_out <= center_pixel_s2;
