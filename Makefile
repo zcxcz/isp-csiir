@@ -31,18 +31,24 @@ RTL_SOURCES = $(RTL_DIR)/isp_csiir_defines.vh \
 # Output files
 SIM_EXE     = $(BUILD_DIR)/isp_csiir_sim
 VCD_FILE    = $(BUILD_DIR)/isp_csiir_simple_tb.vcd
+TEST_VECTORS = verification/test_vectors
 
 #-----------------------------------------------------------------------------
 # Targets
 #-----------------------------------------------------------------------------
 
-.PHONY: all clean sim wave rtl_check help
+.PHONY: all clean sim wave rtl_check help patterns
 
 all: sim
 
 # Create build directory
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
+
+# Generate test patterns
+patterns: $(BUILD_DIR)
+	@echo "Generating test patterns..."
+	python3 verification/test_pattern_generator.py --height 64 --width 64 --frames 2
 
 # RTL syntax check
 rtl_check: $(RTL_SOURCES)
@@ -55,9 +61,10 @@ rtl_check: $(RTL_SOURCES)
 	fi
 
 # Compile and run simulation (generates VCD waveform)
-sim: $(BUILD_DIR) $(RTL_SOURCES)
+sim: $(BUILD_DIR) patterns $(RTL_SOURCES)
 	@echo "Running simulation..."
 	$(IVERILOG) $(IVERILOG_FLAGS) -o $(SIM_EXE) $(RTL_SOURCES) $(TB_DIR)/isp_csiir_simple_tb.v
+	cp -r $(TEST_VECTORS) $(BUILD_DIR)/
 	cd $(BUILD_DIR) && ./isp_csiir_sim
 
 # View waveform with GTKWave
