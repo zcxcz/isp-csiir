@@ -2,17 +2,26 @@
 // Module: isp_csiir_simple_tb
 // Description: Simple testbench for ISP-CSIIR RTL verification
 //              Compatible with Icarus Verilog (no UVM required)
+//              Fully parameterized for different resolutions and data widths
 //-----------------------------------------------------------------------------
 
 `timescale 1ns/1ps
 
 module isp_csiir_simple_tb;
 
-    // Parameters
-    parameter IMG_WIDTH  = 64;
-    parameter IMG_HEIGHT = 64;
-    parameter DATA_WIDTH = 8;
+    //=========================================================================
+    // Parameters - Can be overridden via command line
+    //=========================================================================
+    parameter IMG_WIDTH       = 64;
+    parameter IMG_HEIGHT      = 64;
+    parameter DATA_WIDTH      = 10;
+    parameter GRAD_WIDTH      = 14;
+    parameter LINE_ADDR_WIDTH = 7;   // log2(64) + 1
+    parameter ROW_CNT_WIDTH   = 7;
 
+    //=========================================================================
+    // Signals
+    //=========================================================================
     // Clock and reset
     reg clk;
     reg rst_n;
@@ -44,11 +53,16 @@ module isp_csiir_simple_tb;
     integer frame_count;
     integer error_count;
 
-    // DUT instance
+    //=========================================================================
+    // DUT Instance
+    //=========================================================================
     isp_csiir_top #(
-        .IMG_WIDTH (IMG_WIDTH),
-        .IMG_HEIGHT(IMG_HEIGHT),
-        .DATA_WIDTH(DATA_WIDTH)
+        .IMG_WIDTH       (IMG_WIDTH),
+        .IMG_HEIGHT      (IMG_HEIGHT),
+        .DATA_WIDTH      (DATA_WIDTH),
+        .GRAD_WIDTH      (GRAD_WIDTH),
+        .LINE_ADDR_WIDTH (LINE_ADDR_WIDTH),
+        .ROW_CNT_WIDTH   (ROW_CNT_WIDTH)
     ) dut (
         .clk      (clk),
         .rst_n    (rst_n),
@@ -70,13 +84,17 @@ module isp_csiir_simple_tb;
         .dout_hsync (dout_hsync)
     );
 
-    // Clock generation - 100MHz
+    //=========================================================================
+    // Clock Generation - 100MHz
+    //=========================================================================
     initial begin
         clk = 0;
         forever #5 clk = ~clk;
     end
 
-    // APB write task
+    //=========================================================================
+    // APB Tasks
+    //=========================================================================
     task apb_write;
         input [7:0]  addr;
         input [31:0] data;
@@ -96,7 +114,6 @@ module isp_csiir_simple_tb;
         end
     endtask
 
-    // APB read task
     task apb_read;
         input  [7:0]  addr;
         output [31:0] data;
@@ -116,7 +133,9 @@ module isp_csiir_simple_tb;
         end
     endtask
 
-    // Send pixel task
+    //=========================================================================
+    // Pixel Tasks
+    //=========================================================================
     task send_pixel;
         input [DATA_WIDTH-1:0] pixel;
         input is_vsync;
@@ -131,7 +150,6 @@ module isp_csiir_simple_tb;
         end
     endtask
 
-    // Send frame task
     task send_frame;
         integer x, y;
         begin
@@ -142,7 +160,7 @@ module isp_csiir_simple_tb;
             // Send frame data
             for (y = 0; y < IMG_HEIGHT; y = y + 1) begin
                 for (x = 0; x < IMG_WIDTH; x = x + 1) begin
-                    send_pixel($random & 8'hFF, 0, (x == IMG_WIDTH-1), 1);
+                    send_pixel($random & {{DATA_WIDTH-8{1'b0}}, 8'hFF}, 0, (x == IMG_WIDTH-1), 1);
                 end
             end
 
@@ -152,15 +170,19 @@ module isp_csiir_simple_tb;
         end
     endtask
 
-    // Monitor output
+    //=========================================================================
+    // Output Monitor
+    //=========================================================================
     always @(posedge clk) begin
         if (dout_valid) begin
             output_count = output_count + 1;
-            $display("[%0t] Output pixel: 0x%02h", $time, dout);
+            $display("[%0t] Output pixel: 0x%03h", $time, dout);
         end
     end
 
-    // Main test sequence
+    //=========================================================================
+    // Main Test Sequence
+    //=========================================================================
     initial begin
         // Initialize signals
         rst_n    <= 1'b0;
@@ -171,7 +193,7 @@ module isp_csiir_simple_tb;
         pwdata   <= 32'h0;
         vsync    <= 1'b0;
         hsync    <= 1'b0;
-        din      <= 8'h0;
+        din      <= {DATA_WIDTH{1'b0}};
         din_valid <= 1'b0;
 
         pixel_count  = 0;
@@ -187,7 +209,9 @@ module isp_csiir_simple_tb;
         $display("========================================");
         $display("ISP-CSIIR Simple Testbench");
         $display("========================================");
-        $display("Image Size: %0d x %0d", IMG_WIDTH, IMG_HEIGHT);
+        $display("Image Size:  %0d x %0d", IMG_WIDTH, IMG_HEIGHT);
+        $display("Data Width:  %0d bits", DATA_WIDTH);
+        $display("Grad Width:  %0d bits", GRAD_WIDTH);
         $display("");
 
         // Configure registers
@@ -243,14 +267,18 @@ module isp_csiir_simple_tb;
         $finish;
     end
 
+    //=========================================================================
     // Timeout
+    //=========================================================================
     initial begin
         #500000;
         $display("[INFO] Simulation completed normally");
         $finish;
     end
 
-    // VCD dump for waveform viewing
+    //=========================================================================
+    // VCD Dump for Waveform Viewing
+    //=========================================================================
     initial begin
         $dumpfile("isp_csiir_simple_tb.vcd");
         $dumpvars(0, isp_csiir_simple_tb);
