@@ -81,6 +81,32 @@ module isp_csiir_top #(
     wire        regs_updated;
 
     //=========================================================================
+    // IIR Feedback Signals
+    //=========================================================================
+    // Pipeline delay for column tracking (for IIR feedback)
+    // Track the column index delayed by pipeline stages
+    localparam PIPELINE_DELAY = 17;  // Total pipeline cycles
+
+    reg [LINE_ADDR_WIDTH-1:0] col_delay [0:PIPELINE_DELAY-1];
+    reg [PIPELINE_DELAY-1:0]  valid_delay;
+    reg [ROW_CNT_WIDTH-1:0]   row_delay [0:PIPELINE_DELAY-1];
+
+    wire [LINE_ADDR_WIDTH-1:0] iir_feedback_col;
+    wire                       iir_feedback_valid;
+
+    //=========================================================================
+    // Video Timing Signals (declared early for use in delay chain)
+    //=========================================================================
+    reg                   sof_reg;
+    reg                   eol_reg;
+    reg [PIC_WIDTH_BITS-1:0]  pixel_x;
+    reg [PIC_HEIGHT_BITS-1:0] pixel_y;
+    reg [PIC_WIDTH_BITS-1:0]  pixel_cnt;
+    reg [PIC_HEIGHT_BITS-1:0] line_cnt;
+    reg                   vsync_d1, vsync_d2;
+    reg                   hsync_d1, hsync_d2;
+
+    //=========================================================================
     // Line Buffer Window Outputs
     //=========================================================================
     wire [DATA_WIDTH-1:0] window_0_0, window_0_1, window_0_2, window_0_3, window_0_4;
@@ -120,18 +146,6 @@ module isp_csiir_top #(
     wire                  dout_final_valid;
 
     //=========================================================================
-    // Video Timing Signals
-    //=========================================================================
-    reg                   sof_reg;
-    reg                   eol_reg;
-    reg [PIC_WIDTH_BITS-1:0]  pixel_x;
-    reg [PIC_HEIGHT_BITS-1:0] pixel_y;
-    reg [PIC_WIDTH_BITS-1:0]  pixel_cnt;
-    reg [PIC_HEIGHT_BITS-1:0] line_cnt;
-    reg                   vsync_d1, vsync_d2;
-    reg                   hsync_d1, hsync_d2;
-
-    //=========================================================================
     // Bypass Path
     //=========================================================================
     reg [DATA_WIDTH-1:0]  din_delay [0:20];
@@ -144,6 +158,30 @@ module isp_csiir_top #(
     // Boundary Mode
     //=========================================================================
     wire [1:0]            boundary_mode = 2'b01;  // Replicate mode
+
+    // Delay chain for column tracking
+    integer j;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (j = 0; j < PIPELINE_DELAY; j = j + 1) begin
+                col_delay[j]  <= {LINE_ADDR_WIDTH{1'b0}};
+                row_delay[j]  <= {ROW_CNT_WIDTH{1'b0}};
+                valid_delay[j] <= 1'b0;
+            end
+        end else if (enable && !bypass) begin
+            col_delay[0]  <= pixel_cnt;
+            row_delay[0]  <= line_cnt;
+            valid_delay[0] <= din_valid;
+            for (j = 1; j < PIPELINE_DELAY; j = j + 1) begin
+                col_delay[j]  <= col_delay[j-1];
+                row_delay[j]  <= row_delay[j-1];
+                valid_delay[j] <= valid_delay[j-1];
+            end
+        end
+    end
+
+    assign iir_feedback_col   = col_delay[PIPELINE_DELAY-1];
+    assign iir_feedback_valid = dout_final_valid;
 
     //=========================================================================
     // Register Block Instance
@@ -240,21 +278,26 @@ module isp_csiir_top #(
     end
 
     //=========================================================================
-    // Line Buffer Instance
+    // IIR Line Buffer Instance (6 lines with feedback support)
     //=========================================================================
-    isp_csiir_line_buffer #(
+    isp_csiir_iir_line_buffer #(
         .IMG_WIDTH(IMG_WIDTH),
         .DATA_WIDTH(DATA_WIDTH),
         .LINE_ADDR_WIDTH(LINE_ADDR_WIDTH),
         .ROW_CNT_WIDTH(ROW_CNT_WIDTH)
     ) u_line_buffer (
-        .clk           (clk),
-        .rst_n         (rst_n),
-        .enable        (enable && !bypass),
-        .sof           (sof_reg),
-        .eol           (eol_reg),
-        .din           (din),
-        .din_valid     (din_valid),
+        .clk                (clk),
+        .rst_n              (rst_n),
+        .enable             (enable && !bypass),
+        .sof                (sof_reg),
+        .eol                (eol_reg),
+        .din                (din),
+        .din_valid          (din_valid),
+        // IIR feedback path
+        .iir_feedback_data  (dout_final),
+        .iir_feedback_valid (iir_feedback_valid),
+        .iir_feedback_col   (iir_feedback_col),
+        // 5x5 window outputs
         .window_0_0    (window_0_0),
         .window_0_1    (window_0_1),
         .window_0_2    (window_0_2),
