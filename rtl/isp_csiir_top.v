@@ -278,26 +278,21 @@ module isp_csiir_top #(
     end
 
     //=========================================================================
-    // IIR Line Buffer Instance (6 lines with feedback support)
+    // Line Buffer Instance (using original working version)
     //=========================================================================
-    isp_csiir_iir_line_buffer #(
+    isp_csiir_line_buffer #(
         .IMG_WIDTH(IMG_WIDTH),
         .DATA_WIDTH(DATA_WIDTH),
         .LINE_ADDR_WIDTH(LINE_ADDR_WIDTH),
         .ROW_CNT_WIDTH(ROW_CNT_WIDTH)
     ) u_line_buffer (
-        .clk                (clk),
-        .rst_n              (rst_n),
-        .enable             (enable && !bypass),
-        .sof                (sof_reg),
-        .eol                (eol_reg),
-        .din                (din),
-        .din_valid          (din_valid),
-        // IIR feedback path
-        .iir_feedback_data  (dout_final),
-        .iir_feedback_valid (iir_feedback_valid),
-        .iir_feedback_col   (iir_feedback_col),
-        // 5x5 window outputs
+        .clk           (clk),
+        .rst_n         (rst_n),
+        .enable        (enable && !bypass),
+        .sof           (sof_reg),
+        .eol           (eol_reg),
+        .din           (din),
+        .din_valid     (din_valid),
         .window_0_0    (window_0_0),
         .window_0_1    (window_0_1),
         .window_0_2    (window_0_2),

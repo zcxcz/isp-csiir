@@ -52,6 +52,17 @@ module isp_csiir_line_buffer #(
     reg [DATA_WIDTH-1:0] line_mem_2 [0:IMG_WIDTH-1];
     reg [DATA_WIDTH-1:0] line_mem_3 [0:IMG_WIDTH-1];
 
+    // Initialize line memories to zero
+    integer init_i;
+    initial begin
+        for (init_i = 0; init_i < IMG_WIDTH; init_i = init_i + 1) begin
+            line_mem_0[init_i] = {DATA_WIDTH{1'b0}};
+            line_mem_1[init_i] = {DATA_WIDTH{1'b0}};
+            line_mem_2[init_i] = {DATA_WIDTH{1'b0}};
+            line_mem_3[init_i] = {DATA_WIDTH{1'b0}};
+        end
+    end
+
     //=========================================================================
     // Pointers and Counters
     //=========================================================================
@@ -78,29 +89,40 @@ module isp_csiir_line_buffer #(
     //=========================================================================
     // Line Buffer Write and Address Logic
     //=========================================================================
+    // Use a different approach: write to current line, read from history
+    // line_mem_0 stores row -1 (most recent complete row)
+    // line_mem_1 stores row -2
+    // line_mem_2 stores row -3
+    // line_mem_3 stores row -4
+    // Current input is row 0
+
+    // Track which line buffer to write to (circular)
+    reg [1:0] wr_line_idx;  // Which line buffer to write next
+    reg [1:0] rd_line_0_idx, rd_line_1_idx, rd_line_2_idx, rd_line_3_idx;
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            wr_ptr     <= {LINE_ADDR_WIDTH{1'b0}};
-            col_cnt    <= {LINE_ADDR_WIDTH{1'b0}};
-            row_cnt    <= {ROW_CNT_BITS{1'b0}};
-            line_valid <= 4'b0000;
+            wr_ptr       <= {LINE_ADDR_WIDTH{1'b0}};
+            col_cnt      <= {LINE_ADDR_WIDTH{1'b0}};
+            row_cnt      <= {ROW_CNT_BITS{1'b0}};
+            line_valid   <= 4'b0000;
+            wr_line_idx  <= 2'd0;
         end else if (enable) begin
             if (din_valid) begin
-                // Write current pixel to line 0
-                line_mem_0[wr_ptr] <= din;
-
-                // Propagate through line buffers (FIFO behavior)
-                if (line_valid[0])
-                    line_mem_1[wr_ptr] <= line_mem_0[wr_ptr];
-                if (line_valid[1])
-                    line_mem_2[wr_ptr] <= line_mem_1[wr_ptr];
-                if (line_valid[2])
-                    line_mem_3[wr_ptr] <= line_mem_2[wr_ptr];
+                // Write current pixel to appropriate line buffer
+                case (wr_line_idx)
+                    2'd0: line_mem_0[wr_ptr] <= din;
+                    2'd1: line_mem_1[wr_ptr] <= din;
+                    2'd2: line_mem_2[wr_ptr] <= din;
+                    2'd3: line_mem_3[wr_ptr] <= din;
+                endcase
 
                 // Update pointers
                 if (eol || col_cnt == IMG_WIDTH - 1) begin
+                    // End of line: switch to next line buffer
                     wr_ptr  <= {LINE_ADDR_WIDTH{1'b0}};
                     col_cnt <= {LINE_ADDR_WIDTH{1'b0}};
+                    wr_line_idx <= wr_line_idx + 1'b1;
                     line_valid <= {line_valid[2:0], 1'b1};
                     if (row_cnt < {ROW_CNT_BITS{1'b1}})
                         row_cnt <= row_cnt + {{ROW_CNT_BITS-1{1'b0}}, 1'b1};
@@ -112,17 +134,52 @@ module isp_csiir_line_buffer #(
 
             // Reset on SOF
             if (sof) begin
-                wr_ptr     <= {LINE_ADDR_WIDTH{1'b0}};
-                col_cnt    <= {LINE_ADDR_WIDTH{1'b0}};
-                row_cnt    <= {ROW_CNT_BITS{1'b0}};
-                line_valid <= 4'b0000;
+                wr_ptr       <= {LINE_ADDR_WIDTH{1'b0}};
+                col_cnt      <= {LINE_ADDR_WIDTH{1'b0}};
+                row_cnt      <= {ROW_CNT_BITS{1'b0}};
+                line_valid   <= 4'b0000;
+                wr_line_idx  <= 2'd0;
             end
         end
     end
 
+    // Calculate read indices (1 behind write, circular)
+    always @(*) begin
+        // Read lines are the 4 lines before current write line
+        rd_line_0_idx = (wr_line_idx + 4 - 1) & 2'b11;  // Previous line
+        rd_line_1_idx = (wr_line_idx + 4 - 2) & 2'b11;  // 2 lines ago
+        rd_line_2_idx = (wr_line_idx + 4 - 3) & 2'b11;  // 3 lines ago
+        rd_line_3_idx = (wr_line_idx + 4 - 4) & 2'b11;  // 4 lines ago
+    end
+
+    // Mux to select which line buffer to read from
+    wire [DATA_WIDTH-1:0] line_rd_0 = (rd_line_0_idx == 0) ? line_mem_0[wr_ptr] :
+                                      (rd_line_0_idx == 1) ? line_mem_1[wr_ptr] :
+                                      (rd_line_0_idx == 2) ? line_mem_2[wr_ptr] : line_mem_3[wr_ptr];
+
+    wire [DATA_WIDTH-1:0] line_rd_1 = (rd_line_1_idx == 0) ? line_mem_0[wr_ptr] :
+                                      (rd_line_1_idx == 1) ? line_mem_1[wr_ptr] :
+                                      (rd_line_1_idx == 2) ? line_mem_2[wr_ptr] : line_mem_3[wr_ptr];
+
+    wire [DATA_WIDTH-1:0] line_rd_2 = (rd_line_2_idx == 0) ? line_mem_0[wr_ptr] :
+                                      (rd_line_2_idx == 1) ? line_mem_1[wr_ptr] :
+                                      (rd_line_2_idx == 2) ? line_mem_2[wr_ptr] : line_mem_3[wr_ptr];
+
+    wire [DATA_WIDTH-1:0] line_rd_3 = (rd_line_3_idx == 0) ? line_mem_0[wr_ptr] :
+                                      (rd_line_3_idx == 1) ? line_mem_1[wr_ptr] :
+                                      (rd_line_3_idx == 2) ? line_mem_2[wr_ptr] : line_mem_3[wr_ptr];
+
     //=========================================================================
     // Column Shift Register (Vertical Pipeline)
     //=========================================================================
+    // Read from line buffers and form vertical column
+    // At position (row, col), we output result for row-2 (2-row latency)
+    // col_shift_4 = current input (row 0)
+    // col_shift_3 = row -1 (from line_rd_0)
+    // col_shift_2 = row -2 (from line_rd_1) - center
+    // col_shift_1 = row -3 (from line_rd_2)
+    // col_shift_0 = row -4 (from line_rd_3)
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             col_shift_0   <= {DATA_WIDTH{1'b0}};
@@ -132,15 +189,32 @@ module isp_csiir_line_buffer #(
             col_shift_4   <= {DATA_WIDTH{1'b0}};
             window_valid  <= 1'b0;
         end else if (enable && din_valid) begin
-            // Shift column data (newest at bottom, oldest at top)
-            col_shift_0 <= col_shift_1;
-            col_shift_1 <= col_shift_2;
-            col_shift_2 <= col_shift_3;
-            col_shift_3 <= col_shift_4;
+            // Newest at bottom
             col_shift_4 <= din;
 
-            // Window valid after 2 rows and 2 columns filled
-            window_valid <= (row_cnt >= {{ROW_CNT_BITS-2{1'b0}}, 2'd2}) &&
+            // Load from line buffers based on valid lines
+            if (line_valid[0])
+                col_shift_3 <= line_rd_0;
+            else
+                col_shift_3 <= {DATA_WIDTH{1'b0}};
+
+            if (line_valid[1])
+                col_shift_2 <= line_rd_1;
+            else
+                col_shift_2 <= {DATA_WIDTH{1'b0}};
+
+            if (line_valid[2])
+                col_shift_1 <= line_rd_2;
+            else
+                col_shift_1 <= {DATA_WIDTH{1'b0}};
+
+            if (line_valid[3])
+                col_shift_0 <= line_rd_3;
+            else
+                col_shift_0 <= {DATA_WIDTH{1'b0}};
+
+            // Window valid after 4 lines stored (need 5 rows for 5x5)
+            window_valid <= (row_cnt >= {{ROW_CNT_BITS-3{1'b0}}, 3'd4}) &&
                             (col_cnt >= {{LINE_ADDR_WIDTH-2{1'b0}}, 2'd2});
         end else begin
             window_valid <= 1'b0;

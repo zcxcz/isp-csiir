@@ -503,41 +503,41 @@ class ISPCSIIRRefModel:
                 window = get_5x5_window(img, i, j, self.height, self.width)
 
                 # Window blending based on window size
-                # Formula: blend_win = blend_hor * blend_factor + src_uv * (4 - blend_factor)
-                # Then take center pixel (position [2,2])
+                # Formula: blend_win = (blend_hor * blend_factor + src_uv * (4 - blend_factor)) / 4
+                # Weight sum is 4, so divide by 4 to get weighted average
                 if ws < thresh[0]:
                     # blend0
-                    blend00_win_5x5 = blend0_hor * blend_factor_2x2_hv + window * (4 - blend_factor_2x2_hv)
-                    blend01_win_5x5 = blend0_hor * BLEND_FACTOR_2X2 + window * (4 - BLEND_FACTOR_2X2)
+                    blend00_win_5x5 = (blend0_hor * blend_factor_2x2_hv + window * (4 - blend_factor_2x2_hv)) / 4.0
+                    blend01_win_5x5 = (blend0_hor * BLEND_FACTOR_2X2 + window * (4 - BLEND_FACTOR_2X2)) / 4.0
                     blend0_win = (blend00_win_5x5 * self.config.edge_protect +
                                   blend01_win_5x5 * (64 - self.config.edge_protect)) / 64.0
                     blend0_win_val = blend0_win[2, 2]  # Center pixel
 
                     blend1_win_val = 0.0  # Not used
                 elif ws < thresh[1]:
-                    blend00_win_5x5 = blend0_hor * blend_factor_2x2_hv + window * (4 - blend_factor_2x2_hv)
-                    blend01_win_5x5 = blend0_hor * BLEND_FACTOR_2X2 + window * (4 - BLEND_FACTOR_2X2)
+                    blend00_win_5x5 = (blend0_hor * blend_factor_2x2_hv + window * (4 - blend_factor_2x2_hv)) / 4.0
+                    blend01_win_5x5 = (blend0_hor * BLEND_FACTOR_2X2 + window * (4 - BLEND_FACTOR_2X2)) / 4.0
                     blend0_win = (blend00_win_5x5 * self.config.edge_protect +
                                   blend01_win_5x5 * (64 - self.config.edge_protect)) / 64.0
                     blend0_win_val = blend0_win[2, 2]
 
-                    blend1_win_5x5 = blend1_hor * BLEND_FACTOR_3X3 + window * (4 - BLEND_FACTOR_3X3)
+                    blend1_win_5x5 = (blend1_hor * BLEND_FACTOR_3X3 + window * (4 - BLEND_FACTOR_3X3)) / 4.0
                     blend1_win_val = blend1_win_5x5[2, 2]
                 elif ws < thresh[2]:
-                    blend0_win_5x5 = blend0_hor * BLEND_FACTOR_3X3 + window * (4 - BLEND_FACTOR_3X3)
+                    blend0_win_5x5 = (blend0_hor * BLEND_FACTOR_3X3 + window * (4 - BLEND_FACTOR_3X3)) / 4.0
                     blend0_win_val = blend0_win_5x5[2, 2]
 
-                    blend1_win_5x5 = blend1_hor * BLEND_FACTOR_4X4 + window * (4 - BLEND_FACTOR_4X4)
+                    blend1_win_5x5 = (blend1_hor * BLEND_FACTOR_4X4 + window * (4 - BLEND_FACTOR_4X4)) / 4.0
                     blend1_win_val = blend1_win_5x5[2, 2]
                 elif ws < thresh[3]:
-                    blend0_win_5x5 = blend0_hor * BLEND_FACTOR_4X4 + window * (4 - BLEND_FACTOR_4X4)
+                    blend0_win_5x5 = (blend0_hor * BLEND_FACTOR_4X4 + window * (4 - BLEND_FACTOR_4X4)) / 4.0
                     blend0_win_val = blend0_win_5x5[2, 2]
 
-                    blend1_win_5x5 = blend1_hor * BLEND_FACTOR_5X5 + window * (4 - BLEND_FACTOR_5X5)
+                    blend1_win_5x5 = (blend1_hor * BLEND_FACTOR_5X5 + window * (4 - BLEND_FACTOR_5X5)) / 4.0
                     blend1_win_val = blend1_win_5x5[2, 2]
                 else:
                     blend0_win_val = 0.0  # Not used
-                    blend1_win_5x5 = blend1_hor * BLEND_FACTOR_5X5 + window * (4 - BLEND_FACTOR_5X5)
+                    blend1_win_5x5 = (blend1_hor * BLEND_FACTOR_5X5 + window * (4 - BLEND_FACTOR_5X5)) / 4.0
                     blend1_win_val = blend1_win_5x5[2, 2]
 
                 # Final blend
