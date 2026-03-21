@@ -41,12 +41,20 @@ module stage1_gradient #(
     input  wire [PIC_WIDTH_BITS-1:0]   pic_width_m1,
     input  wire [PIC_HEIGHT_BITS-1:0]  pic_height_m1,
 
+    // Window center position from line buffer (for accurate pixel tracking)
+    input  wire [PIC_WIDTH_BITS-1:0]   window_center_x,
+    input  wire [PIC_HEIGHT_BITS-1:0]  window_center_y,
+
     // Outputs
     output reg  [GRAD_WIDTH-1:0]       grad_h,
     output reg  [GRAD_WIDTH-1:0]       grad_v,
     output reg  [GRAD_WIDTH-1:0]       grad,
     output reg  [WIN_SIZE_WIDTH-1:0]   win_size_clip,
-    output reg                         stage1_valid
+    output reg                         stage1_valid,
+
+    // Pipelined window center position outputs (aligned with stage1_valid)
+    output reg  [PIC_WIDTH_BITS-1:0]   center_x_out,
+    output reg  [PIC_HEIGHT_BITS-1:0]  center_y_out
 );
 
     `include "isp_csiir_defines.vh"
@@ -70,16 +78,23 @@ module stage1_gradient #(
     reg signed [GRAD_WIDTH:0] grad_h_s1;
     reg signed [GRAD_WIDTH:0] grad_v_s1;
     reg                       valid_s1;
+    // Pipeline window center position
+    reg [PIC_WIDTH_BITS-1:0]  center_x_s1;
+    reg [PIC_HEIGHT_BITS-1:0] center_y_s1;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             grad_h_s1 <= {(GRAD_WIDTH+1){1'b0}};
             grad_v_s1 <= {(GRAD_WIDTH+1){1'b0}};
             valid_s1  <= 1'b0;
+            center_x_s1 <= {PIC_WIDTH_BITS{1'b0}};
+            center_y_s1 <= {PIC_HEIGHT_BITS{1'b0}};
         end else if (enable && window_valid) begin
             grad_h_s1 <= grad_h_comb;
             grad_v_s1 <= grad_v_comb;
             valid_s1  <= 1'b1;
+            center_x_s1 <= window_center_x;
+            center_y_s1 <= window_center_y;
         end else begin
             valid_s1 <= 1'b0;
         end
@@ -106,6 +121,9 @@ module stage1_gradient #(
     reg [GRAD_WIDTH-1:0] grad_v_abs_s2;
     reg [GRAD_WIDTH-1:0] grad_sum_s2;
     reg                  valid_s2;
+    // Pipeline window center position
+    reg [PIC_WIDTH_BITS-1:0]  center_x_s2;
+    reg [PIC_HEIGHT_BITS-1:0] center_y_s2;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -113,11 +131,15 @@ module stage1_gradient #(
             grad_v_abs_s2 <= {GRAD_WIDTH{1'b0}};
             grad_sum_s2   <= {GRAD_WIDTH{1'b0}};
             valid_s2      <= 1'b0;
+            center_x_s2 <= {PIC_WIDTH_BITS{1'b0}};
+            center_y_s2 <= {PIC_HEIGHT_BITS{1'b0}};
         end else if (enable && valid_s1) begin
             grad_h_abs_s2 <= grad_h_abs_comb;
             grad_v_abs_s2 <= grad_v_abs_comb;
             grad_sum_s2   <= grad_sum_comb;
             valid_s2      <= 1'b1;
+            center_x_s2 <= center_x_s1;
+            center_y_s2 <= center_y_s1;
         end else begin
             valid_s2 <= 1'b0;
         end
@@ -147,6 +169,9 @@ module stage1_gradient #(
     reg [GRAD_WIDTH-1:0] grad_sum_s3;
     reg [GRAD_WIDTH-1:0] grad_h_s3, grad_v_s3;
     reg                  valid_s3;
+    // Pipeline window center position
+    reg [PIC_WIDTH_BITS-1:0]  center_x_s3;
+    reg [PIC_HEIGHT_BITS-1:0] center_y_s3;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -156,6 +181,8 @@ module stage1_gradient #(
             grad_h_s3     <= {GRAD_WIDTH{1'b0}};
             grad_v_s3     <= {GRAD_WIDTH{1'b0}};
             valid_s3      <= 1'b0;
+            center_x_s3 <= {PIC_WIDTH_BITS{1'b0}};
+            center_y_s3 <= {PIC_HEIGHT_BITS{1'b0}};
         end else if (enable && valid_s2) begin
             grad_left_s2  <= grad_sum_s2;  // Store for next cycle as left neighbor
             grad_max_s3   <= grad_max_comb;
@@ -163,6 +190,8 @@ module stage1_gradient #(
             grad_h_s3     <= grad_h_abs_s2;
             grad_v_s3     <= grad_v_abs_s2;
             valid_s3      <= 1'b1;
+            center_x_s3 <= center_x_s2;
+            center_y_s3 <= center_y_s2;
         end else begin
             valid_s3 <= 1'b0;
         end
@@ -201,12 +230,16 @@ module stage1_gradient #(
             grad          <= {GRAD_WIDTH{1'b0}};
             win_size_clip <= {WIN_SIZE_WIDTH{1'b0}};
             stage1_valid  <= 1'b0;
+            center_x_out  <= {PIC_WIDTH_BITS{1'b0}};
+            center_y_out  <= {PIC_HEIGHT_BITS{1'b0}};
         end else if (enable && valid_s3) begin
             grad_h        <= grad_h_s3;
             grad_v        <= grad_v_s3;
             grad          <= grad_sum_s3;
             win_size_clip <= win_size_clip_comb;
             stage1_valid  <= 1'b1;
+            center_x_out  <= center_x_s3;
+            center_y_out  <= center_y_s3;
         end else begin
             stage1_valid <= 1'b0;
         end

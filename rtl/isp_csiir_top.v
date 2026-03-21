@@ -116,6 +116,10 @@ module isp_csiir_top #(
     wire [DATA_WIDTH-1:0] window_4_0, window_4_1, window_4_2, window_4_3, window_4_4;
     wire                  window_valid;
 
+    // Window center position from line buffer (tracks the center of 5x5 window)
+    wire [LINE_ADDR_WIDTH-1:0] window_center_x;
+    wire [ROW_CNT_WIDTH-1:0]   window_center_y;
+
     //=========================================================================
     // Stage 1 Outputs
     //=========================================================================
@@ -124,6 +128,9 @@ module isp_csiir_top #(
     wire [GRAD_WIDTH-1:0]          grad_s1;
     wire [WIN_SIZE_WIDTH-1:0]      win_size_clip_s1;
     wire                           stage1_valid;
+    // Pipelined window center position from Stage 1
+    wire [PIC_WIDTH_BITS-1:0]      center_x_s1;
+    wire [PIC_HEIGHT_BITS-1:0]     center_y_s1;
 
     //=========================================================================
     // Stage 2 Outputs
@@ -131,6 +138,12 @@ module isp_csiir_top #(
     wire [DATA_WIDTH-1:0] avg0_c, avg0_u, avg0_d, avg0_l, avg0_r;
     wire [DATA_WIDTH-1:0] avg1_c, avg1_u, avg1_d, avg1_l, avg1_r;
     wire                  stage2_valid;
+    // New outputs: pipelined center pixel and win_size from Stage 2
+    wire [DATA_WIDTH-1:0]     center_pixel_s2_out;
+    wire [WIN_SIZE_WIDTH-1:0] win_size_s2_out;
+    // Position outputs from Stage 2
+    wire [13:0]               pixel_x_s2;
+    wire [12:0]               pixel_y_s2;
 
     //=========================================================================
     // Stage 3 Outputs
@@ -138,12 +151,144 @@ module isp_csiir_top #(
     wire [DATA_WIDTH-1:0] blend0_dir_avg;
     wire [DATA_WIDTH-1:0] blend1_dir_avg;
     wire                  stage3_valid;
+    // Position outputs from Stage 3
+    wire [PIC_WIDTH_BITS-1:0]  pixel_x_s3;
+    wire [PIC_HEIGHT_BITS-1:0] pixel_y_s3;
+    // avg0_u and avg1_u outputs from Stage 3 (pipelined for Stage 4 IIR)
+    wire [DATA_WIDTH-1:0] avg0_u_s3_out;
+    wire [DATA_WIDTH-1:0] avg1_u_s3_out;
+    // Center pixel and win_size outputs from Stage 3 (pipelined for Stage 4)
+    wire [DATA_WIDTH-1:0] center_pixel_s3_out;
+    wire [5:0]            win_size_clip_s3_out;
+
+    //=========================================================================
+    // Gradient Delay Pipeline (to match Stage 2 latency)
+    // Stage 2 has 5 cycles of latency from stage1_valid to stage2_valid
+    // We need to delay grad signals to align with avg signals
+    // IMPORTANT: Shift every cycle to allow valid data to propagate through
+    //=========================================================================
+    reg [GRAD_WIDTH-1:0] grad_delay [0:5];
+    reg [GRAD_WIDTH-1:0] grad_h_delay [0:5];
+    reg [GRAD_WIDTH-1:0] grad_v_delay [0:5];
+    reg [PIC_WIDTH_BITS-1:0] pixel_x_delay [0:5];
+    reg [PIC_HEIGHT_BITS-1:0] pixel_y_delay [0:5];
+
+    integer k;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (k = 0; k <= 5; k = k + 1) begin
+                grad_delay[k] <= {GRAD_WIDTH{1'b0}};
+                grad_h_delay[k] <= {GRAD_WIDTH{1'b0}};
+                grad_v_delay[k] <= {GRAD_WIDTH{1'b0}};
+                pixel_x_delay[k] <= {PIC_WIDTH_BITS{1'b0}};
+                pixel_y_delay[k] <= {PIC_HEIGHT_BITS{1'b0}};
+            end
+        end else if (enable) begin
+            // Always shift to allow valid data to propagate through the pipeline
+            // Input new data when stage1_valid fires, otherwise input 0
+            grad_delay[0] <= stage1_valid ? grad_s1 : {GRAD_WIDTH{1'b0}};
+            grad_h_delay[0] <= stage1_valid ? grad_h_s1 : {GRAD_WIDTH{1'b0}};
+            grad_v_delay[0] <= stage1_valid ? grad_v_s1 : {GRAD_WIDTH{1'b0}};
+            pixel_x_delay[0] <= stage1_valid ? center_x_s1 : {PIC_WIDTH_BITS{1'b0}};
+            pixel_y_delay[0] <= stage1_valid ? center_y_s1 : {PIC_HEIGHT_BITS{1'b0}};
+            for (k = 1; k <= 5; k = k + 1) begin
+                grad_delay[k] <= grad_delay[k-1];
+                grad_h_delay[k] <= grad_h_delay[k-1];
+                grad_v_delay[k] <= grad_v_delay[k-1];
+                pixel_x_delay[k] <= pixel_x_delay[k-1];
+                pixel_y_delay[k] <= pixel_y_delay[k-1];
+            end
+        end
+    end
+
+    //=========================================================================
+    // Delay chains for Stage 4 inputs (must match Stage 3 pipeline depth)
+    // Stage 3 has 4 pipeline stages with valid gating
+    //=========================================================================
+    reg [DATA_WIDTH-1:0]     avg0_u_s1, avg0_u_s2, avg0_u_s3, avg0_u_s4;
+    reg [DATA_WIDTH-1:0]     avg1_u_s1, avg1_u_s2, avg1_u_s3, avg1_u_s4;
+    reg [DATA_WIDTH-1:0]     center_s1, center_s2, center_s3, center_s4;
+    reg [WIN_SIZE_WIDTH-1:0] win_size_s1, win_size_s2, win_size_s3, win_size_s4;
+    reg                      delay_valid_s1, delay_valid_s2, delay_valid_s3, delay_valid_s4;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            avg0_u_s1 <= {DATA_WIDTH{1'b0}};
+            avg0_u_s2 <= {DATA_WIDTH{1'b0}};
+            avg0_u_s3 <= {DATA_WIDTH{1'b0}};
+            avg0_u_s4 <= {DATA_WIDTH{1'b0}};
+            avg1_u_s1 <= {DATA_WIDTH{1'b0}};
+            avg1_u_s2 <= {DATA_WIDTH{1'b0}};
+            avg1_u_s3 <= {DATA_WIDTH{1'b0}};
+            avg1_u_s4 <= {DATA_WIDTH{1'b0}};
+            center_s1 <= {DATA_WIDTH{1'b0}};
+            center_s2 <= {DATA_WIDTH{1'b0}};
+            center_s3 <= {DATA_WIDTH{1'b0}};
+            center_s4 <= {DATA_WIDTH{1'b0}};
+            win_size_s1 <= {WIN_SIZE_WIDTH{1'b0}};
+            win_size_s2 <= {WIN_SIZE_WIDTH{1'b0}};
+            win_size_s3 <= {WIN_SIZE_WIDTH{1'b0}};
+            win_size_s4 <= {WIN_SIZE_WIDTH{1'b0}};
+            delay_valid_s1 <= 1'b0;
+            delay_valid_s2 <= 1'b0;
+            delay_valid_s3 <= 1'b0;
+            delay_valid_s4 <= 1'b0;
+        end else if (enable && !bypass) begin
+            // Stage 1: capture when stage2_valid fires
+            // Use the properly pipelined center_pixel and win_size from Stage 2
+            if (stage2_valid) begin
+                avg0_u_s1 <= avg0_u;
+                avg1_u_s1 <= avg1_u;
+                center_s1 <= center_pixel_s2_out;  // Use pipelined center from Stage 2
+                win_size_s1 <= win_size_s2_out;     // Use pipelined win_size from Stage 2
+                delay_valid_s1 <= 1'b1;
+            end else begin
+                delay_valid_s1 <= 1'b0;
+            end
+
+            // Stage 2: shift only when s1 was valid
+            if (delay_valid_s1) begin
+                avg0_u_s2 <= avg0_u_s1;
+                avg1_u_s2 <= avg1_u_s1;
+                center_s2 <= center_s1;
+                win_size_s2 <= win_size_s1;
+                delay_valid_s2 <= 1'b1;
+            end else begin
+                delay_valid_s2 <= 1'b0;
+            end
+
+            // Stage 3: shift only when s2 was valid
+            if (delay_valid_s2) begin
+                avg0_u_s3 <= avg0_u_s2;
+                avg1_u_s3 <= avg1_u_s2;
+                center_s3 <= center_s2;
+                win_size_s3 <= win_size_s2;
+                delay_valid_s3 <= 1'b1;
+            end else begin
+                delay_valid_s3 <= 1'b0;
+            end
+
+            // Stage 4: shift only when s3 was valid
+            if (delay_valid_s3) begin
+                avg0_u_s4 <= avg0_u_s3;
+                avg1_u_s4 <= avg1_u_s3;
+                center_s4 <= center_s3;
+                win_size_s4 <= win_size_s3;
+                delay_valid_s4 <= 1'b1;
+            end else begin
+                delay_valid_s4 <= 1'b0;
+            end
+        end
+    end
 
     //=========================================================================
     // Stage 4 Outputs (Final)
     //=========================================================================
     wire [DATA_WIDTH-1:0] dout_final;
     wire                  dout_final_valid;
+    // Position outputs from Stage 4
+    wire [13:0]           pixel_x_final;
+    wire [12:0]           pixel_y_final;
 
     //=========================================================================
     // Bypass Path
@@ -319,6 +464,8 @@ module isp_csiir_top #(
         .window_4_3    (window_4_3),
         .window_4_4    (window_4_4),
         .window_valid  (window_valid),
+        .window_center_x (window_center_x),
+        .window_center_y (window_center_y),
         .boundary_mode (boundary_mode)
     );
 
@@ -373,11 +520,15 @@ module isp_csiir_top #(
         .pixel_y          (pixel_y),
         .pic_width_m1     (pic_width_m1),
         .pic_height_m1    (pic_height_m1),
+        .window_center_x  (window_center_x),
+        .window_center_y  (window_center_y),
         .grad_h           (grad_h_s1),
         .grad_v           (grad_v_s1),
         .grad             (grad_s1),
         .win_size_clip    (win_size_clip_s1),
-        .stage1_valid     (stage1_valid)
+        .stage1_valid     (stage1_valid),
+        .center_x_out     (center_x_s1),
+        .center_y_out     (center_y_s1)
     );
 
     //=========================================================================
@@ -433,7 +584,13 @@ module isp_csiir_top #(
         .avg1_d           (avg1_d),
         .avg1_l           (avg1_l),
         .avg1_r           (avg1_r),
-        .stage2_valid     (stage2_valid)
+        .stage2_valid     (stage2_valid),
+        .center_pixel_out (center_pixel_s2_out),
+        .win_size_out     (win_size_s2_out),
+        .pixel_x_in       (center_x_s1),
+        .pixel_y_in       (center_y_s1),
+        .pixel_x_out      (pixel_x_s2),
+        .pixel_y_out      (pixel_y_s2)
     );
 
     //=========================================================================
@@ -457,16 +614,30 @@ module isp_csiir_top #(
         .avg1_l          (avg1_l),
         .avg1_r          (avg1_r),
         .stage2_valid    (stage2_valid),
-        .grad            (grad_s1),
-        .grad_h          (grad_h_s1),
-        .grad_v          (grad_v_s1),
-        .pixel_x         (pixel_x),
-        .pixel_y         (pixel_y),
+        .grad            (grad_delay[4]),
+        .grad_h          (grad_h_delay[4]),
+        .grad_v          (grad_v_delay[4]),
+        .pixel_x         (pixel_x_s2),
+        .pixel_y         (pixel_y_s2),
         .pic_width_m1    (pic_width_m1),
         .pic_height_m1   (pic_height_m1),
+        // Instantaneous signals for line buffer write - use window center position
+        .grad_instant    (grad_s1),
+        .pixel_x_instant (center_x_s1),
+        .pixel_y_instant (center_y_s1),
+        .stage1_valid    (stage1_valid),
+        // Center pixel and win_size inputs for pipelining
+        .center_pixel_in  (center_pixel_s2_out),
+        .win_size_clip_in (win_size_s2_out),
         .blend0_dir_avg  (blend0_dir_avg),
         .blend1_dir_avg  (blend1_dir_avg),
-        .stage3_valid    (stage3_valid)
+        .stage3_valid    (stage3_valid),
+        .pixel_x_out     (pixel_x_s3),
+        .pixel_y_out     (pixel_y_s3),
+        .avg0_u_out      (avg0_u_s3_out),
+        .avg1_u_out      (avg1_u_s3_out),
+        .center_pixel_out (center_pixel_s3_out),
+        .win_size_clip_out (win_size_clip_s3_out)
     );
 
     //=========================================================================
@@ -483,11 +654,11 @@ module isp_csiir_top #(
         .blend0_dir_avg   (blend0_dir_avg),
         .blend1_dir_avg   (blend1_dir_avg),
         .stage3_valid     (stage3_valid),
-        .grad_h           (grad_h_s1),
-        .grad_v           (grad_v_s1),
-        .avg0_u           (avg0_u),
-        .avg1_u           (avg1_u),
-        .win_size_clip    (win_size_clip_s1),
+        .grad_h           (grad_h_delay[4]),
+        .grad_v           (grad_v_delay[4]),
+        .avg0_u           (avg0_u_s3_out),
+        .avg1_u           (avg1_u_s3_out),
+        .win_size_clip    (win_size_clip_s3_out),
         .blending_ratio_0 (blending_ratio_0),
         .blending_ratio_1 (blending_ratio_1),
         .blending_ratio_2 (blending_ratio_2),
@@ -496,9 +667,13 @@ module isp_csiir_top #(
         .win_size_thresh1 (win_size_thresh1),
         .win_size_thresh2 (win_size_thresh2),
         .win_size_thresh3 (win_size_thresh3),
-        .center_pixel     (window_2_2),
+        .center_pixel     (center_pixel_s3_out),
+        .pixel_x_in       (pixel_x_s3),
+        .pixel_y_in       (pixel_y_s3),
         .dout             (dout_final),
-        .dout_valid       (dout_final_valid)
+        .dout_valid       (dout_final_valid),
+        .pixel_x_out      (pixel_x_final),
+        .pixel_y_out      (pixel_y_final)
     );
 
     //=========================================================================

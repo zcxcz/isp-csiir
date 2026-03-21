@@ -42,9 +42,15 @@ module stage4_iir_blend #(
     // Center pixel
     input  wire [DATA_WIDTH-1:0]       center_pixel,
 
+    // Position inputs (for tracking)
+    input  wire [13:0]                 pixel_x_in,
+    input  wire [12:0]                 pixel_y_in,
+
     // Outputs
     output reg  [DATA_WIDTH-1:0]       dout,
-    output reg                         dout_valid
+    output reg                         dout_valid,
+    output reg  [13:0]                 pixel_x_out,
+    output reg  [12:0]                 pixel_y_out
 );
 
     `include "isp_csiir_defines.vh"
@@ -69,14 +75,36 @@ module stage4_iir_blend #(
     reg [DATA_WIDTH-1:0] center_pixel_s3;
     reg [WIN_SIZE_WIDTH-1:0] win_size_clip_s3;
     reg valid_s3;
+    // Position pipeline
+    reg [13:0] pixel_x_s1, pixel_x_s2, pixel_x_s3;
+    reg [12:0] pixel_y_s1, pixel_y_s2, pixel_y_s3;
 
-    // Blend factor registers (must be declared outside always block for Verilog-2001)
-    reg [3:0] blend_factor;
-    reg [3:0] blend_factor1;
+    // Blend factor - combinational for correct timing
+    wire [3:0] blend_factor;
+    wire [3:0] blend_factor1;
+
+    assign blend_factor = (win_size_clip_s2 < win_size_thresh0[5:0]) ? 4'd1 :  // 2x2 kernel
+                          (win_size_clip_s2 < win_size_thresh1[5:0]) ? 4'd2 :  // 3x3 kernel
+                          (win_size_clip_s2 < win_size_thresh2[5:0]) ? 4'd3 :  // 4x4 kernel
+                          (win_size_clip_s2 < win_size_thresh3[5:0]) ? 4'd4 :  // 5x5 kernel
+                          4'd4;  // Maximum blend
+
+    assign blend_factor1 = (win_size_clip_s2 < win_size_thresh0[5:0]) ? 4'd2 :  // 2x2/3x3 kernel
+                           (win_size_clip_s2 < win_size_thresh1[5:0]) ? 4'd3 :  // 3x3/4x4 kernel
+                           (win_size_clip_s2 < win_size_thresh2[5:0]) ? 4'd4 :  // 4x4/5x5 kernel
+                           (win_size_clip_s2 < win_size_thresh3[5:0]) ? 4'd4 :  // 5x5 kernel
+                           4'd4;  // Maximum blend
+
+    // Local integer for win_size_remain_8 calculation
     reg [WIN_SIZE_WIDTH:0] win_size_remain_8;
 
-    // Select blending ratio based on window size
-    reg [7:0] current_blend_ratio;
+    // Select blending ratio based on window size (combinational for correct timing)
+    wire [7:0] blend_ratio_comb;
+    assign blend_ratio_comb = (win_size_clip_s1[5:3] == 3'd2) ? blending_ratio_0 :
+                              (win_size_clip_s1[5:3] == 3'd3) ? blending_ratio_1 :
+                              (win_size_clip_s1[5:3] == 3'd4) ? blending_ratio_2 :
+                              (win_size_clip_s1[5:3] == 3'd5) ? blending_ratio_3 :
+                              8'd32;  // Default
 
     // Stage 1: Pipeline inputs
     always @(posedge clk or negedge rst_n) begin
@@ -90,6 +118,8 @@ module stage4_iir_blend #(
             grad_h_s1         <= 12'd0;
             grad_v_s1         <= 12'd0;
             valid_s1          <= 1'b0;
+            pixel_x_s1        <= 14'd0;
+            pixel_y_s1        <= 13'd0;
         end else if (enable && stage3_valid) begin
             blend0_dir_avg_s1 <= blend0_dir_avg;
             blend1_dir_avg_s1 <= blend1_dir_avg;
@@ -99,6 +129,8 @@ module stage4_iir_blend #(
             win_size_clip_s1  <= win_size_clip;
             grad_h_s1         <= grad_h;
             grad_v_s1         <= grad_v;
+            pixel_x_s1        <= pixel_x_in;
+            pixel_y_s1        <= pixel_y_in;
             valid_s1          <= 1'b1;
         end else begin
             valid_s1 <= 1'b0;
@@ -115,29 +147,23 @@ module stage4_iir_blend #(
             center_pixel_s2   <= {DATA_WIDTH{1'b0}};
             win_size_clip_s2  <= {WIN_SIZE_WIDTH{1'b0}};
             valid_s2          <= 1'b0;
+            pixel_x_s2        <= 14'd0;
+            pixel_y_s2        <= 13'd0;
         end else if (enable && valid_s1) begin
-            // Select blending ratio based on window size
-            // win_size_clip/8 - 2 gives index 0-3
-            case (win_size_clip_s1[5:3])
-                3'd2: current_blend_ratio <= blending_ratio_0;  // 16-23
-                3'd3: current_blend_ratio <= blending_ratio_1;  // 24-31
-                3'd4: current_blend_ratio <= blending_ratio_2;  // 32-39
-                3'd5: current_blend_ratio <= blending_ratio_3;  // 40-47
-                default: current_blend_ratio <= blending_ratio_0;
-            endcase
-
             // IIR blend: (ratio * dir_avg + (64 - ratio) * prev_avg) / 64
-            // blend_iir_avg = (ratio * dir_avg + (64 - ratio) * avg_u) / 64
-            blend0_iir_avg <= (current_blend_ratio * blend0_dir_avg_s1 +
-                              (64 - current_blend_ratio) * avg0_u_s1) / 64;
-            blend1_iir_avg <= (current_blend_ratio * blend1_dir_avg_s1 +
-                              (64 - current_blend_ratio) * avg1_u_s1) / 64;
+            // Use combinational ratio for correct timing
+            blend0_iir_avg <= (blend_ratio_comb * blend0_dir_avg_s1 +
+                              (64 - blend_ratio_comb) * avg0_u_s1) / 64;
+            blend1_iir_avg <= (blend_ratio_comb * blend1_dir_avg_s1 +
+                              (64 - blend_ratio_comb) * avg1_u_s1) / 64;
 
             // Pipeline
             blend0_dir_avg_s2 <= blend0_dir_avg_s1;
             blend1_dir_avg_s2 <= blend1_dir_avg_s1;
             center_pixel_s2   <= center_pixel_s1;
             win_size_clip_s2  <= win_size_clip_s1;
+            pixel_x_s2        <= pixel_x_s1;
+            pixel_y_s2        <= pixel_y_s1;
             valid_s2          <= 1'b1;
         end else begin
             valid_s2 <= 1'b0;
@@ -152,25 +178,10 @@ module stage4_iir_blend #(
             center_pixel_s3 <= {DATA_WIDTH{1'b0}};
             win_size_clip_s3 <= {WIN_SIZE_WIDTH{1'b0}};
             valid_s3        <= 1'b0;
+            pixel_x_s3      <= 14'd0;
+            pixel_y_s3      <= 13'd0;
         end else if (enable && valid_s2) begin
-            // Select blend factors based on window size thresholds
-            // Per algorithm: different blend_factor kernels for different window sizes
-            if (win_size_clip_s2 < win_size_thresh0[5:0]) begin
-                blend_factor  <= 4'd1;  // 2x2 kernel
-                blend_factor1 <= 4'd2;  // 2x2/3x3 kernel
-            end else if (win_size_clip_s2 < win_size_thresh1[5:0]) begin
-                blend_factor  <= 4'd2;  // 3x3 kernel
-                blend_factor1 <= 4'd3;  // 3x3/4x4 kernel
-            end else if (win_size_clip_s2 < win_size_thresh2[5:0]) begin
-                blend_factor  <= 4'd3;  // 4x4 kernel
-                blend_factor1 <= 4'd4;  // 4x4/5x5 kernel
-            end else if (win_size_clip_s2 < win_size_thresh3[5:0]) begin
-                blend_factor  <= 4'd4;  // 5x5 kernel
-                blend_factor1 <= 4'd4;  // 5x5 kernel
-            end else begin
-                blend_factor  <= 4'd4;  // Maximum blend
-                blend_factor1 <= 4'd4;
-            end
+            // blend_factor and blend_factor1 are now combinational wires
 
             // Apply blend factors with gradient direction consideration
             // If grad_h > grad_v, use horizontal blend pattern, else vertical
@@ -189,6 +200,8 @@ module stage4_iir_blend #(
 
             center_pixel_s3  <= center_pixel_s2;
             win_size_clip_s3 <= win_size_clip_s2;
+            pixel_x_s3       <= pixel_x_s2;
+            pixel_y_s3       <= pixel_y_s2;
             valid_s3         <= 1'b1;
         end else begin
             valid_s3 <= 1'b0;
@@ -202,6 +215,8 @@ module stage4_iir_blend #(
         if (!rst_n) begin
             dout       <= {DATA_WIDTH{1'b0}};
             dout_valid <= 1'b0;
+            pixel_x_out <= 14'd0;
+            pixel_y_out <= 13'd0;
         end else if (enable && valid_s3) begin
             // Calculate win_size_remain_8
             win_size_remain_8 = win_size_clip_s3 - (win_size_clip_s3 >> 3);
@@ -221,6 +236,8 @@ module stage4_iir_blend #(
                         blend1_out * (8 - win_size_remain_8[2:0])) / 8;
             end
 
+            pixel_x_out <= pixel_x_s3;
+            pixel_y_out <= pixel_y_s3;
             dout_valid <= 1'b1;
         end else begin
             dout_valid <= 1'b0;

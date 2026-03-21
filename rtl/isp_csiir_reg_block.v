@@ -68,6 +68,7 @@ module isp_csiir_reg_block #(
     localparam [APB_ADDR_WIDTH-1:0] ADDR_CLIP_Y      = 8'h20;
     localparam [APB_ADDR_WIDTH-1:0] ADDR_CLIP_SFT    = 8'h24;
     localparam [APB_ADDR_WIDTH-1:0] ADDR_MOT_PROTECT = 8'h28;
+    localparam [APB_ADDR_WIDTH-1:0] ADDR_CLIP_Y_3    = 8'h2C;  // 4th threshold for 10-bit mode
 
     wire write_en;
     wire read_en;
@@ -209,7 +210,7 @@ module isp_csiir_reg_block #(
                         win_size_clip_y_0 <= pwdata[9:0];
                         win_size_clip_y_1 <= pwdata[19:10];
                         win_size_clip_y_2 <= pwdata[29:20];
-                        // win_size_clip_y_3 would need another register
+                        win_size_clip_y_3 <= {2'b0, pwdata[31:30]};  // Use top 2 bits for y_3
                     end else begin
                         win_size_clip_y_0 <= {2'b0, pwdata[7:0]};
                         win_size_clip_y_1 <= {2'b0, pwdata[15:8]};
@@ -228,6 +229,10 @@ module isp_csiir_reg_block #(
                     mot_protect_1 <= pwdata[15:8];
                     mot_protect_2 <= pwdata[23:16];
                     mot_protect_3 <= pwdata[31:24];
+                end
+                ADDR_CLIP_Y_3: begin
+                    // 4th threshold for 10-bit mode
+                    win_size_clip_y_3 <= pwdata[9:0];
                 end
                 default: ;
             endcase

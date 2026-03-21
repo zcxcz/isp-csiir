@@ -32,6 +32,10 @@ module isp_csiir_line_buffer #(
     output wire [DATA_WIDTH-1:0]     window_4_0, window_4_1, window_4_2, window_4_3, window_4_4,
     output reg                       window_valid,
 
+    // Window center position (for pixel tracking)
+    output wire [LINE_ADDR_WIDTH-1:0] window_center_x,
+    output wire [ROW_CNT_WIDTH-1:0]   window_center_y,
+
     // Boundary mode: 00=zero, 01=replicate, 10=mirror
     input  wire [1:0]                boundary_mode
 );
@@ -118,7 +122,9 @@ module isp_csiir_line_buffer #(
                 endcase
 
                 // Update pointers
-                if (eol || col_cnt == IMG_WIDTH - 1) begin
+                // Use only col_cnt for EOL detection - external eol signal timing
+                // doesn't align with our internal counter state
+                if (col_cnt == IMG_WIDTH - 1) begin
                     // End of line: switch to next line buffer
                     wr_ptr  <= {LINE_ADDR_WIDTH{1'b0}};
                     col_cnt <= {LINE_ADDR_WIDTH{1'b0}};
@@ -214,8 +220,9 @@ module isp_csiir_line_buffer #(
                 col_shift_0 <= {DATA_WIDTH{1'b0}};
 
             // Window valid after 4 lines stored (need 5 rows for 5x5)
+            // AND after 5 columns processed (need 5 cycles for horizontal shift register to fill)
             window_valid <= (row_cnt >= {{ROW_CNT_BITS-3{1'b0}}, 3'd4}) &&
-                            (col_cnt >= {{LINE_ADDR_WIDTH-2{1'b0}}, 2'd2});
+                            (col_cnt >= {{LINE_ADDR_WIDTH-3{1'b0}}, 3'd5});
         end else begin
             window_valid <= 1'b0;
         end
@@ -327,5 +334,12 @@ module isp_csiir_line_buffer #(
     assign window_4_2 = row4_tap2;
     assign window_4_3 = row4_tap3;
     assign window_4_4 = row4_tap4;
+
+    // Window center position: center is at (col_cnt - 3, row_cnt - 2)
+    // For a 5x5 window:
+    // - Horizontal: 5-tap shift register, center is at tap 2 = col_cnt - 3 (0-indexed)
+    // - Vertical: center row is 2 rows behind the current input = row_cnt - 2
+    assign window_center_x = (col_cnt >= 3) ? (col_cnt - {{LINE_ADDR_WIDTH-2{1'b0}}, 3'd3}) : {LINE_ADDR_WIDTH{1'b0}};
+    assign window_center_y = (row_cnt >= 2) ? (row_cnt - {{ROW_CNT_WIDTH-2{1'b0}}, 2'd2}) : {ROW_CNT_WIDTH{1'b0}};
 
 endmodule
