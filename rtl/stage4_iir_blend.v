@@ -3,25 +3,31 @@
 // Purpose: IIR filtering and final blending
 // Author: rtl-impl
 // Date: 2026-03-22
-// Version: v1.0
+// Version: v2.0 - Added signed data support and line buffer writeback
 //-----------------------------------------------------------------------------
 // Description:
 //   Implements Stage 4 of ISP-CSIIR pipeline:
 //   - Blend ratio selection based on window size
-//   - IIR horizontal blending (current row with previous row)
+//   - IIR horizontal blending (current row with previous row) - signed arithmetic
 //   - Window blending (blend0 vs blend1 vs center)
-//   - Final output generation
+//   - s11 to u10 conversion with saturation
+//   - Final output generation and line buffer writeback
+//
+// Data Format:
+//   - Input blend: s11 (11-bit signed, range -512 to +511)
+//   - Output: u10 (10-bit unsigned, range 0-1023)
 //
 // Pipeline Structure (5 cycles):
 //   Cycle 0: Input buffer
 //   Cycle 1: Ratio selection
-//   Cycle 2: IIR mixing
-//   Cycle 3: Window mixing
-//   Cycle 4: Final mixing
+//   Cycle 2: IIR mixing (signed)
+//   Cycle 3: Window mixing (signed)
+//   Cycle 4: Final mixing + s11->u10 conversion
 //-----------------------------------------------------------------------------
 
 module stage4_iir_blend #(
     parameter DATA_WIDTH     = 10,
+    parameter SIGNED_WIDTH   = 11,   // Signed data width
     parameter GRAD_WIDTH     = 14,
     parameter WIN_SIZE_WIDTH = 6,
     parameter LINE_ADDR_WIDTH = 14,
@@ -31,12 +37,12 @@ module stage4_iir_blend #(
     input  wire                        rst_n,
     input  wire                        enable,
 
-    // Stage 3 outputs
-    input  wire [DATA_WIDTH-1:0]       blend0_dir_avg,
-    input  wire [DATA_WIDTH-1:0]       blend1_dir_avg,
+    // Stage 3 outputs (s11 signed format)
+    input  wire signed [SIGNED_WIDTH-1:0] blend0_dir_avg,
+    input  wire signed [SIGNED_WIDTH-1:0] blend1_dir_avg,
     input  wire                        stage3_valid,
-    input  wire [DATA_WIDTH-1:0]       avg0_u,
-    input  wire [DATA_WIDTH-1:0]       avg1_u,
+    input  wire signed [SIGNED_WIDTH-1:0] avg0_u,
+    input  wire signed [SIGNED_WIDTH-1:0] avg1_u,
     input  wire [WIN_SIZE_WIDTH-1:0]   win_size_clip,
     input  wire [DATA_WIDTH-1:0]       center_pixel,
 
@@ -46,7 +52,7 @@ module stage4_iir_blend #(
     input  wire [7:0]                  blending_ratio_2,
     input  wire [7:0]                  blending_ratio_3,
 
-    // Output
+    // Output (u10 unsigned format)
     output reg  [DATA_WIDTH-1:0]       dout,
     output reg                         dout_valid,
 
@@ -56,22 +62,22 @@ module stage4_iir_blend #(
     output reg  [LINE_ADDR_WIDTH-1:0]  pixel_x_out,
     output reg  [ROW_CNT_WIDTH-1:0]    pixel_y_out,
 
-    // IIR feedback control
-    output reg                         iir_wb_en,
-    output reg  [LINE_ADDR_WIDTH-1:0]  iir_wb_addr,
-    output reg  [DATA_WIDTH-1:0]       iir_wb_data
+    // Line buffer writeback interface (for IIR feedback)
+    output reg                         lb_wb_en,
+    output reg  [LINE_ADDR_WIDTH-1:0]  lb_wb_addr,
+    output reg  [DATA_WIDTH-1:0]       lb_wb_data
 );
 
     //=========================================================================
     // Local Parameters
     //=========================================================================
-    localparam IIR_WIDTH = DATA_WIDTH + 7;  // 17-bit for IIR intermediate
+    localparam IIR_WIDTH = SIGNED_WIDTH + 7;  // 18-bit for IIR intermediate (signed)
 
     //=========================================================================
     // Cycle 0: Input Buffer
     //=========================================================================
-    reg [DATA_WIDTH-1:0]     blend0_s0, blend1_s0;
-    reg [DATA_WIDTH-1:0]     avg0_u_s0, avg1_u_s0;
+    reg signed [SIGNED_WIDTH-1:0] blend0_s0, blend1_s0;
+    reg signed [SIGNED_WIDTH-1:0] avg0_u_s0, avg1_u_s0;
     reg [DATA_WIDTH-1:0]     center_s0;
     reg [WIN_SIZE_WIDTH-1:0] win_size_s0;
     reg                      valid_s0;
@@ -80,10 +86,10 @@ module stage4_iir_blend #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            blend0_s0   <= {DATA_WIDTH{1'b0}};
-            blend1_s0   <= {DATA_WIDTH{1'b0}};
-            avg0_u_s0   <= {DATA_WIDTH{1'b0}};
-            avg1_u_s0   <= {DATA_WIDTH{1'b0}};
+            blend0_s0   <= {SIGNED_WIDTH{1'b0}};
+            blend1_s0   <= {SIGNED_WIDTH{1'b0}};
+            avg0_u_s0   <= {SIGNED_WIDTH{1'b0}};
+            avg1_u_s0   <= {SIGNED_WIDTH{1'b0}};
             center_s0   <= {DATA_WIDTH{1'b0}};
             win_size_s0 <= {WIN_SIZE_WIDTH{1'b0}};
             valid_s0    <= 1'b0;
@@ -125,8 +131,8 @@ module stage4_iir_blend #(
     wire [2:0] win_remain_comb = win_size_s0[2:0];  // win_size % 8
 
     // Pipeline registers for Cycle 1
-    reg [DATA_WIDTH-1:0]     blend0_s1, blend1_s1;
-    reg [DATA_WIDTH-1:0]     avg0_u_s1, avg1_u_s1;
+    reg signed [SIGNED_WIDTH-1:0] blend0_s1, blend1_s1;
+    reg signed [SIGNED_WIDTH-1:0] avg0_u_s1, avg1_u_s1;
     reg [DATA_WIDTH-1:0]     center_s1;
     reg [7:0]                ratio_s1;
     reg [2:0]                factor_s1;
@@ -137,10 +143,10 @@ module stage4_iir_blend #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            blend0_s1   <= {DATA_WIDTH{1'b0}};
-            blend1_s1   <= {DATA_WIDTH{1'b0}};
-            avg0_u_s1   <= {DATA_WIDTH{1'b0}};
-            avg1_u_s1   <= {DATA_WIDTH{1'b0}};
+            blend0_s1   <= {SIGNED_WIDTH{1'b0}};
+            blend1_s1   <= {SIGNED_WIDTH{1'b0}};
+            avg0_u_s1   <= {SIGNED_WIDTH{1'b0}};
+            avg1_u_s1   <= {SIGNED_WIDTH{1'b0}};
             center_s1   <= {DATA_WIDTH{1'b0}};
             ratio_s1    <= 8'd32;
             factor_s1   <= 3'd2;
@@ -164,20 +170,27 @@ module stage4_iir_blend #(
     end
 
     //=========================================================================
-    // Cycle 2: IIR Mixing
+    // Cycle 2: IIR Mixing (Signed Arithmetic)
     //=========================================================================
     // IIR blend: ratio * current + (64 - ratio) * previous / 64
-    wire [IIR_WIDTH-1:0] blend0_iir_comb = (ratio_s1 * blend0_s1 + (64 - ratio_s1) * avg0_u_s1) >> 6;
-    wire [IIR_WIDTH-1:0] blend1_iir_comb = (ratio_s1 * blend1_s1 + (64 - ratio_s1) * avg1_u_s1) >> 6;
+    // Using signed arithmetic
+    wire signed [IIR_WIDTH-1:0] blend0_iir_comb = (ratio_s1 * blend0_s1 + (64 - ratio_s1) * avg0_u_s1) >>> 6;
+    wire signed [IIR_WIDTH-1:0] blend1_iir_comb = (ratio_s1 * blend1_s1 + (64 - ratio_s1) * avg1_u_s1) >>> 6;
 
-    // Saturate to 10-bit
-    wire [DATA_WIDTH-1:0] blend0_iir_sat = (blend0_iir_comb > {{IIR_WIDTH-DATA_WIDTH{1'b0}}, {DATA_WIDTH{1'b1}}}) ?
-                                           {DATA_WIDTH{1'b1}} : blend0_iir_comb[DATA_WIDTH-1:0];
-    wire [DATA_WIDTH-1:0] blend1_iir_sat = (blend1_iir_comb > {{IIR_WIDTH-DATA_WIDTH{1'b0}}, {DATA_WIDTH{1'b1}}}) ?
-                                           {DATA_WIDTH{1'b1}} : blend1_iir_comb[DATA_WIDTH-1:0];
+    // Saturate to s11 range [-512, +511]
+    wire signed [SIGNED_WIDTH-1:0] blend0_iir_sat;
+    wire signed [SIGNED_WIDTH-1:0] blend1_iir_sat;
+
+    assign blend0_iir_sat = (blend0_iir_comb > $signed(11'sd511)) ? $signed(11'sd511) :
+                            (blend0_iir_comb < $signed(-11'sd512)) ? $signed(-11'sd512) :
+                            blend0_iir_comb[SIGNED_WIDTH-1:0];
+
+    assign blend1_iir_sat = (blend1_iir_comb > $signed(11'sd511)) ? $signed(11'sd511) :
+                            (blend1_iir_comb < $signed(-11'sd512)) ? $signed(-11'sd512) :
+                            blend1_iir_comb[SIGNED_WIDTH-1:0];
 
     // Pipeline registers for Cycle 2
-    reg [DATA_WIDTH-1:0] blend0_iir_s2, blend1_iir_s2;
+    reg signed [SIGNED_WIDTH-1:0] blend0_iir_s2, blend1_iir_s2;
     reg [DATA_WIDTH-1:0] center_s2;
     reg [2:0]            factor_s2;
     reg [2:0]            remain_s2;
@@ -187,8 +200,8 @@ module stage4_iir_blend #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            blend0_iir_s2 <= {DATA_WIDTH{1'b0}};
-            blend1_iir_s2 <= {DATA_WIDTH{1'b0}};
+            blend0_iir_s2 <= {SIGNED_WIDTH{1'b0}};
+            blend1_iir_s2 <= {SIGNED_WIDTH{1'b0}};
             center_s2     <= {DATA_WIDTH{1'b0}};
             factor_s2     <= 3'd2;
             remain_s2     <= 3'd0;
@@ -208,20 +221,34 @@ module stage4_iir_blend #(
     end
 
     //=========================================================================
-    // Cycle 3: Window Mixing
+    // Cycle 3: Window Mixing (Signed Arithmetic)
     //=========================================================================
-    // Window blend: factor * iir + (4 - factor) * center / 4
-    wire [11:0] blend0_out_comb = (blend0_iir_s2 * factor_s2 + center_s2 * (4 - factor_s2)) >> 2;
-    wire [11:0] blend1_out_comb = (blend1_iir_s2 * factor_s2 + center_s2 * (4 - factor_s2)) >> 2;
+    // Convert center pixel (u10) to s11 for mixing
+    wire signed [SIGNED_WIDTH-1:0] center_s11 = $signed({1'b0, center_s2}) - $signed(11'sd512);
 
-    // Saturate to 10-bit
-    wire [DATA_WIDTH-1:0] blend0_out_sat = (blend0_out_comb > {2'b0, {DATA_WIDTH{1'b1}}}) ?
-                                           {DATA_WIDTH{1'b1}} : blend0_out_comb[DATA_WIDTH-1:0];
-    wire [DATA_WIDTH-1:0] blend1_out_sat = (blend1_out_comb > {2'b0, {DATA_WIDTH{1'b1}}}) ?
-                                           {DATA_WIDTH{1'b1}} : blend1_out_comb[DATA_WIDTH-1:0];
+    // Compute inverse factor (4 - factor)
+    wire [3:0] inv_factor = 4'd4 - {1'b0, factor_s2};
+
+    // Window blend: factor * iir + (4 - factor) * center / 4 (signed)
+    wire signed [13:0] blend0_out_comb = (blend0_iir_s2 * $signed({5'b0, factor_s2}) +
+                                          center_s11 * $signed({5'b0, inv_factor})) >>> 2;
+    wire signed [13:0] blend1_out_comb = (blend1_iir_s2 * $signed({5'b0, factor_s2}) +
+                                          center_s11 * $signed({5'b0, inv_factor})) >>> 2;
+
+    // Saturate to s11 range
+    wire signed [SIGNED_WIDTH-1:0] blend0_out_sat;
+    wire signed [SIGNED_WIDTH-1:0] blend1_out_sat;
+
+    assign blend0_out_sat = (blend0_out_comb > $signed(11'sd511)) ? $signed(11'sd511) :
+                            (blend0_out_comb < $signed(-11'sd512)) ? $signed(-11'sd512) :
+                            blend0_out_comb[SIGNED_WIDTH-1:0];
+
+    assign blend1_out_sat = (blend1_out_comb > $signed(11'sd511)) ? $signed(11'sd511) :
+                            (blend1_out_comb < $signed(-11'sd512)) ? $signed(-11'sd512) :
+                            blend1_out_comb[SIGNED_WIDTH-1:0];
 
     // Pipeline registers for Cycle 3
-    reg [DATA_WIDTH-1:0] blend0_out_s3, blend1_out_s3;
+    reg signed [SIGNED_WIDTH-1:0] blend0_out_s3, blend1_out_s3;
     reg [2:0]            remain_s3;
     reg                  valid_s3;
     reg [LINE_ADDR_WIDTH-1:0] pixel_x_s3;
@@ -229,8 +256,8 @@ module stage4_iir_blend #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            blend0_out_s3 <= {DATA_WIDTH{1'b0}};
-            blend1_out_s3 <= {DATA_WIDTH{1'b0}};
+            blend0_out_s3 <= {SIGNED_WIDTH{1'b0}};
+            blend1_out_s3 <= {SIGNED_WIDTH{1'b0}};
             remain_s3     <= 3'd0;
             valid_s3      <= 1'b0;
             pixel_x_s3    <= {LINE_ADDR_WIDTH{1'b0}};
@@ -246,14 +273,32 @@ module stage4_iir_blend #(
     end
 
     //=========================================================================
-    // Cycle 4: Final Mixing
+    // Cycle 4: Final Mixing + s11 to u10 Conversion
     //=========================================================================
-    // Final blend: remain * blend0 + (8 - remain) * blend1 / 8
-    wire [12:0] dout_comb = (blend0_out_s3 * remain_s3 + blend1_out_s3 * (8 - remain_s3)) >> 3;
+    // Compute inverse remainder (8 - remain)
+    wire [4:0] inv_remain = 5'd8 - {2'b0, remain_s3};
 
-    // Saturate to 10-bit
-    wire [DATA_WIDTH-1:0] dout_sat = (dout_comb > {3'b0, {DATA_WIDTH{1'b1}}}) ?
-                                     {DATA_WIDTH{1'b1}} : dout_comb[DATA_WIDTH-1:0];
+    // Final blend: remain * blend0 + (8 - remain) * blend1 / 8 (signed)
+    wire signed [14:0] blend_final_s11 = (blend0_out_s3 * $signed({5'b0, remain_s3}) +
+                                          blend1_out_s3 * $signed({5'b0, inv_remain})) >>> 3;
+
+    // Saturate to s11 range
+    wire signed [SIGNED_WIDTH-1:0] blend_final_sat;
+    assign blend_final_sat = (blend_final_s11 > $signed(11'sd511)) ? $signed(11'sd511) :
+                             (blend_final_s11 < $signed(-11'sd512)) ? $signed(-11'sd512) :
+                             blend_final_s11[SIGNED_WIDTH-1:0];
+
+    //=========================================================================
+    // s11 to u10 Conversion with Saturation
+    //=========================================================================
+    // u10 = clip(s11 + 512, 0, 1023)
+    // s11 range: [-512, +511], s11 + 512 range: [0, 1023]
+    wire [11:0] temp_unsigned = $signed(blend_final_sat) + $signed(12'sd512);
+
+    wire [DATA_WIDTH-1:0] dout_sat;
+    assign dout_sat = (temp_unsigned[11]) ? 10'd0 :                    // Negative -> 0
+                      (temp_unsigned > 12'd1023) ? 10'd1023 :          // Overflow -> 1023
+                      temp_unsigned[DATA_WIDTH-1:0];                   // Normal case
 
     // Output registers
     always @(posedge clk or negedge rst_n) begin
@@ -262,18 +307,18 @@ module stage4_iir_blend #(
             dout_valid  <= 1'b0;
             pixel_x_out <= {LINE_ADDR_WIDTH{1'b0}};
             pixel_y_out <= {ROW_CNT_WIDTH{1'b0}};
-            iir_wb_en   <= 1'b0;
-            iir_wb_addr <= {LINE_ADDR_WIDTH{1'b0}};
-            iir_wb_data <= {DATA_WIDTH{1'b0}};
+            lb_wb_en    <= 1'b0;
+            lb_wb_addr  <= {LINE_ADDR_WIDTH{1'b0}};
+            lb_wb_data  <= {DATA_WIDTH{1'b0}};
         end else if (enable) begin
             dout        <= dout_sat;
             dout_valid  <= valid_s3;
             pixel_x_out <= pixel_x_s3;
             pixel_y_out <= pixel_y_s3;
-            // IIR feedback control
-            iir_wb_en   <= valid_s3;
-            iir_wb_addr <= pixel_x_s3;
-            iir_wb_data <= dout_sat;
+            // Line buffer writeback control
+            lb_wb_en    <= valid_s3;
+            lb_wb_addr  <= pixel_x_s3;
+            lb_wb_data  <= dout_sat;
         end
     end
 

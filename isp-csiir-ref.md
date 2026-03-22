@@ -1,10 +1,13 @@
 # ISP-CSIIR 算法参考文档
 
 ## 说明
-若变量名称类似为 a_5x5(i, j)，5x5 标识说明这是一个二维矩阵，(i, j) 为当前矩阵中心像素坐标；
-若变量名称类似 b(i, j)， (i, j) 为当前像素坐标；
+
+若变量名称为 src_uv_u10, u10 后缀表明其数据类型为 10-bit 无符号数；
+若变量名称为 src_uv_s11, s11 后缀表明其数据类型为 11-bit 有符号数（MSB 为 1-bit 符号位）；
+若变量名称类似为 a_5x5(i, j), 5x5 标识说明这是一个二维矩阵，(i, j) 为当前矩阵中心像素坐标；
+若变量名称类似 b(i, j), (i, j) 为当前像素坐标；
 clip(a, b, c) 为限幅函数，当 a 在 (b, c) 区间内时，取 a 值，小于 b 则取 b，大于 c 则取 c；
-当索引 src_uv 超出原二维数组边界时，对超出部分取临近值做 duplicating；
+当索引 src_uv_s11(i, j), 超出原二维数组边界时，对超出部分取临近值做 duplicating；
 
 ## 梯度计算与窗口大小确定
 
@@ -28,6 +31,8 @@ sobel_y = [
 ]
 ```
 
+src_uv_s11 = src_uv_u10 - 512
+
 ### 滤波窗数据更新
 
 ```
@@ -35,14 +40,15 @@ for (j=0; j<=reg_pic_height_m1; j++)
     for (i=0; i<=reg_pic_height_m1; i++)
         for (h=-2; h<=2; h++)
             for (w=-2; w<=4; w=w+2)
-                src_uv_5x5(w, h) = src_uv( clip(i+w, 0, reg_pic_width_m1), clip(j+h, 0, reg_pic_height_m1) )
+                src_uv_u10_5x5(w, h) = src_uv_u10( clip(i+w, 0, reg_pic_width_m1), clip(j+h, 0, reg_pic_height_m1) )
+                src_uv_s11_5x5(w, h) = src_uv_s11( clip(i+w, 0, reg_pic_width_m1), clip(j+h, 0, reg_pic_height_m1) )
 ```
 其中， (i, j) 为当前中心元素坐标，(w, h) 为滤波窗内偏移坐标；
 
 ### 梯度计算
 ```
-grad_h(i, j) = (src_uv_5x5 * sobel_x)
-grad_v(i, j) = (src_uv_5x5 * sobel_y)
+grad_h(i, j) = (src_uv_u10_5x5 * sobel_x)
+grad_v(i, j) = (src_uv_u10_5x5 * sobel_y)
 grad(i, j) = |grad_h(i, j)| / 5 + |grad_v(i, j)| / 5
 ```
 
@@ -170,17 +176,17 @@ avg1_factor_r = avg1_factor_c * avg_factor_r_mask
 ### 平均值计算
 
 ```
-avg0_value_c(i, j) = sum(src_uv_5x5 * avg0_factor_c) / sum(avg0_factor_c)
-avg0_value_u(i, j) = sum(src_uv_5x5 * avg0_factor_u) / sum(avg0_factor_u)
-avg0_value_d(i, j) = sum(src_uv_5x5 * avg0_factor_d) / sum(avg0_factor_d)
-avg0_value_l(i, j) = sum(src_uv_5x5 * avg0_factor_l) / sum(avg0_factor_l)
-avg0_value_r(i, j) = sum(src_uv_5x5 * avg0_factor_r) / sum(avg0_factor_r)
+avg0_value_c(i, j) = sum(src_uv_s11_5x5 * avg0_factor_c) / sum(avg0_factor_c)
+avg0_value_u(i, j) = sum(src_uv_s11_5x5 * avg0_factor_u) / sum(avg0_factor_u)
+avg0_value_d(i, j) = sum(src_uv_s11_5x5 * avg0_factor_d) / sum(avg0_factor_d)
+avg0_value_l(i, j) = sum(src_uv_s11_5x5 * avg0_factor_l) / sum(avg0_factor_l)
+avg0_value_r(i, j) = sum(src_uv_s11_5x5 * avg0_factor_r) / sum(avg0_factor_r)
 
-avg1_value_c(i, j) = sum(src_uv_5x5 * avg1_factor_c) / sum(avg1_factor_c)
-avg1_value_u(i, j) = sum(src_uv_5x5 * avg1_factor_u) / sum(avg1_factor_u)
-avg1_value_d(i, j) = sum(src_uv_5x5 * avg1_factor_d) / sum(avg1_factor_d)
-avg1_value_l(i, j) = sum(src_uv_5x5 * avg1_factor_l) / sum(avg1_factor_l)
-avg1_value_r(i, j) = sum(src_uv_5x5 * avg1_factor_r) / sum(avg1_factor_r)
+avg1_value_c(i, j) = sum(src_uv_s11_5x5 * avg1_factor_c) / sum(avg1_factor_c)
+avg1_value_u(i, j) = sum(src_uv_s11_5x5 * avg1_factor_u) / sum(avg1_factor_u)
+avg1_value_d(i, j) = sum(src_uv_s11_5x5 * avg1_factor_d) / sum(avg1_factor_d)
+avg1_value_l(i, j) = sum(src_uv_s11_5x5 * avg1_factor_l) / sum(avg1_factor_l)
+avg1_value_r(i, j) = sum(src_uv_s11_5x5 * avg1_factor_r) / sum(avg1_factor_r)
 ```
 
 ---
@@ -319,22 +325,22 @@ blend_factor_5x5 = [
 ]
 
 if (win_size_clip(i, j) < thresh0):
-    blend00_win_5x5 = blend0_hor(i, j) * blend_factor_2x2_hv + src_uv_5x5 * ( 4-blend_factor_2x2_hv)
-    blend01_win_5x5 = blend0_hor(i, j) * blend_factor_2x2    + src_uv_5x5 * ( 4-blend_factor_2x2)
+    blend00_win_5x5 = blend0_hor(i, j) * blend_factor_2x2_hv + src_uv_s11_5x5 * ( 4-blend_factor_2x2_hv)
+    blend01_win_5x5 = blend0_hor(i, j) * blend_factor_2x2    + src_uv_s11_5x5 * ( 4-blend_factor_2x2)
     blend0_win_5x5 = blend00_win_5x5 * reg_edge_protect + blend01_win_5x5 * (64-reg_edge_protect)
 elif (win_size_clip(i, j) < thresh1):
-    blend00_win_5x5 = blend0_hor(i, j) * blend_factor_2x2_hv + src_uv_5x5 * ( 4-blend_factor_2x2_hv)
-    blend01_win_5x5 = blend0_hor(i, j) * blend_factor_2x2    + src_uv_5x5 * ( 4-blend_factor_2x2)
+    blend00_win_5x5 = blend0_hor(i, j) * blend_factor_2x2_hv + src_uv_s11_5x5 * ( 4-blend_factor_2x2_hv)
+    blend01_win_5x5 = blend0_hor(i, j) * blend_factor_2x2    + src_uv_s11_5x5 * ( 4-blend_factor_2x2)
     blend0_win_5x5 = blend00_win_5x5 * reg_edge_protect + blend01_win_5x5 * (64-reg_edge_protect)
-    blend1_win_5x5 = blend1_hor * blend_factor_3x3 + src_uv_5x5 * (4-blend_factor_3x3)
+    blend1_win_5x5 = blend1_hor * blend_factor_3x3 + src_uv_s11_5x5 * (4-blend_factor_3x3)
 elif (win_size_clip(i, j) < thresh2):
-    blend0_win_5x5 = blend0_hor * blend_factor_3x3 + src_uv_5x5 * (4-blend_factor_3x3)
-    blend1_win_5x5 = blend1_hor * blend_factor_4x4 + src_uv_5x5 * (4-blend_factor_4x4)
+    blend0_win_5x5 = blend0_hor * blend_factor_3x3 + src_uv_s11_5x5 * (4-blend_factor_3x3)
+    blend1_win_5x5 = blend1_hor * blend_factor_4x4 + src_uv_s11_5x5 * (4-blend_factor_4x4)
 elif (win_size_clip(i, j) < thresh3):
-    blend0_win_5x5 = blend0_hor * blend_factor_4x4 + src_uv_5x5 * (4-blend_factor_4x4)
-    blend1_win_5x5 = blend1_hor * blend_factor_5x5 + src_uv_5x5 * (4-blend_factor_5x5)
+    blend0_win_5x5 = blend0_hor * blend_factor_4x4 + src_uv_s11_5x5 * (4-blend_factor_4x4)
+    blend1_win_5x5 = blend1_hor * blend_factor_5x5 + src_uv_s11_5x5 * (4-blend_factor_5x5)
 else:
-    blend1_win_5x5 = blend1_hor * blend_factor_5x5 + src_uv_5x5 * (4-blend_factor_5x5)
+    blend1_win_5x5 = blend1_hor * blend_factor_5x5 + src_uv_s11_5x5 * (4-blend_factor_5x5)
 ```
 
 ### 最终混合
@@ -350,7 +356,7 @@ else:
 
 for (h=-2; h<=2; h++)
     if ( i>=0 && j+h>=0 )
-        src_uv(i, j+h)=blend_uv(i, j)
+        src_uv_u10(i, j+h)=clip( blend_uv(i, j)+512, 0 , 1023)
 ```
 
 ---

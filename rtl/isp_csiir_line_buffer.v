@@ -3,14 +3,18 @@
 // Purpose: 5-row line buffer with 5x5 window generation
 // Author: rtl-impl
 // Date: 2026-03-22
-// Version: v1.0
+// Version: v2.0 - Updated writeback interface naming
 //-----------------------------------------------------------------------------
 // Description:
 //   Implements 5-row circular line buffer for 5x5 sliding window generation.
 //   Supports:
 //   - 5-row pixel storage for 5x5 window
-//   - IIR feedback writeback capability
+//   - Line buffer feedback writeback (u10 format from Stage 4)
 //   - Configurable image width
+//
+// Data Format:
+//   - Storage: u10 (10-bit unsigned)
+//   - Writeback input: u10 from Stage 4 output
 //-----------------------------------------------------------------------------
 
 module isp_csiir_line_buffer #(
@@ -28,11 +32,11 @@ module isp_csiir_line_buffer #(
     input  wire                        sof,          // Start of frame
     input  wire                        eol,          // End of line
 
-    // IIR feedback writeback
-    input  wire                        iir_wb_en,
-    input  wire [DATA_WIDTH-1:0]       iir_wb_data,
-    input  wire [LINE_ADDR_WIDTH-1:0]  iir_wb_addr,
-    input  wire [2:0]                  iir_wb_row_offset,
+    // Line buffer feedback writeback (u10 format from Stage 4)
+    input  wire                        lb_wb_en,
+    input  wire [DATA_WIDTH-1:0]       lb_wb_data,
+    input  wire [LINE_ADDR_WIDTH-1:0]  lb_wb_addr,
+    input  wire [2:0]                  lb_wb_row_offset,
 
     // 5x5 Window output
     output wire [DATA_WIDTH-1:0]       window_0_0, window_0_1, window_0_2, window_0_3, window_0_4,
@@ -112,18 +116,18 @@ module isp_csiir_line_buffer #(
     end
 
     //=========================================================================
-    // IIR Feedback Writeback Logic
+    // Line Buffer Feedback Writeback Logic
     //=========================================================================
-    wire [2:0] iir_wr_row = (wr_row_ptr + iir_wb_row_offset) % 5;
+    wire [2:0] lb_wr_row = (wr_row_ptr + lb_wb_row_offset) % 5;
 
     always @(posedge clk) begin
-        if (enable && iir_wb_en) begin
-            case (iir_wr_row)
-                3'd0: line_mem_0[iir_wb_addr] <= iir_wb_data;
-                3'd1: line_mem_1[iir_wb_addr] <= iir_wb_data;
-                3'd2: line_mem_2[iir_wb_addr] <= iir_wb_data;
-                3'd3: line_mem_3[iir_wb_addr] <= iir_wb_data;
-                3'd4: line_mem_4[iir_wb_addr] <= iir_wb_data;
+        if (enable && lb_wb_en) begin
+            case (lb_wr_row)
+                3'd0: line_mem_0[lb_wb_addr] <= lb_wb_data;
+                3'd1: line_mem_1[lb_wb_addr] <= lb_wb_data;
+                3'd2: line_mem_2[lb_wb_addr] <= lb_wb_data;
+                3'd3: line_mem_3[lb_wb_addr] <= lb_wb_data;
+                3'd4: line_mem_4[lb_wb_addr] <= lb_wb_data;
             endcase
         end
     end

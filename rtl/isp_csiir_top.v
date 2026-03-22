@@ -3,7 +3,7 @@
 // Purpose: Top-level module for ISP-CSIIR image processing
 // Author: rtl-impl
 // Date: 2026-03-22
-// Version: v1.0
+// Version: v2.0 - Updated for signed data format (s11)
 //-----------------------------------------------------------------------------
 // Description:
 //   Top-level integration of ISP-CSIIR pipeline including:
@@ -11,6 +11,12 @@
 //   - 5x5 line buffer with IIR feedback
 //   - 4-stage processing pipeline
 //   - Video stream I/O
+//
+// Data Format:
+//   - Line buffer storage: u10 (10-bit unsigned)
+//   - Stage 1: u10 input, u10 gradient output
+//   - Stage 2-4 internal: s11 (11-bit signed, zero point = 512)
+//   - Final output: u10 (10-bit unsigned)
 //
 // Pipeline Latency: 24 cycles (from din_valid to dout_valid)
 //   - Stage 1: 5 cycles (gradient calculation)
@@ -23,6 +29,7 @@ module isp_csiir_top #(
     parameter IMG_WIDTH       = 5472,
     parameter IMG_HEIGHT      = 3076,
     parameter DATA_WIDTH      = 10,
+    parameter SIGNED_WIDTH    = 11,   // Signed data width
     parameter GRAD_WIDTH      = 14,
     parameter LINE_ADDR_WIDTH = 14,
     parameter ROW_CNT_WIDTH   = 13
@@ -80,9 +87,9 @@ module isp_csiir_top #(
     wire [LINE_ADDR_WIDTH-1:0]  s1_pixel_x;
     wire [ROW_CNT_WIDTH-1:0]    s1_pixel_y;
 
-    // Stage 2 interface
-    wire [DATA_WIDTH-1:0]       s2_avg0_c, s2_avg0_u, s2_avg0_d, s2_avg0_l, s2_avg0_r;
-    wire [DATA_WIDTH-1:0]       s2_avg1_c, s2_avg1_u, s2_avg1_d, s2_avg1_l, s2_avg1_r;
+    // Stage 2 interface (s11 signed format)
+    wire signed [SIGNED_WIDTH-1:0] s2_avg0_c, s2_avg0_u, s2_avg0_d, s2_avg0_l, s2_avg0_r;
+    wire signed [SIGNED_WIDTH-1:0] s2_avg1_c, s2_avg1_u, s2_avg1_d, s2_avg1_l, s2_avg1_r;
     wire                        s2_valid;
     wire [GRAD_WIDTH-1:0]       s2_grad;
     wire [5:0]                  s2_win_size_clip;
@@ -90,26 +97,26 @@ module isp_csiir_top #(
     wire [LINE_ADDR_WIDTH-1:0]  s2_pixel_x;
     wire [ROW_CNT_WIDTH-1:0]    s2_pixel_y;
 
-    // Stage 3 interface
-    wire [DATA_WIDTH-1:0]       s3_blend0, s3_blend1;
+    // Stage 3 interface (s11 signed format)
+    wire signed [SIGNED_WIDTH-1:0] s3_blend0, s3_blend1;
     wire                        s3_valid;
-    wire [DATA_WIDTH-1:0]       s3_avg0_u, s3_avg1_u;
+    wire signed [SIGNED_WIDTH-1:0] s3_avg0_u, s3_avg1_u;
     wire [5:0]                  s3_win_size_clip;
     wire [DATA_WIDTH-1:0]       s3_center_pixel;
     wire [LINE_ADDR_WIDTH-1:0]  s3_pixel_x;
     wire [ROW_CNT_WIDTH-1:0]    s3_pixel_y;
 
-    // Stage 4 interface
+    // Stage 4 interface (u10 unsigned format)
     wire [DATA_WIDTH-1:0]       s4_dout;
     wire                        s4_dout_valid;
     wire [LINE_ADDR_WIDTH-1:0]  s4_pixel_x;
     wire [ROW_CNT_WIDTH-1:0]    s4_pixel_y;
 
-    // IIR feedback signals
-    wire                        iir_wb_en;
-    wire [LINE_ADDR_WIDTH-1:0]  iir_wb_addr;
-    wire [DATA_WIDTH-1:0]       iir_wb_data;
-    wire [2:0]                  iir_wb_row_offset;
+    // Line buffer writeback signals
+    wire                        lb_wb_en;
+    wire [LINE_ADDR_WIDTH-1:0]  lb_wb_addr;
+    wire [DATA_WIDTH-1:0]       lb_wb_data;
+    wire [2:0]                  lb_wb_row_offset;
 
     // Video timing signals
     wire                        sof;
@@ -178,10 +185,10 @@ module isp_csiir_top #(
         .din_valid     (din_valid),
         .sof           (sof),
         .eol           (eol),
-        .iir_wb_en     (iir_wb_en),
-        .iir_wb_data   (iir_wb_data),
-        .iir_wb_addr   (iir_wb_addr),
-        .iir_wb_row_offset (iir_wb_row_offset),
+        .lb_wb_en      (lb_wb_en),
+        .lb_wb_data    (lb_wb_data),
+        .lb_wb_addr    (lb_wb_addr),
+        .lb_wb_row_offset (lb_wb_row_offset),
         .window_0_0    (window[0][0]), .window_0_1 (window[0][1]),
         .window_0_2    (window[0][2]), .window_0_3 (window[0][3]),
         .window_0_4    (window[0][4]),
@@ -247,10 +254,11 @@ module isp_csiir_top #(
     );
 
     //=========================================================================
-    // Stage 2: Directional Average
+    // Stage 2: Directional Average (u10 -> s11 conversion)
     //=========================================================================
     stage2_directional_avg #(
         .DATA_WIDTH    (DATA_WIDTH),
+        .SIGNED_WIDTH  (SIGNED_WIDTH),
         .GRAD_WIDTH    (GRAD_WIDTH),
         .LINE_ADDR_WIDTH (LINE_ADDR_WIDTH),
         .ROW_CNT_WIDTH (ROW_CNT_WIDTH)
@@ -298,10 +306,11 @@ module isp_csiir_top #(
     );
 
     //=========================================================================
-    // Stage 3: Gradient Fusion
+    // Stage 3: Gradient Fusion (s11 signed)
     //=========================================================================
     stage3_gradient_fusion #(
         .DATA_WIDTH    (DATA_WIDTH),
+        .SIGNED_WIDTH  (SIGNED_WIDTH),
         .GRAD_WIDTH    (GRAD_WIDTH),
         .LINE_ADDR_WIDTH (LINE_ADDR_WIDTH),
         .ROW_CNT_WIDTH (ROW_CNT_WIDTH),
@@ -334,10 +343,11 @@ module isp_csiir_top #(
     );
 
     //=========================================================================
-    // Stage 4: IIR Blend
+    // Stage 4: IIR Blend (s11 -> u10 conversion)
     //=========================================================================
     stage4_iir_blend #(
         .DATA_WIDTH    (DATA_WIDTH),
+        .SIGNED_WIDTH  (SIGNED_WIDTH),
         .GRAD_WIDTH    (GRAD_WIDTH),
         .LINE_ADDR_WIDTH (LINE_ADDR_WIDTH),
         .ROW_CNT_WIDTH (ROW_CNT_WIDTH)
@@ -362,13 +372,13 @@ module isp_csiir_top #(
         .pixel_y       (s3_pixel_y),
         .pixel_x_out   (s4_pixel_x),
         .pixel_y_out   (s4_pixel_y),
-        .iir_wb_en     (iir_wb_en),
-        .iir_wb_addr   (iir_wb_addr),
-        .iir_wb_data   (iir_wb_data)
+        .lb_wb_en      (lb_wb_en),
+        .lb_wb_addr    (lb_wb_addr),
+        .lb_wb_data    (lb_wb_data)
     );
 
-    // IIR writeback row offset (currently not used, set to 0)
-    assign iir_wb_row_offset = 3'd0;
+    // Line buffer writeback row offset (currently not used, set to 0)
+    assign lb_wb_row_offset = 3'd0;
 
     //=========================================================================
     // Video Timing Generation

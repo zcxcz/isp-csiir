@@ -3,14 +3,18 @@
 // Purpose: Gradient-weighted directional fusion
 // Author: rtl-impl
 // Date: 2026-03-22
-// Version: v1.1
+// Version: v2.0 - Added signed data support
 //-----------------------------------------------------------------------------
 // Description:
 //   Implements Stage 3 of ISP-CSIIR pipeline:
 //   - Gradient fetch from neighbors (using 2-row gradient line buffer)
 //   - Gradient sorting network (5-input descending sort)
-//   - Weighted multiplication (avg x grad)
+//   - Weighted multiplication (avg x grad) - signed arithmetic
 //   - Weighted sum and division for fusion
+//
+// Data Format:
+//   - Input avg: s11 (11-bit signed, range -512 to +511)
+//   - Output blend: s11 (11-bit signed)
 //
 // Pipeline Structure (6 cycles):
 //   Cycle 0: Input buffer and gradient fetch
@@ -26,6 +30,7 @@
 
 module stage3_gradient_fusion #(
     parameter DATA_WIDTH     = 10,
+    parameter SIGNED_WIDTH   = 11,   // Signed data width
     parameter GRAD_WIDTH     = 14,
     parameter WIN_SIZE_WIDTH = 6,
     parameter LINE_ADDR_WIDTH = 14,
@@ -36,9 +41,9 @@ module stage3_gradient_fusion #(
     input  wire                        rst_n,
     input  wire                        enable,
 
-    // Stage 2 outputs
-    input  wire [DATA_WIDTH-1:0]       avg0_c, avg0_u, avg0_d, avg0_l, avg0_r,
-    input  wire [DATA_WIDTH-1:0]       avg1_c, avg1_u, avg1_d, avg1_l, avg1_r,
+    // Stage 2 outputs (s11 signed format)
+    input  wire signed [SIGNED_WIDTH-1:0] avg0_c, avg0_u, avg0_d, avg0_l, avg0_r,
+    input  wire signed [SIGNED_WIDTH-1:0] avg1_c, avg1_u, avg1_d, avg1_l, avg1_r,
     input  wire                        stage2_valid,
     input  wire [GRAD_WIDTH-1:0]       grad,
     input  wire [WIN_SIZE_WIDTH-1:0]   win_size_clip,
@@ -48,9 +53,9 @@ module stage3_gradient_fusion #(
     input  wire [ROW_CNT_WIDTH-1:0]    img_height,
     input  wire [LINE_ADDR_WIDTH-1:0]  img_width,
 
-    // Output
-    output reg  [DATA_WIDTH-1:0]       blend0_dir_avg,
-    output reg  [DATA_WIDTH-1:0]       blend1_dir_avg,
+    // Output (s11 signed format)
+    output reg  signed [SIGNED_WIDTH-1:0] blend0_dir_avg,
+    output reg  signed [SIGNED_WIDTH-1:0] blend1_dir_avg,
     output reg                         stage3_valid,
 
     // Pass through signals
@@ -58,8 +63,8 @@ module stage3_gradient_fusion #(
     input  wire [ROW_CNT_WIDTH-1:0]    pixel_y,
     output reg  [LINE_ADDR_WIDTH-1:0]  pixel_x_out,
     output reg  [ROW_CNT_WIDTH-1:0]    pixel_y_out,
-    output reg  [DATA_WIDTH-1:0]       avg0_u_out,
-    output reg  [DATA_WIDTH-1:0]       avg1_u_out,
+    output reg  signed [SIGNED_WIDTH-1:0] avg0_u_out,
+    output reg  signed [SIGNED_WIDTH-1:0] avg1_u_out,
     output reg  [WIN_SIZE_WIDTH-1:0]   win_size_clip_out,
     output reg  [DATA_WIDTH-1:0]       center_pixel_out
 );
@@ -67,8 +72,8 @@ module stage3_gradient_fusion #(
     //=========================================================================
     // Local Parameters
     //=========================================================================
-    localparam BLEND_WIDTH = DATA_WIDTH + GRAD_WIDTH + 2;  // 26-bit for blend sum
-    localparam GRAD_SUM_WIDTH = GRAD_WIDTH + 3;            // 17-bit for grad sum
+    localparam BLEND_WIDTH = SIGNED_WIDTH + GRAD_WIDTH + 2;  // 27-bit for blend sum (signed)
+    localparam GRAD_SUM_WIDTH = GRAD_WIDTH + 3;              // 17-bit for grad sum
 
     //=========================================================================
     // Gradient Line Buffer (2 rows)
@@ -99,8 +104,8 @@ module stage3_gradient_fusion #(
 
     // Pipeline registers for Cycle 0
     reg [GRAD_WIDTH-1:0]   grad_c_s0, grad_u_s0, grad_d_s0, grad_l_s0, grad_r_s0;
-    reg [DATA_WIDTH-1:0]   avg0_c_s0, avg0_u_s0, avg0_d_s0, avg0_l_s0, avg0_r_s0;
-    reg [DATA_WIDTH-1:0]   avg1_c_s0, avg1_u_s0, avg1_d_s0, avg1_l_s0, avg1_r_s0;
+    reg signed [SIGNED_WIDTH-1:0] avg0_c_s0, avg0_u_s0, avg0_d_s0, avg0_l_s0, avg0_r_s0;
+    reg signed [SIGNED_WIDTH-1:0] avg1_c_s0, avg1_u_s0, avg1_d_s0, avg1_l_s0, avg1_r_s0;
     reg                    valid_s0;
     reg [DATA_WIDTH-1:0]   center_s0;
     reg [WIN_SIZE_WIDTH-1:0] win_size_s0;
@@ -114,16 +119,16 @@ module stage3_gradient_fusion #(
             grad_d_s0  <= {GRAD_WIDTH{1'b0}};
             grad_l_s0  <= {GRAD_WIDTH{1'b0}};
             grad_r_s0  <= {GRAD_WIDTH{1'b0}};
-            avg0_c_s0  <= {DATA_WIDTH{1'b0}};
-            avg0_u_s0  <= {DATA_WIDTH{1'b0}};
-            avg0_d_s0  <= {DATA_WIDTH{1'b0}};
-            avg0_l_s0  <= {DATA_WIDTH{1'b0}};
-            avg0_r_s0  <= {DATA_WIDTH{1'b0}};
-            avg1_c_s0  <= {DATA_WIDTH{1'b0}};
-            avg1_u_s0  <= {DATA_WIDTH{1'b0}};
-            avg1_d_s0  <= {DATA_WIDTH{1'b0}};
-            avg1_l_s0  <= {DATA_WIDTH{1'b0}};
-            avg1_r_s0  <= {DATA_WIDTH{1'b0}};
+            avg0_c_s0  <= {SIGNED_WIDTH{1'b0}};
+            avg0_u_s0  <= {SIGNED_WIDTH{1'b0}};
+            avg0_d_s0  <= {SIGNED_WIDTH{1'b0}};
+            avg0_l_s0  <= {SIGNED_WIDTH{1'b0}};
+            avg0_r_s0  <= {SIGNED_WIDTH{1'b0}};
+            avg1_c_s0  <= {SIGNED_WIDTH{1'b0}};
+            avg1_u_s0  <= {SIGNED_WIDTH{1'b0}};
+            avg1_d_s0  <= {SIGNED_WIDTH{1'b0}};
+            avg1_l_s0  <= {SIGNED_WIDTH{1'b0}};
+            avg1_r_s0  <= {SIGNED_WIDTH{1'b0}};
             valid_s0   <= 1'b0;
             center_s0  <= {DATA_WIDTH{1'b0}};
             win_size_s0 <= {WIN_SIZE_WIDTH{1'b0}};
@@ -194,7 +199,7 @@ module stage3_gradient_fusion #(
 
     // Pipeline registers for Cycle 1
     reg [GRAD_WIDTH-1:0]   g_s1 [0:4];
-    reg [DATA_WIDTH-1:0]   avg0_s1 [0:4], avg1_s1 [0:4];
+    reg signed [SIGNED_WIDTH-1:0] avg0_s1 [0:4], avg1_s1 [0:4];
     reg                    valid_s1;
     reg [DATA_WIDTH-1:0]   center_s1;
     reg [WIN_SIZE_WIDTH-1:0] win_size_s1;
@@ -207,8 +212,8 @@ module stage3_gradient_fusion #(
         if (!rst_n) begin
             for (i = 0; i < 5; i = i + 1) begin
                 g_s1[i]    <= {GRAD_WIDTH{1'b0}};
-                avg0_s1[i] <= {DATA_WIDTH{1'b0}};
-                avg1_s1[i] <= {DATA_WIDTH{1'b0}};
+                avg0_s1[i] <= {SIGNED_WIDTH{1'b0}};
+                avg1_s1[i] <= {SIGNED_WIDTH{1'b0}};
             end
             valid_s1   <= 1'b0;
             center_s1  <= {DATA_WIDTH{1'b0}};
@@ -278,7 +283,7 @@ module stage3_gradient_fusion #(
 
     // Pipeline registers for Cycle 2
     reg [GRAD_WIDTH-1:0]   g_s2 [0:4];
-    reg [DATA_WIDTH-1:0]   avg0_s2 [0:4], avg1_s2 [0:4];
+    reg signed [SIGNED_WIDTH-1:0] avg0_s2 [0:4], avg1_s2 [0:4];
     reg                    valid_s2;
     reg [DATA_WIDTH-1:0]   center_s2;
     reg [WIN_SIZE_WIDTH-1:0] win_size_s2;
@@ -289,8 +294,8 @@ module stage3_gradient_fusion #(
         if (!rst_n) begin
             for (i = 0; i < 5; i = i + 1) begin
                 g_s2[i]    <= {GRAD_WIDTH{1'b0}};
-                avg0_s2[i] <= {DATA_WIDTH{1'b0}};
-                avg1_s2[i] <= {DATA_WIDTH{1'b0}};
+                avg0_s2[i] <= {SIGNED_WIDTH{1'b0}};
+                avg1_s2[i] <= {SIGNED_WIDTH{1'b0}};
             end
             valid_s2   <= 1'b0;
             center_s2  <= {DATA_WIDTH{1'b0}};
@@ -312,22 +317,24 @@ module stage3_gradient_fusion #(
     end
 
     //=========================================================================
-    // Cycle 3: Weighted Multiplication
+    // Cycle 3: Weighted Multiplication (Signed)
     //=========================================================================
-    wire [DATA_WIDTH+GRAD_WIDTH-1:0] blend0_partial [0:4];
-    wire [DATA_WIDTH+GRAD_WIDTH-1:0] blend1_partial [0:4];
+    // Signed multiplication: avg (s11) * grad (u14) -> signed result
+    wire signed [SIGNED_WIDTH+GRAD_WIDTH-1:0] blend0_partial [0:4];
+    wire signed [SIGNED_WIDTH+GRAD_WIDTH-1:0] blend1_partial [0:4];
 
     genvar gi;
     generate
         for (gi = 0; gi < 5; gi = gi + 1) begin : gen_mul
-            assign blend0_partial[gi] = avg0_s2[gi] * g_s2[gi];
-            assign blend1_partial[gi] = avg1_s2[gi] * g_s2[gi];
+            // Signed avg * unsigned grad = signed result
+            assign blend0_partial[gi] = avg0_s2[gi] * $signed({1'b0, g_s2[gi]});
+            assign blend1_partial[gi] = avg1_s2[gi] * $signed({1'b0, g_s2[gi]});
         end
     endgenerate
 
     // Pipeline registers for Cycle 3
-    reg [DATA_WIDTH+GRAD_WIDTH-1:0] blend0_p_s3 [0:4];
-    reg [DATA_WIDTH+GRAD_WIDTH-1:0] blend1_p_s3 [0:4];
+    reg signed [SIGNED_WIDTH+GRAD_WIDTH-1:0] blend0_p_s3 [0:4];
+    reg signed [SIGNED_WIDTH+GRAD_WIDTH-1:0] blend1_p_s3 [0:4];
     reg [GRAD_WIDTH-1:0]            g_s3 [0:4];
     reg                             valid_s3;
     reg [DATA_WIDTH-1:0]            center_s3;
@@ -338,8 +345,8 @@ module stage3_gradient_fusion #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             for (i = 0; i < 5; i = i + 1) begin
-                blend0_p_s3[i] <= {DATA_WIDTH+GRAD_WIDTH{1'b0}};
-                blend1_p_s3[i] <= {DATA_WIDTH+GRAD_WIDTH{1'b0}};
+                blend0_p_s3[i] <= {SIGNED_WIDTH+GRAD_WIDTH{1'b0}};
+                blend1_p_s3[i] <= {SIGNED_WIDTH+GRAD_WIDTH{1'b0}};
                 g_s3[i]        <= {GRAD_WIDTH{1'b0}};
             end
             valid_s3   <= 1'b0;
@@ -362,16 +369,17 @@ module stage3_gradient_fusion #(
     end
 
     //=========================================================================
-    // Cycle 4: Weighted Sum
+    // Cycle 4: Weighted Sum (Signed)
     //=========================================================================
-    wire [BLEND_WIDTH-1:0] blend0_sum_comb = blend0_p_s3[0] + blend0_p_s3[1] + blend0_p_s3[2] +
-                                             blend0_p_s3[3] + blend0_p_s3[4];
-    wire [BLEND_WIDTH-1:0] blend1_sum_comb = blend1_p_s3[0] + blend1_p_s3[1] + blend1_p_s3[2] +
-                                             blend1_p_s3[3] + blend1_p_s3[4];
+    // Signed addition for blend sums
+    wire signed [BLEND_WIDTH-1:0] blend0_sum_comb = blend0_p_s3[0] + blend0_p_s3[1] + blend0_p_s3[2] +
+                                                    blend0_p_s3[3] + blend0_p_s3[4];
+    wire signed [BLEND_WIDTH-1:0] blend1_sum_comb = blend1_p_s3[0] + blend1_p_s3[1] + blend1_p_s3[2] +
+                                                    blend1_p_s3[3] + blend1_p_s3[4];
     wire [GRAD_SUM_WIDTH-1:0] grad_sum_comb = g_s3[0] + g_s3[1] + g_s3[2] + g_s3[3] + g_s3[4];
 
     // Pipeline registers for Cycle 4
-    reg [BLEND_WIDTH-1:0]     blend0_sum_s4, blend1_sum_s4;
+    reg signed [BLEND_WIDTH-1:0]     blend0_sum_s4, blend1_sum_s4;
     reg [GRAD_SUM_WIDTH-1:0]  grad_sum_s4;
     reg                       valid_s4;
     reg [DATA_WIDTH-1:0]      center_s4;
@@ -404,48 +412,21 @@ module stage3_gradient_fusion #(
     //=========================================================================
     // Cycle 5: Division Output using LUT-based Divider Module
     //=========================================================================
-    // Instantiate LUT divider for blend0
-    wire [DATA_WIDTH-1:0] blend0_div;
-    wire                  blend0_div_valid;
+    // Note: LUT divider works with unsigned values, need to handle sign separately
+    // For now, use signed division directly (synthesizable but may have timing impact)
 
-    common_lut_divider #(
-        .DIVIDEND_WIDTH(GRAD_SUM_WIDTH),
-        .QUOTIENT_WIDTH(DATA_WIDTH),
-        .PRODUCT_SHIFT (26)
-    ) u_divider_blend0 (
-        .clk      (clk),
-        .rst_n    (rst_n),
-        .enable   (enable),
-        .dividend (grad_sum_s4),
-        .numerator(blend0_sum_s4),
-        .valid_in (valid_s4),
-        .quotient (blend0_div),
-        .valid_out(blend0_div_valid)
-    );
-
-    // Instantiate LUT divider for blend1
-    wire [DATA_WIDTH-1:0] blend1_div;
-    wire                  blend1_div_valid;
-
-    common_lut_divider #(
-        .DIVIDEND_WIDTH(GRAD_SUM_WIDTH),
-        .QUOTIENT_WIDTH(DATA_WIDTH),
-        .PRODUCT_SHIFT (26)
-    ) u_divider_blend1 (
-        .clk      (clk),
-        .rst_n    (rst_n),
-        .enable   (enable),
-        .dividend (grad_sum_s4),
-        .numerator(blend1_sum_s4),
-        .valid_in (valid_s4),
-        .quotient (blend1_div),
-        .valid_out(blend1_div_valid)
-    );
+    // Signed division result
+    wire signed [SIGNED_WIDTH-1:0] blend0_div_comb = (grad_sum_s4 != 0) ?
+                                                     (blend0_sum_s4 / $signed({{BLEND_WIDTH-GRAD_SUM_WIDTH{1'b0}}, grad_sum_s4})) :
+                                                     {SIGNED_WIDTH{1'b0}};
+    wire signed [SIGNED_WIDTH-1:0] blend1_div_comb = (grad_sum_s4 != 0) ?
+                                                     (blend1_sum_s4 / $signed({{BLEND_WIDTH-GRAD_SUM_WIDTH{1'b0}}, grad_sum_s4})) :
+                                                     {SIGNED_WIDTH{1'b0}};
 
     // Pass-through signals for Cycle 5 (registered with divider output)
     reg [LINE_ADDR_WIDTH-1:0] pixel_x_s5;
     reg [ROW_CNT_WIDTH-1:0]   pixel_y_s5;
-    reg [DATA_WIDTH-1:0]      avg0_u_s5, avg1_u_s5;
+    reg signed [SIGNED_WIDTH-1:0] avg0_u_s5, avg1_u_s5;
     reg [WIN_SIZE_WIDTH-1:0]  win_size_s5;
     reg [DATA_WIDTH-1:0]      center_s5;
 
@@ -453,8 +434,8 @@ module stage3_gradient_fusion #(
         if (!rst_n) begin
             pixel_x_s5    <= {LINE_ADDR_WIDTH{1'b0}};
             pixel_y_s5    <= {ROW_CNT_WIDTH{1'b0}};
-            avg0_u_s5     <= {DATA_WIDTH{1'b0}};
-            avg1_u_s5     <= {DATA_WIDTH{1'b0}};
+            avg0_u_s5     <= {SIGNED_WIDTH{1'b0}};
+            avg1_u_s5     <= {SIGNED_WIDTH{1'b0}};
             win_size_s5   <= {WIN_SIZE_WIDTH{1'b0}};
             center_s5     <= {DATA_WIDTH{1'b0}};
         end else if (enable) begin
@@ -470,19 +451,19 @@ module stage3_gradient_fusion #(
     // Output registers
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            blend0_dir_avg  <= {DATA_WIDTH{1'b0}};
-            blend1_dir_avg  <= {DATA_WIDTH{1'b0}};
+            blend0_dir_avg  <= {SIGNED_WIDTH{1'b0}};
+            blend1_dir_avg  <= {SIGNED_WIDTH{1'b0}};
             stage3_valid    <= 1'b0;
             pixel_x_out     <= {LINE_ADDR_WIDTH{1'b0}};
             pixel_y_out     <= {ROW_CNT_WIDTH{1'b0}};
-            avg0_u_out      <= {DATA_WIDTH{1'b0}};
-            avg1_u_out      <= {DATA_WIDTH{1'b0}};
+            avg0_u_out      <= {SIGNED_WIDTH{1'b0}};
+            avg1_u_out      <= {SIGNED_WIDTH{1'b0}};
             win_size_clip_out <= {WIN_SIZE_WIDTH{1'b0}};
             center_pixel_out <= {DATA_WIDTH{1'b0}};
         end else if (enable) begin
-            blend0_dir_avg  <= blend0_div;
-            blend1_dir_avg  <= blend1_div;
-            stage3_valid    <= blend0_div_valid & blend1_div_valid;
+            blend0_dir_avg  <= blend0_div_comb;
+            blend1_dir_avg  <= blend1_div_comb;
+            stage3_valid    <= valid_s4;
             pixel_x_out     <= pixel_x_s5;
             pixel_y_out     <= pixel_y_s5;
             avg0_u_out      <= avg0_u_s5;

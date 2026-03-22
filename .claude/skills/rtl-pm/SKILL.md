@@ -148,6 +148,120 @@ digraph project_flow {
 }
 ```
 
+## 算法变更流程（重要）
+
+### 背景
+
+RTL 开发周期相对较长，试错成本较高。当初版算法确认后，后续如有算法变更需求，必须遵循规范化流程，避免反复修改 RTL 造成的资源浪费。
+
+### 变更流程
+
+```dot
+digraph algo_change {
+    rankdir=TB;
+    request [label="算法变更请求", shape=ellipse];
+    eval_algo [label="rtl-algo\n算法评估", shape=box, style=filled, fillcolor="#ffffcc"];
+    check_feasible [label="变更是否\n可行?", shape=diamond];
+    update_float [label="rtl-algo\n更新浮点模型", shape=box];
+    update_fixed [label="rtl-algo\n更新定点模型", shape=box];
+    confirm [label="用户确认\n算法正确性", shape=diamond, style=filled, fillcolor="#ccffcc"];
+    notify_arch [label="rtl-pm 通知\nrtl-arch", shape=box];
+    arch_eval [label="rtl-arch\n架构影响评估", shape=box];
+    rtl_design [label="rtl-impl\nRTL 设计修改", shape=box];
+    reject [label="拒绝变更或\n重新设计方案", shape=box, style=filled, fillcolor="#ffcccc"];
+    done [label="变更完成", shape=ellipse];
+
+    request -> eval_algo;
+    eval_algo -> check_feasible;
+    check_feasible -> update_float [label="可行"];
+    check_feasible -> reject [label="不可行"];
+    update_float -> update_fixed;
+    update_fixed -> confirm;
+    confirm -> notify_arch [label="确认"];
+    confirm -> update_float [label="不通过，重新调整"];
+    notify_arch -> arch_eval;
+    arch_eval -> rtl_design;
+    rtl_design -> done;
+}
+```
+
+### 变更步骤
+
+| 步骤 | 负责 Skill | 产出物 | 说明 |
+|------|------------|--------|------|
+| 1. 变更请求 | 用户/rtl-std | 变更需求描述 | 明确变更内容和原因 |
+| 2. 算法评估 | rtl-algo | 可行性评估报告 | 评估硬件实现可行性 |
+| 3. 浮点模型更新 | rtl-algo | 更新的浮点模型 | 保持算法精度 |
+| 4. 定点模型更新 | rtl-algo | 更新的定点模型 | 量化定点化影响 |
+| 5. 算法确认 | 用户 | 确认签字/消息 | 用户确认算法正确无误 |
+| 6. 架构影响评估 | rtl-arch | 架构变更评估 | 评估对 RTL 设计的影响 |
+| 7. RTL 设计修改 | rtl-impl | 更新的 RTL 代码 | 落地到实现 |
+
+### 算法确认检查点
+
+**rtl-algo 在提交算法确认前，必须确保：**
+
+- [ ] 浮点模型功能正确
+- [ ] 定点模型精度达标（误差 < 5%）
+- [ ] 位宽分析完整
+- [ ] 变更影响范围明确
+
+**rtl-pm 在收到算法确认请求后，必须：**
+
+- [ ] 检查所有确认检查点完成
+- [ ] 汇总变更内容提交用户确认
+- [ ] 记录确认结果到项目日志
+
+### 未经确认禁止 RTL 修改
+
+**铁律：算法变更未经用户确认，禁止调度 rtl-impl 进行 RTL 修改。**
+
+```
+正确流程：
+算法变更请求 → rtl-algo 评估 → 模型更新 → 用户确认 → rtl-arch 评估 → rtl-impl 修改
+
+错误流程（禁止）：
+算法变更请求 → 直接调度 rtl-impl 修改 RTL  ❌
+```
+
+### 变更记录模板
+
+```markdown
+# 算法变更记录
+
+## 变更编号
+AC-[N]
+
+## 变更日期
+YYYY-MM-DD
+
+## 变更描述
+[描述变更内容]
+
+## 影响范围
+- [ ] 数据格式
+- [ ] 流水线结构
+- [ ] 位宽定义
+- [ ] 其他: [具体说明]
+
+## 评估结果
+- rtl-algo 评估: [可行/不可行]
+- 精度影响: [无影响/N%误差]
+- 硬件影响: [描述]
+
+## 确认状态
+- 浮点模型更新: [日期]
+- 定点模型更新: [日期]
+- 用户确认: [日期] [确认人]
+- 架构评估: [日期]
+- RTL 修改: [日期]
+
+## 相关文档
+- 浮点模型: [文件路径]
+- 定点模型: [文件路径]
+- 架构评估: [文件路径]
+```
+
 ## 项目规划模板
 
 ### 项目信息
