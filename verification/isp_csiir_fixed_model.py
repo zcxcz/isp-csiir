@@ -61,14 +61,63 @@ class ISPCSIIRFixedModel:
         self._init_div_lut()
 
     def _init_div_lut(self):
-        """Initialize division LUT with inverse values"""
+        """Initialize division LUT with inverse values
+
+        Index mapping (no overlap, matches RTL):
+          Index 0: grad_sum = 0
+          Index 1-127: grad_sum 1-127 (direct mapping)
+          Index 128-159: grad_sum 128-255 (2:1 compression)
+          Index 160-191: grad_sum 256-511 (4:1 compression)
+          Index 192-223: grad_sum 512-1023 (8:1 compression)
+          Index 224-231: grad_sum 8192-16383
+          Index 232-239: grad_sum 16384-32767
+          Index 240-247: grad_sum 32768-65535
+          Index 248-255: grad_sum 65536-131071
+        """
         self.div_lut = [0] * 256
-        for i in range(256):
-            if i == 0:
-                self.div_lut[i] = 0
-            else:
-                # inv = round(2^26 / i) >> 10 for typical index
-                self.div_lut[i] = (1 << 26) // i
+
+        # Index 0: grad_sum = 0
+        self.div_lut[0] = 65535
+
+        # Index 1-127: grad_sum 1-127 (direct mapping)
+        for i in range(1, 128):
+            inv = (1 << 26) // i
+            self.div_lut[i] = min(inv, 65535)
+
+        # Index 128-159: grad_sum 128-255 (2:1 compression)
+        for idx in range(128, 160):
+            grad_sum = (idx - 128) * 2 + 128
+            self.div_lut[idx] = min((1 << 26) // grad_sum, 65535)
+
+        # Index 160-191: grad_sum 256-511 (4:1 compression)
+        for idx in range(160, 192):
+            grad_sum = (idx - 160) * 4 + 256
+            self.div_lut[idx] = min((1 << 26) // grad_sum, 65535)
+
+        # Index 192-223: grad_sum 512-1023 (8:1 compression)
+        for idx in range(192, 224):
+            grad_sum = (idx - 192) * 8 + 512
+            self.div_lut[idx] = min((1 << 26) // grad_sum, 65535)
+
+        # Index 224-231: grad_sum 8192-16383 (note: gap 1024-8191)
+        for idx in range(224, 232):
+            grad_sum = (idx - 224) * 1024 + 8192
+            self.div_lut[idx] = min((1 << 26) // grad_sum, 65535)
+
+        # Index 232-239: grad_sum 16384-32767
+        for idx in range(232, 240):
+            grad_sum = (idx - 232) * 2048 + 16384
+            self.div_lut[idx] = min((1 << 26) // grad_sum, 65535)
+
+        # Index 240-247: grad_sum 32768-65535
+        for idx in range(240, 248):
+            grad_sum = (idx - 240) * 4096 + 32768
+            self.div_lut[idx] = min((1 << 26) // grad_sum, 65535)
+
+        # Index 248-255: grad_sum 65536-131071
+        for idx in range(248, 256):
+            grad_sum = (idx - 248) * 8192 + 65536
+            self.div_lut[idx] = min((1 << 26) // grad_sum, 65535)
 
     def _clip(self, value: int, min_val: int = 0, max_val: int = None) -> int:
         """限幅函数"""
@@ -194,29 +243,36 @@ class ISPCSIIRFixedModel:
         LUT-based division: blend_sum / grad_sum
 
         Uses index compression and LUT for single-cycle output.
+        Index mapping (no overlap):
+          grad_sum 0:        index 0
+          grad_sum 1-127:    index 1-127 (direct mapping)
+          grad_sum 128-255:  index 128-159 (2:1 compression)
+          grad_sum 256-511:  index 160-191 (4:1 compression)
+          grad_sum 512-1023: index 192-223 (8:1 compression)
+          grad_sum 1024+:    index 224-255 (higher compression)
         """
         if grad_sum == 0:
             return 0
 
-        # Index compression: compress 17-bit grad_sum to 8-bit LUT index
-        if grad_sum >= 65536:          # bit 16 set
-            lut_index = 0b11100000 | ((grad_sum >> 9) & 0x1F)
-        elif grad_sum >= 32768:        # bit 15 set
-            lut_index = 0b11000000 | ((grad_sum >> 8) & 0x1F)
-        elif grad_sum >= 16384:        # bit 14 set
-            lut_index = 0b10100000 | ((grad_sum >> 7) & 0x1F)
-        elif grad_sum >= 8192:         # bit 13 set
-            lut_index = 0b10000000 | ((grad_sum >> 6) & 0x1F)
-        elif grad_sum >= 4096:         # bit 12 set
-            lut_index = 0b01100000 | ((grad_sum >> 5) & 0x1F)
-        elif grad_sum >= 2048:         # bit 11 set
-            lut_index = 0b01000000 | ((grad_sum >> 4) & 0x1F)
-        elif grad_sum >= 1024:         # bit 10 set
-            lut_index = 0b00100000 | ((grad_sum >> 3) & 0x1F)
-        elif grad_sum > 0:             # 1-1023
-            lut_index = grad_sum & 0xFF
-        else:
-            lut_index = 0
+        gs = grad_sum
+
+        # Index compression (matches RTL)
+        if gs < 128:
+            lut_index = gs  # 1-127 → 1-127
+        elif gs < 256:
+            lut_index = 128 + ((gs - 128) >> 1)  # 128-255 → 128-159
+        elif gs < 512:
+            lut_index = 160 + ((gs - 256) >> 2)  # 256-511 → 160-191
+        elif gs < 1024:
+            lut_index = 192 + ((gs - 512) >> 3)  # 512-1023 → 192-223
+        elif gs >= 65536:
+            lut_index = 248 + ((gs - 65536) >> 13)  # 65536+ → 248-255
+        elif gs >= 32768:
+            lut_index = 240 + ((gs - 32768) >> 12)  # 32768-65535 → 240-247
+        elif gs >= 16384:
+            lut_index = 232 + ((gs - 16384) >> 11)  # 16384-32767 → 232-239
+        else:  # 1024-16383
+            lut_index = 224 + ((gs - 1024) >> 10)  # 1024-16383 → 224-231
 
         # Clamp index to LUT range
         lut_index = min(lut_index, 255)
