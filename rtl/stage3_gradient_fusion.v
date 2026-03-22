@@ -3,7 +3,7 @@
 // Purpose: Gradient-weighted directional fusion
 // Author: rtl-impl
 // Date: 2026-03-22
-// Version: v1.0
+// Version: v1.1
 //-----------------------------------------------------------------------------
 // Description:
 //   Implements Stage 3 of ISP-CSIIR pipeline:
@@ -18,7 +18,10 @@
 //   Cycle 2: Gradient sort (second stage)
 //   Cycle 3: Weighted multiplication
 //   Cycle 4: Weighted sum
-//   Cycle 5: Division output
+//   Cycle 5: Division output (using common_lut_divider)
+//
+// Modules Used:
+//   - common_lut_divider: Single-cycle LUT-based divider
 //-----------------------------------------------------------------------------
 
 module stage3_gradient_fusion #(
@@ -399,102 +402,70 @@ module stage3_gradient_fusion #(
     end
 
     //=========================================================================
-    // Cycle 5: Division Output using LUT-based Approximation
+    // Cycle 5: Division Output using LUT-based Divider Module
     //=========================================================================
-    // Index compression: compress 17-bit grad_sum to 8-bit LUT index
-    // No overlap design: each grad_sum range maps to unique index range
-    //   grad_sum 0:        index 0
-    //   grad_sum 1-127:    index 1-127 (direct mapping)
-    //   grad_sum 128-255:  index 128-159 (2:1 compression)
-    //   grad_sum 256-511:  index 160-191 (4:1 compression)
-    //   grad_sum 512-1023: index 192-223 (8:1 compression)
-    //   grad_sum 1024-131071: index 224-255 (higher compression)
-    wire [7:0] lut_index;
-    wire [16:0] gs = grad_sum_s4;
-    assign lut_index = (gs == 0) ? 8'd0 :
-                       (gs < 128) ? gs[6:0] :                           // 1-127 → 1-127
-                       (gs < 256) ? {2'b10, gs[6:1]} :                   // 128-255 → 128-159
-                       (gs < 512) ? {2'b10, 5'b10000, gs[7:2]} :         // 256-511 → 160-191
-                       (gs < 1024) ? {2'b11, gs[8:3]} :                  // 512-1023 → 192-223
-                       (gs[16]) ? {5'b11111, gs[12:9]} :                 // 65536-131071 → 248-255
-                       (gs[15]) ? {5'b11110, gs[11:8]} :                 // 32768-65535 → 240-247
-                       (gs[14]) ? {5'b11101, gs[10:7]} :                 // 16384-32767 → 232-239
-                       (gs[13]) ? {5'b11100, gs[9:6]} :                  // 8192-16383 → 224-231
-                       {5'b11100, gs[9:6]};                              // fallback
+    // Instantiate LUT divider for blend0
+    wire [DATA_WIDTH-1:0] blend0_div;
+    wire                  blend0_div_valid;
 
-    // LUT (256 x 16-bit) for inverse values: inv = round(2^26 / typical_grad_sum)
-    reg [15:0] div_lut [0:255];
+    common_lut_divider #(
+        .DIVIDEND_WIDTH(GRAD_SUM_WIDTH),
+        .QUOTIENT_WIDTH(DATA_WIDTH),
+        .PRODUCT_SHIFT (26)
+    ) u_divider_blend0 (
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .enable   (enable),
+        .dividend (grad_sum_s4),
+        .numerator(blend0_sum_s4),
+        .valid_in (valid_s4),
+        .quotient (blend0_div),
+        .valid_out(blend0_div_valid)
+    );
 
-    // Initialize LUT with inverse values
-    integer init_i;
-    reg [31:0] lut_tmp;  // temporary variable for LUT initialization
-    initial begin
-        // LUT values computed as: inv = round(2^26 / grad_sum)
-        // grad_sum = 0: special case (max value)
-        div_lut[0] = 16'd65535;  // grad_sum = 0
+    // Instantiate LUT divider for blend1
+    wire [DATA_WIDTH-1:0] blend1_div;
+    wire                  blend1_div_valid;
 
-        // Index 1-127: grad_sum 1-127 (direct mapping)
-        div_lut[1] = 16'd65535;  // grad_sum = 1, clamp to max
-        for (init_i = 2; init_i < 128; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / init_i;
-            div_lut[init_i] = (lut_tmp > 65535) ? 16'd65535 : lut_tmp[15:0];
-        end
+    common_lut_divider #(
+        .DIVIDEND_WIDTH(GRAD_SUM_WIDTH),
+        .QUOTIENT_WIDTH(DATA_WIDTH),
+        .PRODUCT_SHIFT (26)
+    ) u_divider_blend1 (
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .enable   (enable),
+        .dividend (grad_sum_s4),
+        .numerator(blend1_sum_s4),
+        .valid_in (valid_s4),
+        .quotient (blend1_div),
+        .valid_out(blend1_div_valid)
+    );
 
-        // Index 128-159: grad_sum 128-255 (2:1 compression, use midpoint)
-        for (init_i = 128; init_i < 160; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 128) * 2 + 128);
-            div_lut[init_i] = lut_tmp[15:0];
-        end
+    // Pass-through signals for Cycle 5 (registered with divider output)
+    reg [LINE_ADDR_WIDTH-1:0] pixel_x_s5;
+    reg [ROW_CNT_WIDTH-1:0]   pixel_y_s5;
+    reg [DATA_WIDTH-1:0]      avg0_u_s5, avg1_u_s5;
+    reg [WIN_SIZE_WIDTH-1:0]  win_size_s5;
+    reg [DATA_WIDTH-1:0]      center_s5;
 
-        // Index 160-191: grad_sum 256-511 (4:1 compression)
-        for (init_i = 160; init_i < 192; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 160) * 4 + 256);
-            div_lut[init_i] = lut_tmp[15:0];
-        end
-
-        // Index 192-223: grad_sum 512-1023 (8:1 compression)
-        for (init_i = 192; init_i < 224; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 192) * 8 + 512);
-            div_lut[init_i] = lut_tmp[15:0];
-        end
-
-        // Index 224-231: grad_sum 8192-16383
-        for (init_i = 224; init_i < 232; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 224) * 1024 + 8192);
-            div_lut[init_i] = lut_tmp[15:0];
-        end
-
-        // Index 232-239: grad_sum 16384-32767
-        for (init_i = 232; init_i < 240; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 232) * 2048 + 16384);
-            div_lut[init_i] = lut_tmp[15:0];
-        end
-
-        // Index 240-247: grad_sum 32768-65535
-        for (init_i = 240; init_i < 248; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 240) * 4096 + 32768);
-            div_lut[init_i] = lut_tmp[15:0];
-        end
-
-        // Index 248-255: grad_sum 65536-131071
-        for (init_i = 248; init_i < 256; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 248) * 8192 + 65536);
-            div_lut[init_i] = lut_tmp[15:0];
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            pixel_x_s5    <= {LINE_ADDR_WIDTH{1'b0}};
+            pixel_y_s5    <= {ROW_CNT_WIDTH{1'b0}};
+            avg0_u_s5     <= {DATA_WIDTH{1'b0}};
+            avg1_u_s5     <= {DATA_WIDTH{1'b0}};
+            win_size_s5   <= {WIN_SIZE_WIDTH{1'b0}};
+            center_s5     <= {DATA_WIDTH{1'b0}};
+        end else if (enable) begin
+            pixel_x_s5    <= pixel_x_s4;
+            pixel_y_s5    <= pixel_y_s4;
+            avg0_u_s5     <= avg0_u_s0;  // Pass through from Stage 2
+            avg1_u_s5     <= avg1_u_s0;
+            win_size_s5   <= win_size_s4;
+            center_s5     <= center_s4;
         end
     end
-
-    // LUT read
-    wire [15:0] inv_value = div_lut[lut_index];
-
-    // Multiplication: blend_sum * inv_value
-    wire [41:0] product0 = blend0_sum_s4 * inv_value;
-    wire [41:0] product1 = blend1_sum_s4 * inv_value;
-
-    // Truncate to 10-bit output (bits [35:26] of product)
-    wire [DATA_WIDTH-1:0] blend0_div = (grad_sum_s4 != 0) ?
-                                       product0[35:26] : {DATA_WIDTH{1'b0}};
-    wire [DATA_WIDTH-1:0] blend1_div = (grad_sum_s4 != 0) ?
-                                       product1[35:26] : {DATA_WIDTH{1'b0}};
 
     // Output registers
     always @(posedge clk or negedge rst_n) begin
@@ -511,13 +482,13 @@ module stage3_gradient_fusion #(
         end else if (enable) begin
             blend0_dir_avg  <= blend0_div;
             blend1_dir_avg  <= blend1_div;
-            stage3_valid    <= valid_s4;
-            pixel_x_out     <= pixel_x_s4;
-            pixel_y_out     <= pixel_y_s4;
-            avg0_u_out      <= avg0_u_s0;  // Pass through from Stage 2
-            avg1_u_out      <= avg1_u_s0;
-            win_size_clip_out <= win_size_s4;
-            center_pixel_out <= center_s4;
+            stage3_valid    <= blend0_div_valid & blend1_div_valid;
+            pixel_x_out     <= pixel_x_s5;
+            pixel_y_out     <= pixel_y_s5;
+            avg0_u_out      <= avg0_u_s5;
+            avg1_u_out      <= avg1_u_s5;
+            win_size_clip_out <= win_size_s5;
+            center_pixel_out <= center_s5;
         end
     end
 
