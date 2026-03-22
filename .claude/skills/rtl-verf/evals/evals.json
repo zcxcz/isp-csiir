@@ -1,0 +1,26 @@
+{
+  "skill_name": "rtl-verf",
+  "evals": [
+    {
+      "id": 1,
+      "name": "iir-filter-verification",
+      "prompt": "为 IIR 低通滤波器 RTL 模块搭建验证环境。DUT 是一个一阶 IIR 滤波器，输入输出都是 8-bit。需要：1) 创建 testbench 2) 集成定点化 golden model 进行比对 3) 制定 testplan 保证功能覆盖。",
+      "expected_output": "完整的 SV 验证环境，包含 testbench、golden model 接口、testplan",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "pipeline-module-verification",
+      "prompt": "验证一个 4 级流水线图像处理模块，需要对每一级的输出进行比对。DUT 有 stage1_out, stage2_out, stage3_out, stage4_out 四个中间输出端口。请搭建验证环境，支持逐级数据比对。",
+      "expected_output": "支持多级 pipeline 比对的验证环境",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "regression-coverage",
+      "prompt": "为一个 Sobel 边缘检测模块设置回归测试环境，需要收集代码覆盖率和功能覆盖率。目标：行覆盖率 100%，分支覆盖率 95%+，功能覆盖率 100%。",
+      "expected_output": "回归测试脚本和覆盖率配置",
+      "files": []
+    }
+  ]
+}
