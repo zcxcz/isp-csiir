@@ -399,12 +399,101 @@ module stage3_gradient_fusion #(
     end
 
     //=========================================================================
-    // Cycle 5: Division Output
+    // Cycle 5: Division Output using LUT-based Approximation
     //=========================================================================
+    // Index compression: compress 17-bit grad_sum to 8-bit LUT index
+    wire [7:0] lut_index;
+    assign lut_index = (grad_sum_s4[16]) ? {3'b111, grad_sum_s4[13:9]} :
+                       (grad_sum_s4[15]) ? {3'b110, grad_sum_s4[12:8]} :
+                       (grad_sum_s4[14]) ? {3'b101, grad_sum_s4[11:7]} :
+                       (grad_sum_s4[13]) ? {3'b100, grad_sum_s4[10:6]} :
+                       (grad_sum_s4[12]) ? {3'b011, grad_sum_s4[9:5]} :
+                       (grad_sum_s4[11]) ? {3'b010, grad_sum_s4[8:4]} :
+                       (grad_sum_s4[10]) ? {3'b001, grad_sum_s4[7:3]} :
+                       (|grad_sum_s4[9:0]) ? {1'b0, grad_sum_s4[7:0]} : 8'b0;
+
+    // LUT (256 x 16-bit) for inverse values: inv = round(2^26 / typical_grad_sum)
+    reg [15:0] div_lut [0:255];
+
+    // Initialize LUT with inverse values
+    integer init_i;
+    initial begin
+        // LUT values computed as: inv = round(2^26 / mid_point_of_range)
+        // Each index covers a range of grad_sum values
+        // Note: Values clamped to 16-bit max (65535)
+        div_lut[0]   = 16'd65535;  // grad_sum = 0 (should not be used, max value)
+        div_lut[1]   = 16'd65535;  // grad_sum = 1, 2^26/1 = 67108864, clamp to max
+        div_lut[2]   = 16'd32768;  // grad_sum = 2
+        div_lut[3]   = 16'd21845;  // grad_sum = 3
+        div_lut[4]   = 16'd16384;  // grad_sum = 4
+        div_lut[5]   = 16'd13107;  // grad_sum = 5
+        div_lut[6]   = 16'd10923;  // grad_sum = 6
+        div_lut[7]   = 16'd9362;   // grad_sum = 7
+        div_lut[8]   = 16'd8192;   // grad_sum = 8
+        div_lut[9]   = 16'd7282;   // grad_sum = 9
+        div_lut[10]  = 16'd6554;   // grad_sum = 10
+        div_lut[11]  = 16'd5964;   // grad_sum = 11
+        div_lut[12]  = 16'd5461;   // grad_sum = 12
+        div_lut[13]  = 16'd5027;   // grad_sum = 13
+        div_lut[14]  = 16'd4648;   // grad_sum = 14
+        div_lut[15]  = 16'd4315;   // grad_sum = 15
+        // Index 16-31: grad_sum range 16-31, mid = 24
+        div_lut[16]  = 16'd2796;   // grad_sum = 16
+        div_lut[17]  = 16'd2633;   // grad_sum = 17
+        div_lut[18]  = 16'd2486;   // grad_sum = 18
+        div_lut[19]  = 16'd2352;   // grad_sum = 19
+        div_lut[20]  = 16'd2230;   // grad_sum = 20
+        div_lut[21]  = 16'd2119;   // grad_sum = 21
+        div_lut[22]  = 16'd2017;   // grad_sum = 22
+        div_lut[23]  = 16'd1923;   // grad_sum = 23
+        div_lut[24]  = 16'd1837;   // grad_sum = 24
+        div_lut[25]  = 16'd1757;   // grad_sum = 25
+        div_lut[26]  = 16'd1684;   // grad_sum = 26
+        div_lut[27]  = 16'd1615;   // grad_sum = 27
+        div_lut[28]  = 16'd1552;   // grad_sum = 28
+        div_lut[29]  = 16'd1493;   // grad_sum = 29
+        div_lut[30]  = 16'd1438;   // grad_sum = 30
+        div_lut[31]  = 16'd1386;   // grad_sum = 31
+        // Index 32-63: grad_sum range 32-63, mid = 48
+        div_lut[32]  = 16'd1337;   // grad_sum = 32
+        div_lut[33]  = 16'd1290;   // grad_sum = 33
+        div_lut[48]  = 16'd1117;   // grad_sum = 48
+        div_lut[63]  = 16'd1004;   // grad_sum = 63
+        // Index 64-127: grad_sum range 64-127, mid = 96
+        div_lut[64]  = 16'd957;    // grad_sum = 64
+        div_lut[96]  = 16'd699;    // grad_sum = 96
+        div_lut[127] = 16'd548;    // grad_sum = 127
+        // Index 128-255: grad_sum range 128-255, mid = 192
+        div_lut[128] = 16'd524;    // grad_sum = 128
+        div_lut[192] = 16'd349;    // grad_sum = 192
+        div_lut[255] = 16'd263;    // grad_sum = 255
+        // Fill remaining entries with interpolated values
+        for (init_i = 34; init_i < 48; init_i = init_i + 1)
+            div_lut[init_i] = div_lut[33] - (div_lut[33] - div_lut[48]) * (init_i - 33) / 15;
+        for (init_i = 49; init_i < 63; init_i = init_i + 1)
+            div_lut[init_i] = div_lut[48] - (div_lut[48] - div_lut[63]) * (init_i - 48) / 15;
+        for (init_i = 65; init_i < 96; init_i = init_i + 1)
+            div_lut[init_i] = div_lut[64] - (div_lut[64] - div_lut[96]) * (init_i - 64) / 32;
+        for (init_i = 97; init_i < 127; init_i = init_i + 1)
+            div_lut[init_i] = div_lut[96] - (div_lut[96] - div_lut[127]) * (init_i - 96) / 31;
+        for (init_i = 129; init_i < 192; init_i = init_i + 1)
+            div_lut[init_i] = div_lut[128] - (div_lut[128] - div_lut[192]) * (init_i - 128) / 64;
+        for (init_i = 193; init_i < 255; init_i = init_i + 1)
+            div_lut[init_i] = div_lut[192] - (div_lut[192] - div_lut[255]) * (init_i - 192) / 63;
+    end
+
+    // LUT read
+    wire [15:0] inv_value = div_lut[lut_index];
+
+    // Multiplication: blend_sum * inv_value
+    wire [41:0] product0 = blend0_sum_s4 * inv_value;
+    wire [41:0] product1 = blend1_sum_s4 * inv_value;
+
+    // Truncate to 10-bit output (bits [35:26] of product)
     wire [DATA_WIDTH-1:0] blend0_div = (grad_sum_s4 != 0) ?
-                                       (blend0_sum_s4 / grad_sum_s4) : {DATA_WIDTH{1'b0}};
+                                       product0[35:26] : {DATA_WIDTH{1'b0}};
     wire [DATA_WIDTH-1:0] blend1_div = (grad_sum_s4 != 0) ?
-                                       (blend1_sum_s4 / grad_sum_s4) : {DATA_WIDTH{1'b0}};
+                                       product1[35:26] : {DATA_WIDTH{1'b0}};
 
     // Output registers
     always @(posedge clk or negedge rst_n) begin

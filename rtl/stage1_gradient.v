@@ -153,8 +153,17 @@ module stage1_gradient #(
     wire [GRAD_WIDTH-1:0] grad_v_abs_comb = (grad_v_raw_s1[GRAD_WIDTH-1]) ?
                                             ~grad_v_raw_s1 + 1'b1 : grad_v_raw_s1;
 
-    // Gradient sum (shifted right by 2 to avoid overflow)
-    wire [GRAD_WIDTH-1:0] grad_sum_comb = (grad_h_abs_comb >> 2) + (grad_v_abs_comb >> 2);
+    // Gradient sum using multiply approximation for /5
+    // grad = (grad_h + grad_v) * 205 >> 10 (approximates /5)
+    // Step 1: Sum of absolute gradients
+    wire [GRAD_WIDTH:0] grad_sum_raw = grad_h_abs_comb + grad_v_abs_comb;
+
+    // Step 2: Multiply by 205 (9-bit constant)
+    wire [GRAD_WIDTH+9:0] grad_full = grad_sum_raw * 9'd205;
+
+    // Step 3: Right shift by 10 with saturation to GRAD_WIDTH
+    wire [GRAD_WIDTH-1:0] grad_sum_comb = (|grad_full[GRAD_WIDTH+9:GRAD_WIDTH]) ?
+                                          {GRAD_WIDTH{1'b1}} : grad_full[GRAD_WIDTH-1:0];
 
     // Pipeline registers for Cycle 2
     reg [GRAD_WIDTH-1:0]       grad_h_abs_s2, grad_v_abs_s2;

@@ -57,6 +57,19 @@ class ISPCSIIRFixedModel:
         # IIR 反馈存储
         self.src_uv = None
 
+        # Initialize LUT for division (256 x 16-bit)
+        self._init_div_lut()
+
+    def _init_div_lut(self):
+        """Initialize division LUT with inverse values"""
+        self.div_lut = [0] * 256
+        for i in range(256):
+            if i == 0:
+                self.div_lut[i] = 0
+            else:
+                # inv = round(2^26 / i) >> 10 for typical index
+                self.div_lut[i] = (1 << 26) // i
+
     def _clip(self, value: int, min_val: int = 0, max_val: int = None) -> int:
         """限幅函数"""
         if max_val is None:
@@ -106,8 +119,12 @@ class ISPCSIIRFixedModel:
         grad_h = self._abs(grad_h_raw)
         grad_v = self._abs(grad_v_raw)
 
-        # 综合梯度 (>>2)
-        grad = (grad_h >> 2) + (grad_v >> 2)
+        # 综合梯度: grad = (grad_h + grad_v) * 205 >> 10 (approximates /5)
+        grad_sum = grad_h + grad_v
+        grad_full = grad_sum * 205
+        grad = grad_full >> 10
+        # 饱和到 14-bit
+        grad = self._clip(grad, 0, (1 << self.config.GRAD_WIDTH) - 1)
 
         # 窗口大小查表
         win_size = self._lut_win_size(grad)
@@ -172,12 +189,52 @@ class ISPCSIIRFixedModel:
         return (avg0_c, avg0_u, avg0_d, avg0_l, avg0_r,
                 avg1_c, avg1_u, avg1_d, avg1_l, avg1_r)
 
+    def _lut_divide(self, blend_sum: int, grad_sum: int) -> int:
+        """
+        LUT-based division: blend_sum / grad_sum
+
+        Uses index compression and LUT for single-cycle output.
+        """
+        if grad_sum == 0:
+            return 0
+
+        # Index compression: compress 17-bit grad_sum to 8-bit LUT index
+        if grad_sum >= 65536:          # bit 16 set
+            lut_index = 0b11100000 | ((grad_sum >> 9) & 0x1F)
+        elif grad_sum >= 32768:        # bit 15 set
+            lut_index = 0b11000000 | ((grad_sum >> 8) & 0x1F)
+        elif grad_sum >= 16384:        # bit 14 set
+            lut_index = 0b10100000 | ((grad_sum >> 7) & 0x1F)
+        elif grad_sum >= 8192:         # bit 13 set
+            lut_index = 0b10000000 | ((grad_sum >> 6) & 0x1F)
+        elif grad_sum >= 4096:         # bit 12 set
+            lut_index = 0b01100000 | ((grad_sum >> 5) & 0x1F)
+        elif grad_sum >= 2048:         # bit 11 set
+            lut_index = 0b01000000 | ((grad_sum >> 4) & 0x1F)
+        elif grad_sum >= 1024:         # bit 10 set
+            lut_index = 0b00100000 | ((grad_sum >> 3) & 0x1F)
+        elif grad_sum > 0:             # 1-1023
+            lut_index = grad_sum & 0xFF
+        else:
+            lut_index = 0
+
+        # Clamp index to LUT range
+        lut_index = min(lut_index, 255)
+
+        # LUT lookup
+        inv = self.div_lut[lut_index]
+
+        # Multiply and truncate
+        result = (blend_sum * inv) >> 26
+
+        return self._clip(result, 0, self.DATA_MAX)
+
     def _stage3_fusion(self, avg0: Tuple, avg1: Tuple,
                        grad: int, grad_neighbors: List[int]) -> Tuple[int, int]:
         """
         Stage 3: 梯度融合
 
-        简化实现：逆序排序后加权
+        使用 LUT 除法实现梯度加权融合
         """
         # 排序梯度
         grads = sorted(grad_neighbors + [grad], reverse=True)
@@ -191,8 +248,9 @@ class ISPCSIIRFixedModel:
             # 加权平均
             blend0_sum = sum(a * g for a, g in zip(avg0, grads))
             blend1_sum = sum(a * g for a, g in zip(avg1, grads))
-            blend0 = blend0_sum // grad_sum
-            blend1 = blend1_sum // grad_sum
+            # Use LUT-based division
+            blend0 = self._lut_divide(blend0_sum, grad_sum)
+            blend1 = self._lut_divide(blend1_sum, grad_sum)
 
         return blend0, blend1
 
