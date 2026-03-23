@@ -2,8 +2,8 @@
 // Module: isp_csiir_top
 // Purpose: Top-level module for ISP-CSIIR image processing
 // Author: rtl-impl
-// Date: 2026-03-22
-// Version: v2.0 - Updated for signed data format (s11)
+// Date: 2026-03-23
+// Version: v2.2 - Updated Stage 3 with true row delay architecture
 //-----------------------------------------------------------------------------
 // Description:
 //   Top-level integration of ISP-CSIIR pipeline including:
@@ -18,11 +18,14 @@
 //   - Stage 2-4 internal: s11 (11-bit signed, zero point = 512)
 //   - Final output: u10 (10-bit unsigned)
 //
-// Pipeline Latency: 24 cycles (from din_valid to dout_valid)
+// Pipeline Latency:
 //   - Stage 1: 5 cycles (gradient calculation)
 //   - Stage 2: 8 cycles (directional average)
-//   - Stage 3: 6 cycles (gradient fusion)
+//   - Stage 3: 1 row + 6 cycles (gradient fusion with row delay)
+//     * Row delay enables true 3-row gradient access (grad_u, grad_c, grad_d)
+//     * First row has no valid output (buffering)
 //   - Stage 4: 5 cycles (IIR blend)
+//   - Total: 1 row + 24 cycles from din_valid to dout_valid
 //-----------------------------------------------------------------------------
 
 module isp_csiir_top #(

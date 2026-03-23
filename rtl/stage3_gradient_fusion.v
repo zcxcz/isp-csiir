@@ -2,8 +2,8 @@
 // Module: stage3_gradient_fusion
 // Purpose: Gradient-weighted directional fusion
 // Author: rtl-impl
-// Date: 2026-03-22
-// Version: v2.0 - Added signed data support
+// Date: 2026-03-23
+// Version: v2.2 - True row delay architecture for grad_d (next row gradient)
 //-----------------------------------------------------------------------------
 // Description:
 //   Implements Stage 3 of ISP-CSIIR pipeline:
@@ -23,6 +23,31 @@
 //   Cycle 3: Weighted multiplication
 //   Cycle 4: Weighted sum
 //   Cycle 5: Division output (using common_lut_divider)
+//
+// Gradient Line Buffer Design (v2.2 True Row Delay Architecture):
+//   CRITICAL: Stage 3 processing is delayed by 1 FULL ROW
+//   - Stage 2 outputs are stored in row delay buffer for IMG_WIDTH cycles
+//   - When Stage 3 processes row N, Stage 1/2 are already processing row N+1
+//   - The "current" grad input is actually grad(N+1, j) - the NEXT row's gradient
+//   - The gradient buffer contains grad(N) - the CURRENT row being processed
+//
+//   Data Flow Timeline:
+//   | Time        | Stage 1/2       | Stage 3 (delayed) |
+//   |-------------|-----------------|-------------------|
+//   | Row 0       | Process row 0   | Idle (no data)    |
+//   | Row 1       | Process row 1   | Process row 0     |
+//   | Row 2       | Process row 2   | Process row 1     |
+//   | ...         | ...             | ...               |
+//
+//   For processing pixel (i, j) in Stage 3:
+//   - grad_c = grad_buffer[pixel_x] = grad(i, j)   [current row from buffer]
+//   - grad_u = grad_buffer_prev[pixel_x] = grad(i-1, j) [previous row from secondary buffer]
+//   - grad_d = grad_current_input = grad(i+1, j)   [next row from Stage 1]
+//
+//   Architecture Benefits:
+//   - True 3-row gradient access (up, center, down)
+//   - Maintains 1 pixel/clock throughput
+//   - Adds 1 row latency to Stage 3 output
 //
 // Modules Used:
 //   - common_lut_divider: Single-cycle LUT-based divider
@@ -76,29 +101,156 @@ module stage3_gradient_fusion #(
     localparam GRAD_SUM_WIDTH = GRAD_WIDTH + 3;              // 17-bit for grad sum
 
     //=========================================================================
-    // Gradient Line Buffer (2 rows)
+    // Row Delay Control
     //=========================================================================
-    reg [GRAD_WIDTH-1:0] grad_line_buf_0 [0:IMG_WIDTH-1];
-    reg [GRAD_WIDTH-1:0] grad_line_buf_1 [0:IMG_WIDTH-1];
-    reg                  grad_buf_sel;  // 0: write to buf_0, 1: write to buf_1
+    // Row counter to track current processing row
+    reg [ROW_CNT_WIDTH-1:0] row_counter;
+    reg                     row_valid;          // At least 1 row has been buffered
+
+    // Column counter for row delay buffer addressing
+    reg [LINE_ADDR_WIDTH-1:0] col_counter;
+
+    // First row indicator (no valid grad_d available)
+    wire is_first_row = (row_counter == 0) || !row_valid;
+
+    // Last row indicator (no next row data available)
+    wire is_last_row = (row_counter >= img_height - 2);  // -2 because we're 1 row behind
+
+    //=========================================================================
+    // Row Delay Buffer for Stage 2 Outputs
+    //=========================================================================
+    // Store Stage 2 outputs for 1 full row duration
+    // These are the signals that Stage 3 will process (delayed by 1 row)
+
+    // Gradient line buffer: stores gradients for 2 rows
+    // buf_0: current row being processed by Stage 3
+    // buf_1: previous row (for grad_u)
+    reg [GRAD_WIDTH-1:0] grad_line_buf_0 [0:IMG_WIDTH-1];  // Current row (row N)
+    reg [GRAD_WIDTH-1:0] grad_line_buf_1 [0:IMG_WIDTH-1];  // Previous row (row N-1)
+    reg                  grad_buf_sel;  // 0: buf_0 is current, 1: buf_1 is current
 
     // Horizontal gradient shift register for left/right neighbors
-    reg [GRAD_WIDTH-1:0] grad_shift_l;
+    reg [GRAD_WIDTH-1:0] grad_shift_l;  // Left neighbor (previous column)
+
+    // Row delay buffer for avg signals and metadata (stores 1 full row of data)
+    // These will be read 1 row later by Stage 3 pipeline
+    reg signed [SIGNED_WIDTH-1:0] avg0_c_delay [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg0_u_delay [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg0_d_delay [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg0_l_delay [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg0_r_delay [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg1_c_delay [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg1_u_delay [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg1_d_delay [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg1_l_delay [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg1_r_delay [0:IMG_WIDTH-1];
+    reg [DATA_WIDTH-1:0]   center_pixel_delay [0:IMG_WIDTH-1];
+    reg [WIN_SIZE_WIDTH-1:0] win_size_delay [0:IMG_WIDTH-1];
+    reg [LINE_ADDR_WIDTH-1:0] pixel_x_delay [0:IMG_WIDTH-1];
+    reg [ROW_CNT_WIDTH-1:0] pixel_y_delay [0:IMG_WIDTH-1];
+    reg                     valid_delay [0:IMG_WIDTH-1];
+
+    // Current gradient from Stage 1/2 (this is grad_d for the delayed row)
+    wire [GRAD_WIDTH-1:0] grad_next_row = grad;  // Gradient of row N+1
 
     //=========================================================================
-    // Cycle 0: Input Buffer and Gradient Fetch
+    // Row Delay Buffer Write (Stage 2 outputs -> delay buffer)
     //=========================================================================
-    // Fetch gradients from neighbors
-    wire [GRAD_WIDTH-1:0] grad_c = grad;  // Current center
-    wire [GRAD_WIDTH-1:0] grad_u = grad_buf_sel ? grad_line_buf_0[pixel_x] : grad_line_buf_1[pixel_x];  // Up (previous row)
-    wire [GRAD_WIDTH-1:0] grad_d = grad_buf_sel ? grad_line_buf_1[pixel_x] : grad_line_buf_0[pixel_x];  // Down (next row - needs delay)
-    wire [GRAD_WIDTH-1:0] grad_l = grad_shift_l;  // Left neighbor
-    wire [GRAD_WIDTH-1:0] grad_r = grad;          // Right neighbor (simplified, same as center for now)
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            row_counter <= {ROW_CNT_WIDTH{1'b0}};
+            col_counter <= {LINE_ADDR_WIDTH{1'b0}};
+            row_valid   <= 1'b0;
+            grad_buf_sel <= 1'b0;
+            grad_shift_l <= {GRAD_WIDTH{1'b0}};
+        end else if (enable) begin
+            // Update horizontal shift register for left neighbor
+            grad_shift_l <= grad;
 
-    // Boundary handling
-    wire is_first_row = (pixel_y == 0);
-    wire is_last_row  = (pixel_y >= img_height - 1);
+            // Write Stage 2 outputs to row delay buffer
+            if (stage2_valid) begin
+                // Store avg signals and metadata for delayed processing
+                avg0_c_delay[col_counter] <= avg0_c;
+                avg0_u_delay[col_counter] <= avg0_u;
+                avg0_d_delay[col_counter] <= avg0_d;
+                avg0_l_delay[col_counter] <= avg0_l;
+                avg0_r_delay[col_counter] <= avg0_r;
+                avg1_c_delay[col_counter] <= avg1_c;
+                avg1_u_delay[col_counter] <= avg1_u;
+                avg1_d_delay[col_counter] <= avg1_d;
+                avg1_l_delay[col_counter] <= avg1_l;
+                avg1_r_delay[col_counter] <= avg1_r;
+                center_pixel_delay[col_counter] <= center_pixel;
+                win_size_delay[col_counter]     <= win_size_clip;
+                pixel_x_delay[col_counter]      <= pixel_x;
+                pixel_y_delay[col_counter]      <= pixel_y;
+                valid_delay[col_counter]        <= stage2_valid;
 
+                // Store current gradient to line buffer (for next row's grad_c)
+                if (grad_buf_sel)
+                    grad_line_buf_1[col_counter] <= grad;
+                else
+                    grad_line_buf_0[col_counter] <= grad;
+
+                // Update column counter
+                if (col_counter >= img_width - 1) begin
+                    col_counter <= {LINE_ADDR_WIDTH{1'b0}};
+                    // Swap buffer selection at end of row
+                    grad_buf_sel <= ~grad_buf_sel;
+                    // Update row counter
+                    row_counter <= row_counter + 1'b1;
+                    row_valid   <= 1'b1;  // After first row, we have valid delayed data
+                end else begin
+                    col_counter <= col_counter + 1'b1;
+                end
+            end
+        end
+    end
+
+    //=========================================================================
+    // Cycle 0: Read from Row Delay Buffer and Gradient Fetch
+    //=========================================================================
+    // Read delayed data from row buffer (1 row behind Stage 2)
+    // The delayed pixel_x determines which column we're processing
+
+    // Read address is the current col_counter (we're always 1 row behind)
+    wire [LINE_ADDR_WIDTH-1:0] rd_addr = col_counter;
+
+    // Delayed Stage 2 data (for the pixel being processed by Stage 3)
+    wire signed [SIGNED_WIDTH-1:0] avg0_c_rd = avg0_c_delay[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg0_u_rd = avg0_u_delay[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg0_d_rd = avg0_d_delay[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg0_l_rd = avg0_l_delay[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg0_r_rd = avg0_r_delay[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg1_c_rd = avg1_c_delay[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg1_u_rd = avg1_u_delay[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg1_d_rd = avg1_d_delay[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg1_l_rd = avg1_l_delay[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg1_r_rd = avg1_r_delay[rd_addr];
+    wire [DATA_WIDTH-1:0]   center_rd = center_pixel_delay[rd_addr];
+    wire [WIN_SIZE_WIDTH-1:0] win_size_rd = win_size_delay[rd_addr];
+    wire [LINE_ADDR_WIDTH-1:0] pixel_x_rd = pixel_x_delay[rd_addr];
+    wire [ROW_CNT_WIDTH-1:0] pixel_y_rd = pixel_y_delay[rd_addr];
+    wire                    valid_rd = valid_delay[rd_addr];
+
+    // Gradient fetch for the delayed pixel
+    // grad_c: current row gradient (from buffer - stored when this row was processed by Stage 1)
+    wire [GRAD_WIDTH-1:0] grad_c = grad_buf_sel ? grad_line_buf_0[rd_addr] : grad_line_buf_1[rd_addr];
+
+    // grad_u: previous row gradient (from secondary buffer)
+    wire [GRAD_WIDTH-1:0] grad_u = grad_buf_sel ? grad_line_buf_1[rd_addr] : grad_line_buf_0[rd_addr];
+
+    // grad_d: next row gradient (current input from Stage 1/2) - THIS IS THE KEY CHANGE!
+    // Since Stage 3 is 1 row behind, the current grad input IS the next row's gradient
+    wire [GRAD_WIDTH-1:0] grad_d = grad_next_row;
+
+    // grad_l: left neighbor (previous column in same row)
+    wire [GRAD_WIDTH-1:0] grad_l = grad_shift_l;
+
+    // grad_r: right neighbor (simplified - same as center)
+    wire [GRAD_WIDTH-1:0] grad_r = grad_c;
+
+    // Boundary handling for first and last rows
     wire [GRAD_WIDTH-1:0] grad_u_bound = is_first_row ? grad_c : grad_u;
     wire [GRAD_WIDTH-1:0] grad_d_bound = is_last_row ? grad_c : grad_d;
 
@@ -134,40 +286,34 @@ module stage3_gradient_fusion #(
             win_size_s0 <= {WIN_SIZE_WIDTH{1'b0}};
             pixel_x_s0 <= {LINE_ADDR_WIDTH{1'b0}};
             pixel_y_s0 <= {ROW_CNT_WIDTH{1'b0}};
-            grad_shift_l <= {GRAD_WIDTH{1'b0}};
         end else if (enable) begin
-            // Update gradient line buffer and shift register
-            grad_shift_l <= grad_c;
-
-            // Store current gradient to line buffer
-            if (stage2_valid) begin
-                if (grad_buf_sel)
-                    grad_line_buf_1[pixel_x] <= grad_c;
-                else
-                    grad_line_buf_0[pixel_x] <= grad_c;
+            // Only process if we have valid delayed data (after first row)
+            if (row_valid && stage2_valid) begin
+                // Use delayed data from row buffer
+                grad_c_s0  <= grad_c;
+                grad_u_s0  <= grad_u_bound;
+                grad_d_s0  <= grad_d_bound;
+                grad_l_s0  <= grad_l;
+                grad_r_s0  <= grad_r;
+                avg0_c_s0  <= avg0_c_rd;
+                avg0_u_s0  <= avg0_u_rd;
+                avg0_d_s0  <= avg0_d_rd;
+                avg0_l_s0  <= avg0_l_rd;
+                avg0_r_s0  <= avg0_r_rd;
+                avg1_c_s0  <= avg1_c_rd;
+                avg1_u_s0  <= avg1_u_rd;
+                avg1_d_s0  <= avg1_d_rd;
+                avg1_l_s0  <= avg1_l_rd;
+                avg1_r_s0  <= avg1_r_rd;
+                valid_s0   <= valid_rd;
+                center_s0  <= center_rd;
+                win_size_s0 <= win_size_rd;
+                pixel_x_s0 <= pixel_x_rd;
+                pixel_y_s0 <= pixel_y_rd;
+            end else begin
+                // No valid data yet, clear pipeline
+                valid_s0 <= 1'b0;
             end
-
-            // Pipeline registers
-            grad_c_s0  <= grad_c;
-            grad_u_s0  <= grad_u_bound;
-            grad_d_s0  <= grad_d_bound;
-            grad_l_s0  <= grad_shift_l;
-            grad_r_s0  <= grad_c;  // Simplified
-            avg0_c_s0  <= avg0_c;
-            avg0_u_s0  <= avg0_u;
-            avg0_d_s0  <= avg0_d;
-            avg0_l_s0  <= avg0_l;
-            avg0_r_s0  <= avg0_r;
-            avg1_c_s0  <= avg1_c;
-            avg1_u_s0  <= avg1_u;
-            avg1_d_s0  <= avg1_d;
-            avg1_l_s0  <= avg1_l;
-            avg1_r_s0  <= avg1_r;
-            valid_s0   <= stage2_valid;
-            center_s0  <= center_pixel;
-            win_size_s0 <= win_size_clip;
-            pixel_x_s0 <= pixel_x;
-            pixel_y_s0 <= pixel_y;
         end
     end
 
@@ -205,6 +351,8 @@ module stage3_gradient_fusion #(
     reg [WIN_SIZE_WIDTH-1:0] win_size_s1;
     reg [LINE_ADDR_WIDTH-1:0] pixel_x_s1;
     reg [ROW_CNT_WIDTH-1:0] pixel_y_s1;
+    // Pass-through pipeline for avg0_u and avg1_u
+    reg signed [SIGNED_WIDTH-1:0] avg0_u_s1, avg1_u_s1;
 
     integer i;
 
@@ -220,6 +368,8 @@ module stage3_gradient_fusion #(
             win_size_s1 <= {WIN_SIZE_WIDTH{1'b0}};
             pixel_x_s1 <= {LINE_ADDR_WIDTH{1'b0}};
             pixel_y_s1 <= {ROW_CNT_WIDTH{1'b0}};
+            avg0_u_s1  <= {SIGNED_WIDTH{1'b0}};
+            avg1_u_s1  <= {SIGNED_WIDTH{1'b0}};
         end else if (enable) begin
             // Simplified sort output (partial sorting)
             g_s1[0]    <= p0_max;  // Largest candidate
@@ -243,6 +393,9 @@ module stage3_gradient_fusion #(
             win_size_s1 <= win_size_s0;
             pixel_x_s1 <= pixel_x_s0;
             pixel_y_s1 <= pixel_y_s0;
+            // Pass-through pipeline
+            avg0_u_s1  <= avg0_u_s0;
+            avg1_u_s1  <= avg1_u_s0;
         end
     end
 
@@ -289,6 +442,8 @@ module stage3_gradient_fusion #(
     reg [WIN_SIZE_WIDTH-1:0] win_size_s2;
     reg [LINE_ADDR_WIDTH-1:0] pixel_x_s2;
     reg [ROW_CNT_WIDTH-1:0] pixel_y_s2;
+    // Pass-through pipeline for avg0_u and avg1_u
+    reg signed [SIGNED_WIDTH-1:0] avg0_u_s2, avg1_u_s2;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -302,6 +457,8 @@ module stage3_gradient_fusion #(
             win_size_s2 <= {WIN_SIZE_WIDTH{1'b0}};
             pixel_x_s2 <= {LINE_ADDR_WIDTH{1'b0}};
             pixel_y_s2 <= {ROW_CNT_WIDTH{1'b0}};
+            avg0_u_s2  <= {SIGNED_WIDTH{1'b0}};
+            avg1_u_s2  <= {SIGNED_WIDTH{1'b0}};
         end else if (enable) begin
             for (i = 0; i < 5; i = i + 1) begin
                 g_s2[i]    <= g_sorted[i];
@@ -313,6 +470,9 @@ module stage3_gradient_fusion #(
             win_size_s2 <= win_size_s1;
             pixel_x_s2 <= pixel_x_s1;
             pixel_y_s2 <= pixel_y_s1;
+            // Pass-through pipeline
+            avg0_u_s2  <= avg0_u_s1;
+            avg1_u_s2  <= avg1_u_s1;
         end
     end
 
@@ -341,6 +501,8 @@ module stage3_gradient_fusion #(
     reg [WIN_SIZE_WIDTH-1:0]        win_size_s3;
     reg [LINE_ADDR_WIDTH-1:0]       pixel_x_s3;
     reg [ROW_CNT_WIDTH-1:0]         pixel_y_s3;
+    // Pass-through pipeline for avg0_u and avg1_u
+    reg signed [SIGNED_WIDTH-1:0]   avg0_u_s3, avg1_u_s3;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -354,6 +516,8 @@ module stage3_gradient_fusion #(
             win_size_s3 <= {WIN_SIZE_WIDTH{1'b0}};
             pixel_x_s3 <= {LINE_ADDR_WIDTH{1'b0}};
             pixel_y_s3 <= {ROW_CNT_WIDTH{1'b0}};
+            avg0_u_s3  <= {SIGNED_WIDTH{1'b0}};
+            avg1_u_s3  <= {SIGNED_WIDTH{1'b0}};
         end else if (enable) begin
             for (i = 0; i < 5; i = i + 1) begin
                 blend0_p_s3[i] <= blend0_partial[i];
@@ -365,6 +529,9 @@ module stage3_gradient_fusion #(
             win_size_s3 <= win_size_s2;
             pixel_x_s3 <= pixel_x_s2;
             pixel_y_s3 <= pixel_y_s2;
+            // Pass-through pipeline
+            avg0_u_s3  <= avg0_u_s2;
+            avg1_u_s3  <= avg1_u_s2;
         end
     end
 
@@ -386,6 +553,8 @@ module stage3_gradient_fusion #(
     reg [WIN_SIZE_WIDTH-1:0]  win_size_s4;
     reg [LINE_ADDR_WIDTH-1:0] pixel_x_s4;
     reg [ROW_CNT_WIDTH-1:0]   pixel_y_s4;
+    // Pass-through pipeline for avg0_u and avg1_u
+    reg signed [SIGNED_WIDTH-1:0] avg0_u_s4, avg1_u_s4;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -397,6 +566,8 @@ module stage3_gradient_fusion #(
             win_size_s4   <= {WIN_SIZE_WIDTH{1'b0}};
             pixel_x_s4    <= {LINE_ADDR_WIDTH{1'b0}};
             pixel_y_s4    <= {ROW_CNT_WIDTH{1'b0}};
+            avg0_u_s4     <= {SIGNED_WIDTH{1'b0}};
+            avg1_u_s4     <= {SIGNED_WIDTH{1'b0}};
         end else if (enable) begin
             blend0_sum_s4 <= blend0_sum_comb;
             blend1_sum_s4 <= blend1_sum_comb;
@@ -406,6 +577,9 @@ module stage3_gradient_fusion #(
             win_size_s4   <= win_size_s3;
             pixel_x_s4    <= pixel_x_s3;
             pixel_y_s4    <= pixel_y_s3;
+            // Pass-through pipeline
+            avg0_u_s4     <= avg0_u_s3;
+            avg1_u_s4     <= avg1_u_s3;
         end
     end
 
@@ -441,8 +615,8 @@ module stage3_gradient_fusion #(
         end else if (enable) begin
             pixel_x_s5    <= pixel_x_s4;
             pixel_y_s5    <= pixel_y_s4;
-            avg0_u_s5     <= avg0_u_s0;  // Pass through from Stage 2
-            avg1_u_s5     <= avg1_u_s0;
+            avg0_u_s5     <= avg0_u_s4;  // Pass through from pipeline
+            avg1_u_s5     <= avg1_u_s4;
             win_size_s5   <= win_size_s4;
             center_s5     <= center_s4;
         end
