@@ -736,11 +736,11 @@ module stage3_gradient_fusion #(
     // Unpack output signals
     assign blend0_dir_avg  = pipe_out_dout[PIPE_OUT_WIDTH-1 -: SIGNED_WIDTH];
     assign blend1_dir_avg  = pipe_out_dout[PIPE_OUT_WIDTH-1-SIGNED_WIDTH -: SIGNED_WIDTH];
-    assign win_size_clip_out = pipe_out_dout[2*SIGNED_WIDTH + WIN_SIZE_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + DATA_WIDTH + 1 +: WIN_SIZE_WIDTH];
-    assign pixel_x_out     = pipe_out_dout[2*SIGNED_WIDTH + WIN_SIZE_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    assign pixel_y_out     = pipe_out_dout[2*SIGNED_WIDTH + WIN_SIZE_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
-    assign avg0_u_out      = pipe_out_dout[SIGNED_WIDTH + WIN_SIZE_WIDTH + DATA_WIDTH + 1 +: SIGNED_WIDTH];
-    assign avg1_u_out      = pipe_out_dout[WIN_SIZE_WIDTH + DATA_WIDTH + 1 +: SIGNED_WIDTH];
+    assign win_size_clip_out = pipe_out_dout[SIGNED_WIDTH + SIGNED_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    assign pixel_x_out     = pipe_out_dout[SIGNED_WIDTH + SIGNED_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    assign pixel_y_out     = pipe_out_dout[SIGNED_WIDTH + SIGNED_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    assign avg0_u_out      = pipe_out_dout[2*SIGNED_WIDTH + 1 +: SIGNED_WIDTH];
+    assign avg1_u_out      = pipe_out_dout[SIGNED_WIDTH + 1 +: SIGNED_WIDTH];
     assign center_pixel_out = pipe_out_dout[1 +: DATA_WIDTH];
 
 endmodule

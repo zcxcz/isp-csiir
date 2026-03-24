@@ -435,6 +435,6 @@ module stage2_directional_avg #(
     assign pixel_x_out     = pipe_out_dout[DATA_WIDTH + GRAD_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
     assign pixel_y_out     = pipe_out_dout[DATA_WIDTH + GRAD_WIDTH + 1 +: ROW_CNT_WIDTH];
     assign grad_out        = pipe_out_dout[DATA_WIDTH + 1 +: GRAD_WIDTH];
-    assign center_pixel_out = pipe_out_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
+    assign center_pixel_out = pipe_out_dout[1 +: DATA_WIDTH];
 
 endmodule

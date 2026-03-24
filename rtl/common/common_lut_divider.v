@@ -73,9 +73,9 @@ module common_lut_divider #(
 
     assign lut_index = (gs == 0) ? 8'd0 :
                        (gs < 128) ? gs[7:0] :
-                       (gs < 256) ? (8'd128 + gs_m128[7:1]) :           // 128 + ((gs-128)>>1)
-                       (gs < 512) ? (8'd160 + gs_m256[7:2]) :           // 160 + ((gs-256)>>2)
-                       (gs < 1024) ? (8'd192 + gs_m512[7:4]) :          // 192 + ((gs-512)>>4) 16:1
+                       (gs < 256) ? (8'd128 + gs_m128[7:1]) :           // 128 + ((gs-128)>>1), 2:1 compression
+                       (gs < 512) ? (8'd160 + gs_m256[8:3]) :           // 160 + ((gs-256)>>3), 8:1 compression
+                       (gs < 1024) ? (8'd192 + gs_m512[9:4]) :          // 192 + ((gs-512)>>4), 16:1 compression
                        (gs[DIVIDEND_WIDTH-1]) ? 8'd255 :                 // Large values clamp to 255
                        (gs[DIVIDEND_WIDTH-2]) ? 8'd255 :
                        (gs[DIVIDEND_WIDTH-3]) ? 8'd255 :
@@ -109,9 +109,9 @@ module common_lut_divider #(
             div_lut[init_i] = lut_tmp[15:0];
         end
 
-        // Index 160-191: dividend 256-511 (4:1 compression)
+        // Index 160-191: dividend 256-511 (8:1 compression)
         for (init_i = 160; init_i < 192; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 160) * 4 + 256);
+            lut_tmp = 67108864 / ((init_i - 160) * 8 + 256);
             div_lut[init_i] = lut_tmp[15:0];
         end
 

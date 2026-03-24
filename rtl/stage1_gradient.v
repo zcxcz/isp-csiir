@@ -126,7 +126,7 @@ module stage1_gradient #(
     wire [ROW_SUM_WIDTH-1:0]   col4_sum_s0 = pipe_s0_dout[PIPE_S0_WIDTH-1-3*ROW_SUM_WIDTH -: ROW_SUM_WIDTH];
     wire [LINE_ADDR_WIDTH-1:0] pixel_x_s0  = pipe_s0_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
     wire [ROW_CNT_WIDTH-1:0]   pixel_y_s0  = pipe_s0_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
-    wire [DATA_WIDTH-1:0]      center_s0   = pipe_s0_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
+    wire [DATA_WIDTH-1:0]      center_s0   = pipe_s0_dout[1 +: DATA_WIDTH];
 
     //=========================================================================
     // Cycle 1: Pipeline Delay for Row/Column Sums
@@ -159,7 +159,7 @@ module stage1_gradient #(
     wire [ROW_SUM_WIDTH-1:0]   col4_sum_s1 = pipe_s1_dout[PIPE_S1_WIDTH-1-3*ROW_SUM_WIDTH -: ROW_SUM_WIDTH];
     wire [LINE_ADDR_WIDTH-1:0] pixel_x_s1  = pipe_s1_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
     wire [ROW_CNT_WIDTH-1:0]   pixel_y_s1  = pipe_s1_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
-    wire [DATA_WIDTH-1:0]      center_s1   = pipe_s1_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
+    wire [DATA_WIDTH-1:0]      center_s1   = pipe_s1_dout[1 +: DATA_WIDTH];
 
     //=========================================================================
     // Cycle 2: Gradient Difference and Absolute Value (Combinational)
@@ -228,7 +228,7 @@ module stage1_gradient #(
     wire [GRAD_WIDTH-1:0]       grad_sum_s2   = pipe_s2_dout[PIPE_S2_WIDTH-1-2*GRAD_WIDTH -: GRAD_WIDTH];
     wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s2    = pipe_s2_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
     wire [ROW_CNT_WIDTH-1:0]    pixel_y_s2    = pipe_s2_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
-    wire [DATA_WIDTH-1:0]       center_s2     = pipe_s2_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
+    wire [DATA_WIDTH-1:0]       center_s2     = pipe_s2_dout[1 +: DATA_WIDTH];
 
     //=========================================================================
     // Cycle 3: Gradient Maximum (Combinational)
@@ -267,7 +267,7 @@ module stage1_gradient #(
     wire [GRAD_WIDTH-1:0]       grad_v_abs_s3 = pipe_s3_dout[PIPE_S3_WIDTH-1-3*GRAD_WIDTH -: GRAD_WIDTH];
     wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s3    = pipe_s3_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
     wire [ROW_CNT_WIDTH-1:0]    pixel_y_s3    = pipe_s3_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
-    wire [DATA_WIDTH-1:0]       center_s3     = pipe_s3_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
+    wire [DATA_WIDTH-1:0]       center_s3     = pipe_s3_dout[1 +: DATA_WIDTH];
 
     //=========================================================================
     // Cycle 4: Window Size LUT (Combinational)
@@ -307,8 +307,8 @@ module stage1_gradient #(
     assign grad_v        = pipe_out_dout[PIPE_OUT_WIDTH-1-GRAD_WIDTH -: GRAD_WIDTH];
     assign grad          = pipe_out_dout[PIPE_OUT_WIDTH-1-2*GRAD_WIDTH -: GRAD_WIDTH];
     assign win_size_clip = pipe_out_dout[PIPE_OUT_WIDTH-1-3*GRAD_WIDTH -: WIN_SIZE_WIDTH];
-    assign pixel_x_out   = pipe_out_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    assign pixel_y_out   = pipe_out_dout[ROW_CNT_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
-    assign center_pixel  = pipe_out_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
+    assign pixel_x_out   = pipe_out_dout[ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    assign pixel_y_out   = pipe_out_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    assign center_pixel  = pipe_out_dout[1 +: DATA_WIDTH];
 
 endmodule

@@ -81,9 +81,9 @@ class ISPCSIIRFixedModel:
             grad_sum = (idx - 128) * 2 + 128
             self.div_lut[idx] = min((1 << 26) // grad_sum, 65535)
 
-        # Index 160-191: grad_sum 256-511 (4:1 compression)
+        # Index 160-191: grad_sum 256-511 (8:1 compression)
         for idx in range(160, 192):
-            grad_sum = (idx - 160) * 4 + 256
+            grad_sum = (idx - 160) * 8 + 256
             self.div_lut[idx] = min((1 << 26) // grad_sum, 65535)
 
         # Index 192-223: grad_sum 512-1023 (16:1 compression)
@@ -242,9 +242,9 @@ class ISPCSIIRFixedModel:
         if gs < 128:
             lut_index = gs
         elif gs < 256:
-            lut_index = 128 + ((gs - 128) >> 1)
+            lut_index = 128 + ((gs - 128) >> 1)  # 2:1 compression
         elif gs < 512:
-            lut_index = 160 + ((gs - 256) >> 2)
+            lut_index = 160 + ((gs - 256) >> 3)  # 8:1 compression (32 entries for 256 values)
         elif gs < 1024:
             lut_index = 192 + ((gs - 512) >> 4)  # 16:1 compression
         else:
