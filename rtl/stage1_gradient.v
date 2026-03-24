@@ -75,7 +75,7 @@ module stage1_gradient #(
     localparam ROW_SUM_WIDTH = DATA_WIDTH + 3;  // 13-bit for 5 pixels sum
     localparam PIPE_S0_WIDTH = 4 * ROW_SUM_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
     localparam PIPE_S1_WIDTH = 4 * ROW_SUM_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
-    localparam PIPE_S2_WIDTH = 4 * GRAD_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
+    localparam PIPE_S2_WIDTH = 3 * GRAD_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
     localparam PIPE_S3_WIDTH = 4 * GRAD_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
 
     //=========================================================================

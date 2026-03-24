@@ -133,11 +133,14 @@ module tb_isp_csiir_random;
             pixel_in_count = 0;
             idx = 0;
 
-            // Set vsync at negedge to ensure sof detection works
-            @(negedge clk);
-            vsync <= 1;
-            @(posedge clk);
-            vsync <= 0;
+            // Set vsync with proper timing for sof detection
+            // Set vsync in middle of clock cycle (setup time)
+            #2;
+            vsync = 1;  // Blocking assignment for immediate effect
+            @(posedge clk);  // SOF detected at this clock edge
+            #2;
+            vsync = 0;  // Deassert in middle of next cycle
+            @(posedge clk);  // Extra cycle for frame_started to be set
 
             for (y = 0; y < cfg_height; y++) begin
                 // Send pixels first (same as simple testbench)
@@ -401,13 +404,18 @@ module tb_isp_csiir_random;
             $display("  win_size: %d", dut.s1_win_size_clip);
         end
     end
-    // Debug Stage 1 window and sums
+    // Debug Stage 1 pipeline - track all pixels at s1_valid
+    integer debug_s1_cnt;
+    initial debug_s1_cnt = 0;
     always @(posedge clk) begin
-        if (dut.s1_valid && dut.s1_pixel_x == 1 && dut.s1_pixel_y == 0) begin
-            $display("[%0t] Stage 1 pixel (1,0) window:", $time);
-            $display("  win row0: %d %d %d %d %d", dut.window[0][0], dut.window[0][1], dut.window[0][2], dut.window[0][3], dut.window[0][4]);
-            $display("  win row2: %d %d %d %d %d", dut.window[2][0], dut.window[2][1], dut.window[2][2], dut.window[2][3], dut.window[2][4]);
-            $display("  win row4: %d %d %d %d %d", dut.window[4][0], dut.window[4][1], dut.window[4][2], dut.window[4][3], dut.window[4][4]);
+        if (dut.s1_valid && debug_s1_cnt < 5) begin
+            debug_s1_cnt = debug_s1_cnt + 1;
+            $display("[%0t] S1 OUTPUT #%0d: pixel_x=%0d, grad_h=%0d",
+                $time, debug_s1_cnt, dut.s1_pixel_x, dut.s1_grad_h);
+            $display("  pipe_s3: h_s3=%0d, v_s3=%0d",
+                dut.u_stage1.grad_h_abs_s3, dut.u_stage1.grad_v_abs_s3);
+            $display("  pipe_out: din[85:72]=%0d, dout[85:72]=%0d",
+                dut.u_stage1.pipe_out_din[85:72], dut.u_stage1.pipe_out_dout[85:72]);
         end
     end
     // Debug column pointers

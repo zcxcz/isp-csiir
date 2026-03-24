@@ -158,8 +158,9 @@ module isp_csiir_line_buffer #(
     //=========================================================================
     wire [2:0] lb_wr_row = (wr_row_ptr + lb_wb_row_offset) % 5;
 
+    // TEMPORARILY DISABLED FOR DEBUGGING - IIR feedback causes corruption
     always @(posedge clk) begin
-        if (enable && lb_wb_en) begin
+        if (0 && enable && lb_wb_en) begin  // DISABLED
             case (lb_wr_row)
                 3'd0: line_mem_0[lb_wb_addr] <= lb_wb_data;
                 3'd1: line_mem_1[lb_wb_addr] <= lb_wb_data;
