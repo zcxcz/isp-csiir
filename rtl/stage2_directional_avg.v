@@ -233,11 +233,11 @@ module stage2_directional_avg #(
             end
         end
     endgenerate
-    wire [WIN_SIZE_WIDTH-1:0]   win_size_s4   = pipe_s4_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1 +: WIN_SIZE_WIDTH];
-    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s4    = pipe_s4_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s4    = pipe_s4_dout[ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1 +: ROW_CNT_WIDTH];
-    wire [DATA_WIDTH-1:0]       center_s4     = pipe_s4_dout[DATA_WIDTH + GRAD_WIDTH + 1 +: DATA_WIDTH];
-    wire [GRAD_WIDTH-1:0]       grad_s4       = pipe_s4_dout[GRAD_WIDTH + 1 +: GRAD_WIDTH];
+    wire [WIN_SIZE_WIDTH-1:0]   win_size_s4   = pipe_s4_dout[GRAD_WIDTH + DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s4    = pipe_s4_dout[GRAD_WIDTH + DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s4    = pipe_s4_dout[GRAD_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [DATA_WIDTH-1:0]       center_s4     = pipe_s4_dout[GRAD_WIDTH + 1 +: DATA_WIDTH];
+    wire [GRAD_WIDTH-1:0]       grad_s4       = pipe_s4_dout[1 +: GRAD_WIDTH];
 
     //=========================================================================
     // Cycle 5: Weighted Sum (First Stage) - Signed Arithmetic
@@ -306,12 +306,12 @@ module stage2_directional_avg #(
     wire signed [ACC_WIDTH-1:0] sum_down_s5   = pipe_s5_dout[PIPE_S5_WIDTH-1-2*ACC_WIDTH -: ACC_WIDTH];
     wire signed [ACC_WIDTH-1:0] sum_left_s5   = pipe_s5_dout[PIPE_S5_WIDTH-1-3*ACC_WIDTH -: ACC_WIDTH];
     wire signed [ACC_WIDTH-1:0] sum_right_s5  = pipe_s5_dout[PIPE_S5_WIDTH-1-4*ACC_WIDTH -: ACC_WIDTH];
-    wire [2:0]           kernel_s5           = pipe_s5_dout[3 + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1 +: 3];
-    wire [WIN_SIZE_WIDTH-1:0] win_size_s5    = pipe_s5_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1 +: WIN_SIZE_WIDTH];
-    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s5    = pipe_s5_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0]  pixel_y_s5     = pipe_s5_dout[ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1 +: ROW_CNT_WIDTH];
-    wire [DATA_WIDTH-1:0]     center_s5      = pipe_s5_dout[DATA_WIDTH + GRAD_WIDTH + 1 +: DATA_WIDTH];
-    wire [GRAD_WIDTH-1:0]     grad_s5        = pipe_s5_dout[GRAD_WIDTH + 1 +: GRAD_WIDTH];
+    wire [2:0]           kernel_s5           = pipe_s5_dout[GRAD_WIDTH + DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + WIN_SIZE_WIDTH + 1 +: 3];
+    wire [WIN_SIZE_WIDTH-1:0] win_size_s5    = pipe_s5_dout[GRAD_WIDTH + DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s5    = pipe_s5_dout[GRAD_WIDTH + DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]  pixel_y_s5     = pipe_s5_dout[GRAD_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [DATA_WIDTH-1:0]     center_s5      = pipe_s5_dout[GRAD_WIDTH + 1 +: DATA_WIDTH];
+    wire [GRAD_WIDTH-1:0]     grad_s5        = pipe_s5_dout[1 +: GRAD_WIDTH];
 
     //=========================================================================
     // Cycle 6: Weight Normalization
@@ -359,11 +359,11 @@ module stage2_directional_avg #(
     wire [7:0] w_d_s6 = pipe_s6_dout[5*ACC_WIDTH + 3*8 - 1 -: 8];
     wire [7:0] w_l_s6 = pipe_s6_dout[5*ACC_WIDTH + 2*8 - 1 -: 8];
     wire [7:0] w_r_s6 = pipe_s6_dout[5*ACC_WIDTH + 8 - 1 -: 8];
-    wire [WIN_SIZE_WIDTH-1:0] win_size_s6   = pipe_s6_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1 +: WIN_SIZE_WIDTH];
-    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s6   = pipe_s6_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0]  pixel_y_s6    = pipe_s6_dout[ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1 +: ROW_CNT_WIDTH];
-    wire [DATA_WIDTH-1:0]     center_s6     = pipe_s6_dout[DATA_WIDTH + GRAD_WIDTH + 1 +: DATA_WIDTH];
-    wire [GRAD_WIDTH-1:0]     grad_s6       = pipe_s6_dout[GRAD_WIDTH + 1 +: GRAD_WIDTH];
+    wire [WIN_SIZE_WIDTH-1:0] win_size_s6   = pipe_s6_dout[GRAD_WIDTH + DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s6   = pipe_s6_dout[GRAD_WIDTH + DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]  pixel_y_s6    = pipe_s6_dout[GRAD_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [DATA_WIDTH-1:0]     center_s6     = pipe_s6_dout[GRAD_WIDTH + 1 +: DATA_WIDTH];
+    wire [GRAD_WIDTH-1:0]     grad_s6       = pipe_s6_dout[1 +: GRAD_WIDTH];
 
     //=========================================================================
     // Cycle 7: Division Output (Signed) with Saturation
@@ -431,10 +431,10 @@ module stage2_directional_avg #(
     assign avg1_d          = pipe_out_dout[PIPE_OUT_WIDTH-1-7*SIGNED_WIDTH -: SIGNED_WIDTH];
     assign avg1_l          = pipe_out_dout[PIPE_OUT_WIDTH-1-8*SIGNED_WIDTH -: SIGNED_WIDTH];
     assign avg1_r          = pipe_out_dout[PIPE_OUT_WIDTH-1-9*SIGNED_WIDTH -: SIGNED_WIDTH];
-    assign win_size_clip_out = pipe_out_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1 +: WIN_SIZE_WIDTH];
-    assign pixel_x_out     = pipe_out_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    assign pixel_y_out     = pipe_out_dout[ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1 +: ROW_CNT_WIDTH];
-    assign grad_out        = pipe_out_dout[GRAD_WIDTH + DATA_WIDTH + 1 +: GRAD_WIDTH];
+    assign win_size_clip_out = pipe_out_dout[DATA_WIDTH + GRAD_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    assign pixel_x_out     = pipe_out_dout[DATA_WIDTH + GRAD_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    assign pixel_y_out     = pipe_out_dout[DATA_WIDTH + GRAD_WIDTH + 1 +: ROW_CNT_WIDTH];
+    assign grad_out        = pipe_out_dout[DATA_WIDTH + 1 +: GRAD_WIDTH];
     assign center_pixel_out = pipe_out_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
 
 endmodule

@@ -116,10 +116,10 @@ module stage4_iir_blend #(
     wire signed [SIGNED_WIDTH-1:0] blend1_s0 = pipe_s0_dout[PIPE_S0_WIDTH-1-SIGNED_WIDTH -: SIGNED_WIDTH];
     wire signed [SIGNED_WIDTH-1:0] avg0_u_s0 = pipe_s0_dout[PIPE_S0_WIDTH-1-2*SIGNED_WIDTH -: SIGNED_WIDTH];
     wire signed [SIGNED_WIDTH-1:0] avg1_u_s0 = pipe_s0_dout[PIPE_S0_WIDTH-1-3*SIGNED_WIDTH -: SIGNED_WIDTH];
-    wire [DATA_WIDTH-1:0]     center_s0 = pipe_s0_dout[DATA_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: DATA_WIDTH];
-    wire [WIN_SIZE_WIDTH-1:0] win_size_s0 = pipe_s0_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: WIN_SIZE_WIDTH];
-    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s0 = pipe_s0_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0]  pixel_y_s0 = pipe_s0_dout[ROW_CNT_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [DATA_WIDTH-1:0]     center_s0 = pipe_s0_dout[ROW_CNT_WIDTH + LINE_ADDR_WIDTH + WIN_SIZE_WIDTH + 1 +: DATA_WIDTH];
+    wire [WIN_SIZE_WIDTH-1:0] win_size_s0 = pipe_s0_dout[ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s0 = pipe_s0_dout[ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]  pixel_y_s0 = pipe_s0_dout[1 +: ROW_CNT_WIDTH];
 
     //=========================================================================
     // Cycle 1: Ratio Selection
@@ -172,12 +172,12 @@ module stage4_iir_blend #(
     wire signed [SIGNED_WIDTH-1:0] blend1_s1 = pipe_s1_dout[PIPE_S1_WIDTH-1-SIGNED_WIDTH -: SIGNED_WIDTH];
     wire signed [SIGNED_WIDTH-1:0] avg0_u_s1 = pipe_s1_dout[PIPE_S1_WIDTH-1-2*SIGNED_WIDTH -: SIGNED_WIDTH];
     wire signed [SIGNED_WIDTH-1:0] avg1_u_s1 = pipe_s1_dout[PIPE_S1_WIDTH-1-3*SIGNED_WIDTH -: SIGNED_WIDTH];
-    wire [DATA_WIDTH-1:0]     center_s1 = pipe_s1_dout[DATA_WIDTH + 8 + 3 + 3 + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: DATA_WIDTH];
-    wire [7:0]                ratio_s1  = pipe_s1_dout[8 + 3 + 3 + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: 8];
-    wire [2:0]                factor_s1 = pipe_s1_dout[3 + 3 + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: 3];
-    wire [2:0]                remain_s1 = pipe_s1_dout[3 + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: 3];
-    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s1 = pipe_s1_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0]  pixel_y_s1 = pipe_s1_dout[ROW_CNT_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [DATA_WIDTH-1:0]     center_s1 = pipe_s1_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 8 + 3 + 3 + 1 +: DATA_WIDTH];
+    wire [7:0]                ratio_s1  = pipe_s1_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 3 + 3 + 1 +: 8];
+    wire [2:0]                factor_s1 = pipe_s1_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 3 + 1 +: 3];
+    wire [2:0]                remain_s1 = pipe_s1_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: 3];
+    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s1 = pipe_s1_dout[ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]  pixel_y_s1 = pipe_s1_dout[1 +: ROW_CNT_WIDTH];
 
     //=========================================================================
     // Cycle 2: IIR Mixing (Signed Arithmetic)
@@ -227,11 +227,11 @@ module stage4_iir_blend #(
     // Unpack signals
     wire signed [SIGNED_WIDTH-1:0] blend0_iir_s2 = pipe_s2_dout[PIPE_S2_WIDTH-1 -: SIGNED_WIDTH];
     wire signed [SIGNED_WIDTH-1:0] blend1_iir_s2 = pipe_s2_dout[PIPE_S2_WIDTH-1-SIGNED_WIDTH -: SIGNED_WIDTH];
-    wire [DATA_WIDTH-1:0] center_s2 = pipe_s2_dout[DATA_WIDTH + 3 + 3 + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: DATA_WIDTH];
-    wire [2:0]            factor_s2 = pipe_s2_dout[3 + 3 + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: 3];
-    wire [2:0]            remain_s2 = pipe_s2_dout[3 + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: 3];
-    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s2 = pipe_s2_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0]  pixel_y_s2 = pipe_s2_dout[ROW_CNT_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [DATA_WIDTH-1:0] center_s2 = pipe_s2_dout[ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 3 + 3 + 1 +: DATA_WIDTH];
+    wire [2:0]            factor_s2 = pipe_s2_dout[ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 3 + 1 +: 3];
+    wire [2:0]            remain_s2 = pipe_s2_dout[ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: 3];
+    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s2 = pipe_s2_dout[ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]  pixel_y_s2 = pipe_s2_dout[1 +: ROW_CNT_WIDTH];
 
     //=========================================================================
     // Cycle 3: Window Mixing (Signed Arithmetic)
@@ -289,9 +289,9 @@ module stage4_iir_blend #(
     // Unpack signals
     wire signed [SIGNED_WIDTH-1:0] blend0_out_s3 = pipe_s3_dout[PIPE_S3_WIDTH-1 -: SIGNED_WIDTH];
     wire signed [SIGNED_WIDTH-1:0] blend1_out_s3 = pipe_s3_dout[PIPE_S3_WIDTH-1-SIGNED_WIDTH -: SIGNED_WIDTH];
-    wire [2:0]            remain_s3 = pipe_s3_dout[3 + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: 3];
-    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s3 = pipe_s3_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0]  pixel_y_s3 = pipe_s3_dout[ROW_CNT_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [2:0]            remain_s3 = pipe_s3_dout[ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: 3];
+    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s3 = pipe_s3_dout[ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]  pixel_y_s3 = pipe_s3_dout[1 +: ROW_CNT_WIDTH];
 
     //=========================================================================
     // Cycle 4: Final Mixing + s11 to u10 Conversion
@@ -345,8 +345,8 @@ module stage4_iir_blend #(
 
     // Unpack output signals
     assign dout        = pipe_out_dout[PIPE_OUT_WIDTH-1 -: DATA_WIDTH];
-    assign pixel_x_out = pipe_out_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    assign pixel_y_out = pipe_out_dout[ROW_CNT_WIDTH + 1 +: ROW_CNT_WIDTH];
+    assign pixel_x_out = pipe_out_dout[ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    assign pixel_y_out = pipe_out_dout[1 +: ROW_CNT_WIDTH];
 
     // Line buffer writeback
     assign lb_wb_en   = dout_valid;

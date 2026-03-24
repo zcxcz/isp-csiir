@@ -124,8 +124,8 @@ module stage1_gradient #(
     wire [ROW_SUM_WIDTH-1:0]   row4_sum_s0 = pipe_s0_dout[PIPE_S0_WIDTH-1-ROW_SUM_WIDTH -: ROW_SUM_WIDTH];
     wire [ROW_SUM_WIDTH-1:0]   col0_sum_s0 = pipe_s0_dout[PIPE_S0_WIDTH-1-2*ROW_SUM_WIDTH -: ROW_SUM_WIDTH];
     wire [ROW_SUM_WIDTH-1:0]   col4_sum_s0 = pipe_s0_dout[PIPE_S0_WIDTH-1-3*ROW_SUM_WIDTH -: ROW_SUM_WIDTH];
-    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s0  = pipe_s0_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0]   pixel_y_s0  = pipe_s0_dout[ROW_CNT_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s0  = pipe_s0_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]   pixel_y_s0  = pipe_s0_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
     wire [DATA_WIDTH-1:0]      center_s0   = pipe_s0_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
 
     //=========================================================================
@@ -157,8 +157,8 @@ module stage1_gradient #(
     wire [ROW_SUM_WIDTH-1:0]   row4_sum_s1 = pipe_s1_dout[PIPE_S1_WIDTH-1-ROW_SUM_WIDTH -: ROW_SUM_WIDTH];
     wire [ROW_SUM_WIDTH-1:0]   col0_sum_s1 = pipe_s1_dout[PIPE_S1_WIDTH-1-2*ROW_SUM_WIDTH -: ROW_SUM_WIDTH];
     wire [ROW_SUM_WIDTH-1:0]   col4_sum_s1 = pipe_s1_dout[PIPE_S1_WIDTH-1-3*ROW_SUM_WIDTH -: ROW_SUM_WIDTH];
-    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s1  = pipe_s1_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0]   pixel_y_s1  = pipe_s1_dout[ROW_CNT_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s1  = pipe_s1_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]   pixel_y_s1  = pipe_s1_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
     wire [DATA_WIDTH-1:0]      center_s1   = pipe_s1_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
 
     //=========================================================================
@@ -226,8 +226,8 @@ module stage1_gradient #(
     wire [GRAD_WIDTH-1:0]       grad_h_abs_s2 = pipe_s2_dout[PIPE_S2_WIDTH-1 -: GRAD_WIDTH];
     wire [GRAD_WIDTH-1:0]       grad_v_abs_s2 = pipe_s2_dout[PIPE_S2_WIDTH-1-GRAD_WIDTH -: GRAD_WIDTH];
     wire [GRAD_WIDTH-1:0]       grad_sum_s2   = pipe_s2_dout[PIPE_S2_WIDTH-1-2*GRAD_WIDTH -: GRAD_WIDTH];
-    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s2    = pipe_s2_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s2    = pipe_s2_dout[ROW_CNT_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s2    = pipe_s2_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s2    = pipe_s2_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
     wire [DATA_WIDTH-1:0]       center_s2     = pipe_s2_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
 
     //=========================================================================
@@ -265,8 +265,8 @@ module stage1_gradient #(
     wire [GRAD_WIDTH-1:0]       grad_sum_s3   = pipe_s3_dout[PIPE_S3_WIDTH-1-GRAD_WIDTH -: GRAD_WIDTH];
     wire [GRAD_WIDTH-1:0]       grad_h_abs_s3 = pipe_s3_dout[PIPE_S3_WIDTH-1-2*GRAD_WIDTH -: GRAD_WIDTH];
     wire [GRAD_WIDTH-1:0]       grad_v_abs_s3 = pipe_s3_dout[PIPE_S3_WIDTH-1-3*GRAD_WIDTH -: GRAD_WIDTH];
-    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s3    = pipe_s3_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s3    = pipe_s3_dout[ROW_CNT_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s3    = pipe_s3_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s3    = pipe_s3_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
     wire [DATA_WIDTH-1:0]       center_s3     = pipe_s3_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
 
     //=========================================================================

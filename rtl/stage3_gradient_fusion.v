@@ -355,10 +355,10 @@ module stage3_gradient_fusion #(
     wire signed [SIGNED_WIDTH-1:0] avg1_l_s0 = pipe_s0_dout[5*GRAD_WIDTH + 2*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
     wire signed [SIGNED_WIDTH-1:0] avg1_r_s0 = pipe_s0_dout[5*GRAD_WIDTH + SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
 
-    wire [WIN_SIZE_WIDTH-1:0]   win_size_s0 = pipe_s0_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: WIN_SIZE_WIDTH];
-    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s0  = pipe_s0_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s0  = pipe_s0_dout[ROW_CNT_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
-    wire [DATA_WIDTH-1:0]       center_s0   = pipe_s0_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
+    wire [WIN_SIZE_WIDTH-1:0]   win_size_s0 = pipe_s0_dout[DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s0  = pipe_s0_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s0  = pipe_s0_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [DATA_WIDTH-1:0]       center_s0   = pipe_s0_dout[1 +: DATA_WIDTH];
 
     //=========================================================================
     // Cycle 1: Gradient Sort (First Stage)
@@ -414,9 +414,9 @@ module stage3_gradient_fusion #(
         end
     endgenerate
 
-    wire [WIN_SIZE_WIDTH-1:0]   win_size_s1 = pipe_s1_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: WIN_SIZE_WIDTH];
-    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s1  = pipe_s1_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s1  = pipe_s1_dout[ROW_CNT_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [WIN_SIZE_WIDTH-1:0]   win_size_s1 = pipe_s1_dout[DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s1  = pipe_s1_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s1  = pipe_s1_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
     wire [DATA_WIDTH-1:0]       center_s1   = pipe_s1_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
 
     // Pass-through for avg0_u and avg1_u
@@ -494,9 +494,9 @@ module stage3_gradient_fusion #(
         end
     endgenerate
 
-    wire [WIN_SIZE_WIDTH-1:0]   win_size_s2 = pipe_s2_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: WIN_SIZE_WIDTH];
-    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s2  = pipe_s2_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s2  = pipe_s2_dout[ROW_CNT_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [WIN_SIZE_WIDTH-1:0]   win_size_s2 = pipe_s2_dout[DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s2  = pipe_s2_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s2  = pipe_s2_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
     wire [DATA_WIDTH-1:0]       center_s2   = pipe_s2_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
 
     wire signed [SIGNED_WIDTH-1:0] avg0_u_s2 = avg0_s2[1];
@@ -561,10 +561,10 @@ module stage3_gradient_fusion #(
         end
     endgenerate
 
-    wire [WIN_SIZE_WIDTH-1:0]   win_size_s3 = pipe_s3_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: WIN_SIZE_WIDTH];
-    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s3  = pipe_s3_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s3  = pipe_s3_dout[ROW_CNT_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
-    wire [DATA_WIDTH-1:0]       center_s3   = pipe_s3_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
+    wire [WIN_SIZE_WIDTH-1:0]   win_size_s3 = pipe_s3_dout[DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s3  = pipe_s3_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s3  = pipe_s3_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [DATA_WIDTH-1:0]       center_s3   = pipe_s3_dout[1 +: DATA_WIDTH];
 
     wire signed [SIGNED_WIDTH-1:0] avg0_u_s3 = avg0_u_s2;
     wire signed [SIGNED_WIDTH-1:0] avg1_u_s3 = avg1_u_s2;
@@ -614,10 +614,10 @@ module stage3_gradient_fusion #(
     wire signed [BLEND_WIDTH-1:0] blend0_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1 -: BLEND_WIDTH];
     wire signed [BLEND_WIDTH-1:0] blend1_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-BLEND_WIDTH -: BLEND_WIDTH];
     wire [GRAD_SUM_WIDTH-1:0] grad_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-2*BLEND_WIDTH -: GRAD_SUM_WIDTH];
-    wire [WIN_SIZE_WIDTH-1:0] win_size_s4 = pipe_s4_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 3 +: WIN_SIZE_WIDTH];
-    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s4 = pipe_s4_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 3 +: LINE_ADDR_WIDTH];
-    wire [ROW_CNT_WIDTH-1:0] pixel_y_s4 = pipe_s4_dout[ROW_CNT_WIDTH + DATA_WIDTH + 3 +: ROW_CNT_WIDTH];
-    wire [DATA_WIDTH-1:0] center_s4 = pipe_s4_dout[DATA_WIDTH + 3 +: DATA_WIDTH];
+    wire [WIN_SIZE_WIDTH-1:0] win_size_s4 = pipe_s4_dout[DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 3 +: WIN_SIZE_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s4 = pipe_s4_dout[DATA_WIDTH + ROW_CNT_WIDTH + 3 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0] pixel_y_s4 = pipe_s4_dout[DATA_WIDTH + 3 +: ROW_CNT_WIDTH];
+    wire [DATA_WIDTH-1:0] center_s4 = pipe_s4_dout[3 +: DATA_WIDTH];
     wire blend0_sign_s4 = pipe_s4_dout[2];
     wire blend1_sign_s4 = pipe_s4_dout[1];
 
@@ -691,10 +691,10 @@ module stage3_gradient_fusion #(
 
     wire [LINE_ADDR_WIDTH-1:0] pixel_x_s5 = pipe_s5_dout[PIPE_S5_WIDTH-1 -: LINE_ADDR_WIDTH];
     wire [ROW_CNT_WIDTH-1:0] pixel_y_s5 = pipe_s5_dout[PIPE_S5_WIDTH-1-LINE_ADDR_WIDTH -: ROW_CNT_WIDTH];
-    wire signed [SIGNED_WIDTH-1:0] avg0_u_s5 = pipe_s5_dout[2*SIGNED_WIDTH + WIN_SIZE_WIDTH + DATA_WIDTH + 2 +: SIGNED_WIDTH];
-    wire signed [SIGNED_WIDTH-1:0] avg1_u_s5 = pipe_s5_dout[SIGNED_WIDTH + WIN_SIZE_WIDTH + DATA_WIDTH + 2 +: SIGNED_WIDTH];
-    wire [WIN_SIZE_WIDTH-1:0] win_size_s5 = pipe_s5_dout[WIN_SIZE_WIDTH + DATA_WIDTH + 2 +: WIN_SIZE_WIDTH];
-    wire [DATA_WIDTH-1:0] center_s5 = pipe_s5_dout[DATA_WIDTH + 2 +: DATA_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg0_u_s5 = pipe_s5_dout[WIN_SIZE_WIDTH + DATA_WIDTH + SIGNED_WIDTH + 2 +: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_u_s5 = pipe_s5_dout[WIN_SIZE_WIDTH + DATA_WIDTH + 2 +: SIGNED_WIDTH];
+    wire [WIN_SIZE_WIDTH-1:0] win_size_s5 = pipe_s5_dout[DATA_WIDTH + 2 +: WIN_SIZE_WIDTH];
+    wire [DATA_WIDTH-1:0] center_s5 = pipe_s5_dout[2 +: DATA_WIDTH];
     wire blend0_sign_s5 = pipe_s5_dout[1];
     wire blend1_sign_s5 = pipe_s5_dout[0];
 
@@ -712,7 +712,7 @@ module stage3_gradient_fusion #(
     //=========================================================================
     // Output Registers
     //=========================================================================
-    localparam PIPE_OUT_WIDTH = 2 * SIGNED_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
+    localparam PIPE_OUT_WIDTH = 4 * SIGNED_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
 
     wire [PIPE_OUT_WIDTH-1:0] pipe_out_din = {blend0_div_comb, blend1_div_comb, win_size_s5, pixel_x_s5, pixel_y_s5, avg0_u_s5, avg1_u_s5, center_s5, div_valid};
 
@@ -736,11 +736,11 @@ module stage3_gradient_fusion #(
     // Unpack output signals
     assign blend0_dir_avg  = pipe_out_dout[PIPE_OUT_WIDTH-1 -: SIGNED_WIDTH];
     assign blend1_dir_avg  = pipe_out_dout[PIPE_OUT_WIDTH-1-SIGNED_WIDTH -: SIGNED_WIDTH];
-    assign win_size_clip_out = pipe_out_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 2*SIGNED_WIDTH + DATA_WIDTH + 1 +: WIN_SIZE_WIDTH];
-    assign pixel_x_out     = pipe_out_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 2*SIGNED_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    assign pixel_y_out     = pipe_out_dout[ROW_CNT_WIDTH + 2*SIGNED_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
-    assign avg0_u_out      = pipe_out_dout[2*SIGNED_WIDTH + DATA_WIDTH + 1 +: SIGNED_WIDTH];
-    assign avg1_u_out      = pipe_out_dout[SIGNED_WIDTH + DATA_WIDTH + 1 +: SIGNED_WIDTH];
-    assign center_pixel_out = pipe_out_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
+    assign win_size_clip_out = pipe_out_dout[2*SIGNED_WIDTH + WIN_SIZE_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + DATA_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    assign pixel_x_out     = pipe_out_dout[2*SIGNED_WIDTH + WIN_SIZE_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    assign pixel_y_out     = pipe_out_dout[2*SIGNED_WIDTH + WIN_SIZE_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    assign avg0_u_out      = pipe_out_dout[SIGNED_WIDTH + WIN_SIZE_WIDTH + DATA_WIDTH + 1 +: SIGNED_WIDTH];
+    assign avg1_u_out      = pipe_out_dout[WIN_SIZE_WIDTH + DATA_WIDTH + 1 +: SIGNED_WIDTH];
+    assign center_pixel_out = pipe_out_dout[1 +: DATA_WIDTH];
 
 endmodule
