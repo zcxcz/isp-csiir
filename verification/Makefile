@@ -5,6 +5,8 @@
 #   make sim-simple   - 运行简单测试
 #   make sim-full     - 运行完整测试
 #   make golden       - 运行 Golden Model
+#   make random-test  - 运行单次随机验证
+#   make random-multi - 运行多次随机验证
 #   make wave         - 查看波形
 #   make clean        - 清理生成文件
 
@@ -14,10 +16,17 @@ IMG_WIDTH ?= 64
 IMG_HEIGHT ?= 64
 DATA_WIDTH ?= 10
 
+# 随机验证配置
+NUM_TESTS ?= 10
+SEED ?= 0
+TOLERANCE ?= 0
+PATTERN ?= random
+
 # 目录
 RTL_DIR = ../rtl
 TB_DIR = tb
 OUT_DIR = out
+RESULTS_DIR = verification_results
 
 # RTL 文件
 RTL_SRCS = $(wildcard $(RTL_DIR)/*.v) $(wildcard $(RTL_DIR)/common/*.v)
@@ -25,6 +34,7 @@ RTL_SRCS = $(wildcard $(RTL_DIR)/*.v) $(wildcard $(RTL_DIR)/common/*.v)
 # Testbench 文件
 TB_SIMPLE = $(TB_DIR)/tb_isp_csiir_simple.sv
 TB_FULL = $(TB_DIR)/tb_isp_csiir_top.sv
+TB_RANDOM = $(TB_DIR)/tb_isp_csiir_random.sv
 
 # 输出文件
 SIM_OUT = isp_csiir_sim
@@ -83,6 +93,7 @@ wave: $(VCD_FILE)
 # 清理
 clean:
 	rm -rf $(SIM_OUT) *.vcd $(OUT_DIR)
+	rm -rf $(RESULTS_DIR) test_data
 	rm -f *.vcd *.log
 
 # 帮助
@@ -94,6 +105,8 @@ help:
 	@echo "  sim-full     - 运行完整测试"
 	@echo "  golden       - 运行 Golden Model"
 	@echo "  verify       - 运行完整验证"
+	@echo "  random-test  - 运行单次随机验证"
+	@echo "  random-multi - 运行多次随机验证"
 	@echo "  wave         - 查看波形"
 	@echo "  clean        - 清理生成文件"
 	@echo ""
@@ -101,7 +114,52 @@ help:
 	@echo "  IMG_WIDTH    - 图像宽度 (默认: 64)"
 	@echo "  IMG_HEIGHT   - 图像高度 (默认: 64)"
 	@echo "  DATA_WIDTH   - 数据位宽 (默认: 10)"
+	@echo "  NUM_TESTS    - 随机测试次数 (默认: 10)"
+	@echo "  SEED         - 随机种子 (默认: 0)"
+	@echo "  TOLERANCE    - 误差容差 (默认: 0)"
+	@echo "  PATTERN      - 激励图案 (random/ramp/checker/corner/gradient)"
 	@echo ""
 	@echo "示例:"
 	@echo "  make sim-simple IMG_WIDTH=32 IMG_HEIGHT=32"
 	@echo "  make golden"
+	@echo "  make random-test SEED=42"
+	@echo "  make random-multi NUM_TESTS=20"
+
+# 随机验证 - 单次测试
+random-test:
+	@echo "运行单次随机验证..."
+	python3 run_random_verification.py \
+		--output $(RESULTS_DIR) \
+		--seed $(SEED) \
+		--pattern $(PATTERN) \
+		--tolerance $(TOLERANCE) \
+		--width $(IMG_WIDTH) \
+		--height $(IMG_HEIGHT)
+
+# 随机验证 - 多次测试
+random-multi:
+	@echo "运行多次随机验证 ($(NUM_TESTS) 次)..."
+	python3 run_random_verification.py \
+		--output $(RESULTS_DIR) \
+		--num-tests $(NUM_TESTS) \
+		--seed-start $(SEED) \
+		--pattern $(PATTERN) \
+		--tolerance $(TOLERANCE)
+
+# 仅生成配置
+gen-config:
+	@echo "生成测试配置..."
+	python3 generate_test_config.py \
+		--output test_data \
+		--seed $(SEED) \
+		--pattern $(PATTERN) \
+		--width $(IMG_WIDTH) \
+		--height $(IMG_HEIGHT)
+
+# 完整随机验证流程
+verify-random: clean
+	@echo "运行完整随机验证..."
+	python3 run_random_verification.py \
+		--output $(RESULTS_DIR) \
+		--num-tests $(NUM_TESTS) \
+		--tolerance $(TOLERANCE)
