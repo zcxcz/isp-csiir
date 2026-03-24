@@ -18,12 +18,11 @@
 //   - Internal calculation: s11 (11-bit signed, range -512 to +511)
 //   - Output avg: s11 (11-bit signed)
 //
-// Pipeline Structure (8 cycles):
-//   Cycle 0-3: Window delay alignment
-//   Cycle 4: Kernel selection + u10->s11 conversion
-//   Cycle 5: Weighted sum (first stage)
-//   Cycle 6: Weighted sum (second stage)
-//   Cycle 7: Division output
+// Pipeline Structure (4 cycles, window already delayed by Stage 1):
+//   Cycle 0: Kernel selection + u10->s11 conversion
+//   Cycle 1: Weighted sum (first stage)
+//   Cycle 2: Weighted sum (second stage) + weight normalization
+//   Cycle 3: Division output
 //
 // Handshake Protocol:
 //   - valid_in/valid_out: Data valid indicators
@@ -94,83 +93,23 @@ module stage2_directional_avg #(
     assign stage1_ready = 1'b1;
 
     //=========================================================================
-    // Window Delay Chain (4 cycles) - Using explicit registers
+    // Ready Signal (Simple Pipeline - Always Ready)
     //=========================================================================
-    // Due to large data size, use explicit shift register for window
-    reg [DATA_WIDTH-1:0] window_dly [0:3][0:4][0:4];
-    reg [GRAD_WIDTH-1:0] grad_dly [0:3];
-    reg [WIN_SIZE_WIDTH-1:0] win_size_dly [0:3];
-    reg valid_dly [0:3];
-    reg [DATA_WIDTH-1:0] center_dly [0:3];
-    reg [LINE_ADDR_WIDTH-1:0] pixel_x_dly [0:3];
-    reg [ROW_CNT_WIDTH-1:0] pixel_y_dly [0:3];
+    assign stage1_ready = 1'b1;
 
-    integer i, r, c;
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            for (i = 0; i < 4; i = i + 1) begin
-                for (r = 0; r < 5; r = r + 1) begin
-                    for (c = 0; c < 5; c = c + 1) begin
-                        window_dly[i][r][c] <= {DATA_WIDTH{1'b0}};
-                    end
-                end
-                grad_dly[i]     <= {GRAD_WIDTH{1'b0}};
-                win_size_dly[i] <= {WIN_SIZE_WIDTH{1'b0}};
-                valid_dly[i]    <= 1'b0;
-                center_dly[i]   <= {DATA_WIDTH{1'b0}};
-                pixel_x_dly[i]  <= {LINE_ADDR_WIDTH{1'b0}};
-                pixel_y_dly[i]  <= {ROW_CNT_WIDTH{1'b0}};
-            end
-        end else if (enable && stage2_ready) begin
-            // Shift delay chain
-            for (i = 3; i > 0; i = i - 1) begin
-                for (r = 0; r < 5; r = r + 1) begin
-                    for (c = 0; c < 5; c = c + 1) begin
-                        window_dly[i][r][c] <= window_dly[i-1][r][c];
-                    end
-                end
-                grad_dly[i]     <= grad_dly[i-1];
-                win_size_dly[i] <= win_size_dly[i-1];
-                valid_dly[i]    <= valid_dly[i-1];
-                center_dly[i]   <= center_dly[i-1];
-                pixel_x_dly[i]  <= pixel_x_dly[i-1];
-                pixel_y_dly[i]  <= pixel_y_dly[i-1];
-            end
-            // First stage from inputs
-            window_dly[0][0][0] <= window_0_0; window_dly[0][0][1] <= window_0_1;
-            window_dly[0][0][2] <= window_0_2; window_dly[0][0][3] <= window_0_3;
-            window_dly[0][0][4] <= window_0_4;
-            window_dly[0][1][0] <= window_1_0; window_dly[0][1][1] <= window_1_1;
-            window_dly[0][1][2] <= window_1_2; window_dly[0][1][3] <= window_1_3;
-            window_dly[0][1][4] <= window_1_4;
-            window_dly[0][2][0] <= window_2_0; window_dly[0][2][1] <= window_2_1;
-            window_dly[0][2][2] <= window_2_2; window_dly[0][2][3] <= window_2_3;
-            window_dly[0][2][4] <= window_2_4;
-            window_dly[0][3][0] <= window_3_0; window_dly[0][3][1] <= window_3_1;
-            window_dly[0][3][2] <= window_3_2; window_dly[0][3][3] <= window_3_3;
-            window_dly[0][3][4] <= window_3_4;
-            window_dly[0][4][0] <= window_4_0; window_dly[0][4][1] <= window_4_1;
-            window_dly[0][4][2] <= window_4_2; window_dly[0][4][3] <= window_4_3;
-            window_dly[0][4][4] <= window_4_4;
-            grad_dly[0]     <= grad;
-            win_size_dly[0] <= win_size_clip;
-            valid_dly[0]    <= stage1_valid;
-            center_dly[0]   <= center_pixel;
-            pixel_x_dly[0]  <= pixel_x;
-            pixel_y_dly[0]  <= pixel_y;
-        end
-    end
+    // Window is now received from Stage 1 output (already delayed 5 cycles)
+    // No internal delay chain needed - use window inputs directly
+    // Note: grad_dly etc. still needed for metadata alignment
 
     //=========================================================================
-    // Cycle 4: Kernel Selection + u10 to s11 Conversion
+    // Cycle 0: Kernel Selection + u10 to s11 Conversion (using window from Stage 1)
     //=========================================================================
     // Kernel selection based on window size thresholds
     wire [2:0] kernel_select_comb;
-    assign kernel_select_comb = (win_size_dly[3] < win_size_thresh0[WIN_SIZE_WIDTH-1:0]) ? 3'd0 :  // 2x2 kernel
-                                (win_size_dly[3] < win_size_thresh1[WIN_SIZE_WIDTH-1:0]) ? 3'd1 :  // 2x2 + 3x3
-                                (win_size_dly[3] < win_size_thresh2[WIN_SIZE_WIDTH-1:0]) ? 3'd2 :  // 3x3 + 4x4
-                                (win_size_dly[3] < win_size_thresh3[WIN_SIZE_WIDTH-1:0]) ? 3'd3 :  // 4x4 + 5x5
+    assign kernel_select_comb = (win_size_clip < win_size_thresh0[WIN_SIZE_WIDTH-1:0]) ? 3'd0 :  // 2x2 kernel
+                                (win_size_clip < win_size_thresh1[WIN_SIZE_WIDTH-1:0]) ? 3'd1 :  // 2x2 + 3x3
+                                (win_size_clip < win_size_thresh2[WIN_SIZE_WIDTH-1:0]) ? 3'd2 :  // 3x3 + 4x4
+                                (win_size_clip < win_size_thresh3[WIN_SIZE_WIDTH-1:0]) ? 3'd3 :  // 4x4 + 5x5
                                 3'd4;  // 5x5 only
 
     //=========================================================================
@@ -178,20 +117,42 @@ module stage2_directional_avg #(
     //=========================================================================
     // Convert all 25 window pixels from u10 to s11
     // s11 = u10 - 512 (shift zero point from 0 to 512)
+    // Use window_* inputs directly (already delayed by Stage 1)
     wire signed [SIGNED_WIDTH-1:0] window_s11 [0:4][0:4];
 
-    genvar gr, gc;
-    generate
-        for (gr = 0; gr < 5; gr = gr + 1) begin : gen_row_conv
-            for (gc = 0; gc < 5; gc = gc + 1) begin : gen_col_conv
-                // s11 = {1'b0, u10} - 512
-                assign window_s11[gr][gc] = $signed({1'b0, window_dly[3][gr][gc]}) - $signed(11'sd512);
-            end
-        end
-    endgenerate
+    // Row 0
+    assign window_s11[0][0] = $signed({1'b0, window_0_0}) - $signed(11'sd512);
+    assign window_s11[0][1] = $signed({1'b0, window_0_1}) - $signed(11'sd512);
+    assign window_s11[0][2] = $signed({1'b0, window_0_2}) - $signed(11'sd512);
+    assign window_s11[0][3] = $signed({1'b0, window_0_3}) - $signed(11'sd512);
+    assign window_s11[0][4] = $signed({1'b0, window_0_4}) - $signed(11'sd512);
+    // Row 1
+    assign window_s11[1][0] = $signed({1'b0, window_1_0}) - $signed(11'sd512);
+    assign window_s11[1][1] = $signed({1'b0, window_1_1}) - $signed(11'sd512);
+    assign window_s11[1][2] = $signed({1'b0, window_1_2}) - $signed(11'sd512);
+    assign window_s11[1][3] = $signed({1'b0, window_1_3}) - $signed(11'sd512);
+    assign window_s11[1][4] = $signed({1'b0, window_1_4}) - $signed(11'sd512);
+    // Row 2
+    assign window_s11[2][0] = $signed({1'b0, window_2_0}) - $signed(11'sd512);
+    assign window_s11[2][1] = $signed({1'b0, window_2_1}) - $signed(11'sd512);
+    assign window_s11[2][2] = $signed({1'b0, window_2_2}) - $signed(11'sd512);
+    assign window_s11[2][3] = $signed({1'b0, window_2_3}) - $signed(11'sd512);
+    assign window_s11[2][4] = $signed({1'b0, window_2_4}) - $signed(11'sd512);
+    // Row 3
+    assign window_s11[3][0] = $signed({1'b0, window_3_0}) - $signed(11'sd512);
+    assign window_s11[3][1] = $signed({1'b0, window_3_1}) - $signed(11'sd512);
+    assign window_s11[3][2] = $signed({1'b0, window_3_2}) - $signed(11'sd512);
+    assign window_s11[3][3] = $signed({1'b0, window_3_3}) - $signed(11'sd512);
+    assign window_s11[3][4] = $signed({1'b0, window_3_4}) - $signed(11'sd512);
+    // Row 4
+    assign window_s11[4][0] = $signed({1'b0, window_4_0}) - $signed(11'sd512);
+    assign window_s11[4][1] = $signed({1'b0, window_4_1}) - $signed(11'sd512);
+    assign window_s11[4][2] = $signed({1'b0, window_4_2}) - $signed(11'sd512);
+    assign window_s11[4][3] = $signed({1'b0, window_4_3}) - $signed(11'sd512);
+    assign window_s11[4][4] = $signed({1'b0, window_4_4}) - $signed(11'sd512);
 
     //=========================================================================
-    // Cycle 4 Pipeline Registers
+    // Cycle 0 Pipeline Registers
     //=========================================================================
     localparam PIPE_S4_WIDTH = 3 + 25 * SIGNED_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1;
 
@@ -201,7 +162,7 @@ module stage2_directional_avg #(
                                             window_s11[2][0], window_s11[2][1], window_s11[2][2], window_s11[2][3], window_s11[2][4],
                                             window_s11[3][0], window_s11[3][1], window_s11[3][2], window_s11[3][3], window_s11[3][4],
                                             window_s11[4][0], window_s11[4][1], window_s11[4][2], window_s11[4][3], window_s11[4][4],
-                                            win_size_dly[3], pixel_x_dly[3], pixel_y_dly[3], center_dly[3], grad_dly[3], valid_dly[3]};
+                                            win_size_clip, pixel_x, pixel_y, center_pixel, grad, stage1_valid};
 
     wire [PIPE_S4_WIDTH-1:0] pipe_s4_dout;
     wire                     valid_s4;
@@ -214,7 +175,7 @@ module stage2_directional_avg #(
         .clk       (clk),
         .rst_n     (rst_n),
         .din       (pipe_s4_din),
-        .valid_in  (valid_dly[3]),
+        .valid_in  (stage1_valid),
         .ready_out (),
         .dout      (pipe_s4_dout),
         .valid_out (valid_s4),
@@ -223,16 +184,21 @@ module stage2_directional_avg #(
 
     // Unpack signals
     wire [2:0]                 kernel_select_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1 -: 3];
+    // Window unpack - window is packed right after kernel_select_comb at MSB side
+    // Window starts at bit (PIPE_S4_WIDTH - 4), indexed from MSB
+    // window_s11[ur][uc] starts at bit (PIPE_S4_WIDTH - 4 - (ur*5+uc)*SIGNED_WIDTH)
     wire signed [SIGNED_WIDTH-1:0] win_s4 [0:4][0:4];
     genvar ur, uc;
     generate
         for (ur = 0; ur < 5; ur = ur + 1) begin : gen_unp_row
             for (uc = 0; uc < 5; uc = uc + 1) begin : gen_unp_col
-                localparam IDX = 3 + (ur * 5 + uc) * SIGNED_WIDTH;
-                assign win_s4[ur][uc] = pipe_s4_dout[IDX +: SIGNED_WIDTH];
+                localparam IDX = PIPE_S4_WIDTH - 4 - (ur * 5 + uc) * SIGNED_WIDTH;
+                assign win_s4[ur][uc] = pipe_s4_dout[IDX -: SIGNED_WIDTH];
             end
         end
     endgenerate
+    // Metadata unpack - from LSB side
+    // Pack order (LSB to MSB): valid, grad, center, pixel_y, pixel_x, win_size, window, kernel
     wire [WIN_SIZE_WIDTH-1:0]   win_size_s4   = pipe_s4_dout[GRAD_WIDTH + DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: WIN_SIZE_WIDTH];
     wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s4    = pipe_s4_dout[GRAD_WIDTH + DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
     wire [ROW_CNT_WIDTH-1:0]    pixel_y_s4    = pipe_s4_dout[GRAD_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
@@ -240,7 +206,7 @@ module stage2_directional_avg #(
     wire [GRAD_WIDTH-1:0]       grad_s4       = pipe_s4_dout[1 +: GRAD_WIDTH];
 
     //=========================================================================
-    // Cycle 5: Weighted Sum (First Stage) - Signed Arithmetic
+    // Cycle 1: Weighted Sum (First Stage) - Signed Arithmetic
     //=========================================================================
     // Calculate sums for each direction (5x5 window, signed)
     // Center (C): sum of all 25 pixels
@@ -275,7 +241,7 @@ module stage2_directional_avg #(
                                                  win_s4[4][2] + win_s4[4][3] + win_s4[4][4];
 
     //=========================================================================
-    // Cycle 5 Pipeline Registers
+    // Cycle 1 Pipeline Registers
     //=========================================================================
     localparam PIPE_S5_WIDTH = 5 * ACC_WIDTH + 3 + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1;
 
@@ -314,7 +280,7 @@ module stage2_directional_avg #(
     wire [GRAD_WIDTH-1:0]     grad_s5        = pipe_s5_dout[1 +: GRAD_WIDTH];
 
     //=========================================================================
-    // Cycle 6: Weight Normalization
+    // Cycle 2: Weight Normalization
     //=========================================================================
     // Weights for division
     wire [7:0] weight_center = 8'd25;  // 5x5 = 25
@@ -322,7 +288,7 @@ module stage2_directional_avg #(
     wire [7:0] weight_15_col = 8'd15;  // 5x3 = 15
 
     //=========================================================================
-    // Cycle 6 Pipeline Registers
+    // Cycle 2 Pipeline Registers
     //=========================================================================
     localparam PIPE_S6_WIDTH = 5 * ACC_WIDTH + 5 * 8 + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1;
 
@@ -366,7 +332,7 @@ module stage2_directional_avg #(
     wire [GRAD_WIDTH-1:0]     grad_s6       = pipe_s6_dout[1 +: GRAD_WIDTH];
 
     //=========================================================================
-    // Cycle 7: Division Output (Signed) with Saturation
+    // Cycle 3: Division Output (Signed) with Saturation
     //=========================================================================
     // Integer division for averages (signed result)
     wire signed [SIGNED_WIDTH-1:0] avg0_c_div = (w_c_s6 != 0) ? (sum_c_s6 / $signed({1'b0, w_c_s6})) : {SIGNED_WIDTH{1'b0}};
@@ -395,7 +361,7 @@ module stage2_directional_avg #(
     wire signed [SIGNED_WIDTH-1:0] avg1_r_comb = avg0_r_comb;
 
     //=========================================================================
-    // Output Registers (Cycle 7)
+    // Output Registers (Cycle 3)
     //=========================================================================
     localparam PIPE_OUT_WIDTH = 10 * SIGNED_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + GRAD_WIDTH + 1;
 
@@ -421,6 +387,7 @@ module stage2_directional_avg #(
     );
 
     // Unpack output signals
+    // Pack order (LSB to MSB): valid, center, grad, pixel_y, pixel_x, win_size, avg1_*, avg0_*
     assign avg0_c          = pipe_out_dout[PIPE_OUT_WIDTH-1 -: SIGNED_WIDTH];
     assign avg0_u          = pipe_out_dout[PIPE_OUT_WIDTH-1-SIGNED_WIDTH -: SIGNED_WIDTH];
     assign avg0_d          = pipe_out_dout[PIPE_OUT_WIDTH-1-2*SIGNED_WIDTH -: SIGNED_WIDTH];
@@ -431,10 +398,11 @@ module stage2_directional_avg #(
     assign avg1_d          = pipe_out_dout[PIPE_OUT_WIDTH-1-7*SIGNED_WIDTH -: SIGNED_WIDTH];
     assign avg1_l          = pipe_out_dout[PIPE_OUT_WIDTH-1-8*SIGNED_WIDTH -: SIGNED_WIDTH];
     assign avg1_r          = pipe_out_dout[PIPE_OUT_WIDTH-1-9*SIGNED_WIDTH -: SIGNED_WIDTH];
-    assign win_size_clip_out = pipe_out_dout[DATA_WIDTH + GRAD_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: WIN_SIZE_WIDTH];
-    assign pixel_x_out     = pipe_out_dout[DATA_WIDTH + GRAD_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
-    assign pixel_y_out     = pipe_out_dout[DATA_WIDTH + GRAD_WIDTH + 1 +: ROW_CNT_WIDTH];
-    assign grad_out        = pipe_out_dout[DATA_WIDTH + 1 +: GRAD_WIDTH];
+    // Correct unpack indices matching pack order
+    assign win_size_clip_out = pipe_out_dout[1 + DATA_WIDTH + GRAD_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH +: WIN_SIZE_WIDTH];
+    assign pixel_x_out     = pipe_out_dout[1 + DATA_WIDTH + GRAD_WIDTH + ROW_CNT_WIDTH +: LINE_ADDR_WIDTH];
+    assign pixel_y_out     = pipe_out_dout[1 + DATA_WIDTH + GRAD_WIDTH +: ROW_CNT_WIDTH];
+    assign grad_out        = pipe_out_dout[1 + DATA_WIDTH +: GRAD_WIDTH];
     assign center_pixel_out = pipe_out_dout[1 +: DATA_WIDTH];
 
 endmodule

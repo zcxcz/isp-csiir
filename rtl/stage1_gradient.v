@@ -66,7 +66,14 @@ module stage1_gradient #(
     output wire [ROW_CNT_WIDTH-1:0]    pixel_y_out,
 
     // Center pixel (passed through for Stage 4)
-    output wire [DATA_WIDTH-1:0]       center_pixel
+    output wire [DATA_WIDTH-1:0]       center_pixel,
+
+    // Window output for Stage 2 (passed through pipeline)
+    output wire [DATA_WIDTH-1:0]       win_out_0_0, win_out_0_1, win_out_0_2, win_out_0_3, win_out_0_4,
+    output wire [DATA_WIDTH-1:0]       win_out_1_0, win_out_1_1, win_out_1_2, win_out_1_3, win_out_1_4,
+    output wire [DATA_WIDTH-1:0]       win_out_2_0, win_out_2_1, win_out_2_2, win_out_2_3, win_out_2_4,
+    output wire [DATA_WIDTH-1:0]       win_out_3_0, win_out_3_1, win_out_3_2, win_out_3_3, win_out_3_4,
+    output wire [DATA_WIDTH-1:0]       win_out_4_0, win_out_4_1, win_out_4_2, win_out_4_3, win_out_4_4
 );
 
     //=========================================================================
@@ -82,6 +89,65 @@ module stage1_gradient #(
     // Ready Signal (Simple Pipeline - Always Ready)
     //=========================================================================
     assign window_ready = 1'b1;
+
+    //=========================================================================
+    // Window Delay Line (5 cycles to match pipeline latency)
+    //=========================================================================
+    // Pass window through 5 cycles of delay to align with pipeline output
+    reg [DATA_WIDTH-1:0] win_dly [0:4][0:4][0:4];
+    reg                   win_valid_dly [0:4];
+
+    integer wi, wr, wc;
+    initial begin
+        for (wi = 0; wi < 5; wi = wi + 1) begin
+            for (wr = 0; wr < 5; wr = wr + 1) begin
+                for (wc = 0; wc < 5; wc = wc + 1) begin
+                    win_dly[wi][wr][wc] = {DATA_WIDTH{1'b0}};
+                end
+            end
+            win_valid_dly[wi] = 1'b0;
+        end
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (wi = 0; wi < 5; wi = wi + 1) begin
+                for (wr = 0; wr < 5; wr = wr + 1) begin
+                    for (wc = 0; wc < 5; wc = wc + 1) begin
+                        win_dly[wi][wr][wc] <= {DATA_WIDTH{1'b0}};
+                    end
+                end
+                win_valid_dly[wi] <= 1'b0;
+            end
+        end else if (enable && stage1_ready) begin
+            // Shift delay chain
+            for (wi = 4; wi > 0; wi = wi - 1) begin
+                for (wr = 0; wr < 5; wr = wr + 1) begin
+                    for (wc = 0; wc < 5; wc = wc + 1) begin
+                        win_dly[wi][wr][wc] <= win_dly[wi-1][wr][wc];
+                    end
+                end
+                win_valid_dly[wi] <= win_valid_dly[wi-1];
+            end
+            // First stage from inputs
+            win_dly[0][0][0] <= window_0_0; win_dly[0][0][1] <= window_0_1;
+            win_dly[0][0][2] <= window_0_2; win_dly[0][0][3] <= window_0_3;
+            win_dly[0][0][4] <= window_0_4;
+            win_dly[0][1][0] <= window_1_0; win_dly[0][1][1] <= window_1_1;
+            win_dly[0][1][2] <= window_1_2; win_dly[0][1][3] <= window_1_3;
+            win_dly[0][1][4] <= window_1_4;
+            win_dly[0][2][0] <= window_2_0; win_dly[0][2][1] <= window_2_1;
+            win_dly[0][2][2] <= window_2_2; win_dly[0][2][3] <= window_2_3;
+            win_dly[0][2][4] <= window_2_4;
+            win_dly[0][3][0] <= window_3_0; win_dly[0][3][1] <= window_3_1;
+            win_dly[0][3][2] <= window_3_2; win_dly[0][3][3] <= window_3_3;
+            win_dly[0][3][4] <= window_3_4;
+            win_dly[0][4][0] <= window_4_0; win_dly[0][4][1] <= window_4_1;
+            win_dly[0][4][2] <= window_4_2; win_dly[0][4][3] <= window_4_3;
+            win_dly[0][4][4] <= window_4_4;
+            win_valid_dly[0] <= window_valid;
+        end
+    end
 
     //=========================================================================
     // Cycle 0: Sobel Row/Column Sum (Combinational)
@@ -310,5 +376,22 @@ module stage1_gradient #(
     assign pixel_x_out   = pipe_out_dout[ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
     assign pixel_y_out   = pipe_out_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
     assign center_pixel  = pipe_out_dout[1 +: DATA_WIDTH];
+
+    // Output delayed window (5 cycles aligned with pipeline)
+    assign win_out_0_0 = win_dly[4][0][0]; assign win_out_0_1 = win_dly[4][0][1];
+    assign win_out_0_2 = win_dly[4][0][2]; assign win_out_0_3 = win_dly[4][0][3];
+    assign win_out_0_4 = win_dly[4][0][4];
+    assign win_out_1_0 = win_dly[4][1][0]; assign win_out_1_1 = win_dly[4][1][1];
+    assign win_out_1_2 = win_dly[4][1][2]; assign win_out_1_3 = win_dly[4][1][3];
+    assign win_out_1_4 = win_dly[4][1][4];
+    assign win_out_2_0 = win_dly[4][2][0]; assign win_out_2_1 = win_dly[4][2][1];
+    assign win_out_2_2 = win_dly[4][2][2]; assign win_out_2_3 = win_dly[4][2][3];
+    assign win_out_2_4 = win_dly[4][2][4];
+    assign win_out_3_0 = win_dly[4][3][0]; assign win_out_3_1 = win_dly[4][3][1];
+    assign win_out_3_2 = win_dly[4][3][2]; assign win_out_3_3 = win_dly[4][3][3];
+    assign win_out_3_4 = win_dly[4][3][4];
+    assign win_out_4_0 = win_dly[4][4][0]; assign win_out_4_1 = win_dly[4][4][1];
+    assign win_out_4_2 = win_dly[4][4][2]; assign win_out_4_3 = win_dly[4][4][3];
+    assign win_out_4_4 = win_dly[4][4][4];
 
 endmodule

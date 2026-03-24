@@ -19,13 +19,13 @@
 //   - Final output: u10 (10-bit unsigned)
 //
 // Pipeline Latency:
-//   - Stage 1: 5 cycles (gradient calculation)
-//   - Stage 2: 8 cycles (directional average)
+//   - Stage 1: 5 cycles (gradient calculation + window delay)
+//   - Stage 2: 4 cycles (directional average, receives delayed window from Stage 1)
 //   - Stage 3: 1 row + 6 cycles (gradient fusion with row delay)
 //     * Row delay enables true 3-row gradient access (grad_u, grad_c, grad_d)
 //     * First row has no valid output (buffering)
 //   - Stage 4: 5 cycles (IIR blend)
-//   - Total: 1 row + 24 cycles from din_valid to dout_valid
+//   - Total: 1 row + 20 cycles from din_valid to dout_valid
 //
 // Handshake Protocol:
 //   - din_valid/din_ready: Input handshake (back-pressure support)
@@ -98,6 +98,13 @@ module isp_csiir_top #(
     wire [DATA_WIDTH-1:0]       s1_center_pixel;
     wire [LINE_ADDR_WIDTH-1:0]  s1_pixel_x;
     wire [ROW_CNT_WIDTH-1:0]    s1_pixel_y;
+
+    // Stage 1 window output (delayed to align with pipeline)
+    wire [DATA_WIDTH-1:0]       s1_win_0_0, s1_win_0_1, s1_win_0_2, s1_win_0_3, s1_win_0_4;
+    wire [DATA_WIDTH-1:0]       s1_win_1_0, s1_win_1_1, s1_win_1_2, s1_win_1_3, s1_win_1_4;
+    wire [DATA_WIDTH-1:0]       s1_win_2_0, s1_win_2_1, s1_win_2_2, s1_win_2_3, s1_win_2_4;
+    wire [DATA_WIDTH-1:0]       s1_win_3_0, s1_win_3_1, s1_win_3_2, s1_win_3_3, s1_win_3_4;
+    wire [DATA_WIDTH-1:0]       s1_win_4_0, s1_win_4_1, s1_win_4_2, s1_win_4_3, s1_win_4_4;
 
     // Stage 2 interface (s11 signed format)
     wire signed [SIGNED_WIDTH-1:0] s2_avg0_c, s2_avg0_u, s2_avg0_d, s2_avg0_l, s2_avg0_r;
@@ -270,12 +277,29 @@ module isp_csiir_top #(
         .pixel_y       (center_y),
         .pixel_x_out   (s1_pixel_x),
         .pixel_y_out   (s1_pixel_y),
-        .center_pixel  (s1_center_pixel)
+        .center_pixel  (s1_center_pixel),
+        // Window output (delayed to align with pipeline)
+        .win_out_0_0   (s1_win_0_0), .win_out_0_1 (s1_win_0_1),
+        .win_out_0_2   (s1_win_0_2), .win_out_0_3 (s1_win_0_3),
+        .win_out_0_4   (s1_win_0_4),
+        .win_out_1_0   (s1_win_1_0), .win_out_1_1 (s1_win_1_1),
+        .win_out_1_2   (s1_win_1_2), .win_out_1_3 (s1_win_1_3),
+        .win_out_1_4   (s1_win_1_4),
+        .win_out_2_0   (s1_win_2_0), .win_out_2_1 (s1_win_2_1),
+        .win_out_2_2   (s1_win_2_2), .win_out_2_3 (s1_win_2_3),
+        .win_out_2_4   (s1_win_2_4),
+        .win_out_3_0   (s1_win_3_0), .win_out_3_1 (s1_win_3_1),
+        .win_out_3_2   (s1_win_3_2), .win_out_3_3 (s1_win_3_3),
+        .win_out_3_4   (s1_win_3_4),
+        .win_out_4_0   (s1_win_4_0), .win_out_4_1 (s1_win_4_1),
+        .win_out_4_2   (s1_win_4_2), .win_out_4_3 (s1_win_4_3),
+        .win_out_4_4   (s1_win_4_4)
     );
 
     //=========================================================================
     // Stage 2: Directional Average (u10 -> s11 conversion)
     //=========================================================================
+    // Window input comes from Stage 1 output (already delayed 5 cycles)
     stage2_directional_avg #(
         .DATA_WIDTH    (DATA_WIDTH),
         .SIGNED_WIDTH  (SIGNED_WIDTH),
@@ -286,21 +310,22 @@ module isp_csiir_top #(
         .clk           (clk),
         .rst_n         (rst_n),
         .enable        (cfg_enable && !cfg_bypass),
-        .window_0_0    (window[0][0]), .window_0_1 (window[0][1]),
-        .window_0_2    (window[0][2]), .window_0_3 (window[0][3]),
-        .window_0_4    (window[0][4]),
-        .window_1_0    (window[1][0]), .window_1_1 (window[1][1]),
-        .window_1_2    (window[1][2]), .window_1_3 (window[1][3]),
-        .window_1_4    (window[1][4]),
-        .window_2_0    (window[2][0]), .window_2_1 (window[2][1]),
-        .window_2_2    (window[2][2]), .window_2_3 (window[2][3]),
-        .window_2_4    (window[2][4]),
-        .window_3_0    (window[3][0]), .window_3_1 (window[3][1]),
-        .window_3_2    (window[3][2]), .window_3_3 (window[3][3]),
-        .window_3_4    (window[3][4]),
-        .window_4_0    (window[4][0]), .window_4_1 (window[4][1]),
-        .window_4_2    (window[4][2]), .window_4_3 (window[4][3]),
-        .window_4_4    (window[4][4]),
+        // Window from Stage 1 output (delayed to align with pipeline)
+        .window_0_0    (s1_win_0_0), .window_0_1 (s1_win_0_1),
+        .window_0_2    (s1_win_0_2), .window_0_3 (s1_win_0_3),
+        .window_0_4    (s1_win_0_4),
+        .window_1_0    (s1_win_1_0), .window_1_1 (s1_win_1_1),
+        .window_1_2    (s1_win_1_2), .window_1_3 (s1_win_1_3),
+        .window_1_4    (s1_win_1_4),
+        .window_2_0    (s1_win_2_0), .window_2_1 (s1_win_2_1),
+        .window_2_2    (s1_win_2_2), .window_2_3 (s1_win_2_3),
+        .window_2_4    (s1_win_2_4),
+        .window_3_0    (s1_win_3_0), .window_3_1 (s1_win_3_1),
+        .window_3_2    (s1_win_3_2), .window_3_3 (s1_win_3_3),
+        .window_3_4    (s1_win_3_4),
+        .window_4_0    (s1_win_4_0), .window_4_1 (s1_win_4_1),
+        .window_4_2    (s1_win_4_2), .window_4_3 (s1_win_4_3),
+        .window_4_4    (s1_win_4_4),
         .grad_h        (s1_grad_h),
         .grad_v        (s1_grad_v),
         .grad          (s1_grad),
