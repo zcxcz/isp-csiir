@@ -56,19 +56,30 @@ module common_lut_divider #(
     // Index Compression Logic
     //=========================================================================
     // Compress DIVIDEND_WIDTH-bit dividend to 8-bit LUT index
+    // MUST match Python model's index calculation exactly
     wire [7:0] lut_index;
     wire [DIVIDEND_WIDTH-1:0] gs = dividend;
 
+    // Index calculation matches Python isp_csiir_fixed_model.py:
+    //   gs < 128:   lut_index = gs
+    //   gs < 256:   lut_index = 128 + ((gs - 128) >> 1)
+    //   gs < 512:   lut_index = 160 + ((gs - 256) >> 2)
+    //   gs < 1024:  lut_index = 192 + ((gs - 512) >> 4)  -- 16:1 compression
+    //   gs >= 1024: lut_index = 224 + min(((gs - 1024) >> 13), 31)
+    wire [DIVIDEND_WIDTH-1:0] gs_m128 = gs - 128;
+    wire [DIVIDEND_WIDTH-1:0] gs_m256 = gs - 256;
+    wire [DIVIDEND_WIDTH-1:0] gs_m512 = gs - 512;
+    wire [DIVIDEND_WIDTH-1:0] gs_m1024 = gs - 1024;
+
     assign lut_index = (gs == 0) ? 8'd0 :
-                       (gs < 128) ? gs[6:0] :                           // 1-127 → 1-127
-                       (gs < 256) ? {2'b10, gs[6:1]} :                   // 128-255 → 128-159
-                       (gs < 512) ? {2'b10, 5'b10000, gs[7:2]} :         // 256-511 → 160-191
-                       (gs < 1024) ? {2'b11, gs[8:3]} :                  // 512-1023 → 192-223
-                       (gs[DIVIDEND_WIDTH-1]) ? {5'b11111, gs[12:9]} :   // 65536+ → 248-255
-                       (gs[DIVIDEND_WIDTH-2]) ? {5'b11110, gs[11:8]} :   // 32768-65535 → 240-247
-                       (gs[DIVIDEND_WIDTH-3]) ? {5'b11101, gs[10:7]} :   // 16384-32767 → 232-239
-                       (gs[DIVIDEND_WIDTH-4]) ? {5'b11100, gs[9:6]} :    // 8192-16383 → 224-231
-                       {5'b11100, gs[9:6]};                              // fallback
+                       (gs < 128) ? gs[7:0] :
+                       (gs < 256) ? (8'd128 + gs_m128[7:1]) :           // 128 + ((gs-128)>>1)
+                       (gs < 512) ? (8'd160 + gs_m256[7:2]) :           // 160 + ((gs-256)>>2)
+                       (gs < 1024) ? (8'd192 + gs_m512[7:4]) :          // 192 + ((gs-512)>>4) 16:1
+                       (gs[DIVIDEND_WIDTH-1]) ? 8'd255 :                 // Large values clamp to 255
+                       (gs[DIVIDEND_WIDTH-2]) ? 8'd255 :
+                       (gs[DIVIDEND_WIDTH-3]) ? 8'd255 :
+                       (8'd224 + (gs_m1024[DIVIDEND_WIDTH-1:13] > 31 ? 5'd31 : gs_m1024[17:13]));
 
     //=========================================================================
     // LUT (256 x 16-bit) for Inverse Values
@@ -104,9 +115,9 @@ module common_lut_divider #(
             div_lut[init_i] = lut_tmp[15:0];
         end
 
-        // Index 192-223: dividend 512-1023 (8:1 compression)
+        // Index 192-223: dividend 512-1023 (16:1 compression)
         for (init_i = 192; init_i < 224; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 192) * 8 + 512);
+            lut_tmp = 67108864 / ((init_i - 192) * 16 + 512);
             div_lut[init_i] = lut_tmp[15:0];
         end
 
@@ -143,13 +154,11 @@ module common_lut_divider #(
     // Multiplication: numerator * inv_value
     wire [PRODUCT_SHIFT+15:0] product = numerator * inv_value;
 
-    // Truncate to QUOTIENT_WIDTH output
-    // Extract bits [PRODUCT_SHIFT+5:PRODUCT_SHIFT-QUOTIENT_WIDTH+6] for proper alignment
-    localparam PRODUCT_HIGH = PRODUCT_SHIFT + 5;
-    localparam PRODUCT_LOW  = PRODUCT_SHIFT - QUOTIENT_WIDTH + 6;
-
+    // Quotient = product >> PRODUCT_SHIFT (extract upper bits)
+    // This gives: numerator * (2^PRODUCT_SHIFT / dividend) >> PRODUCT_SHIFT
+    //           = numerator / dividend (approximately)
     wire [QUOTIENT_WIDTH-1:0] quotient_comb = (dividend != 0) ?
-                                               product[PRODUCT_HIGH:PRODUCT_LOW] :
+                                               product[PRODUCT_SHIFT+QUOTIENT_WIDTH-1:PRODUCT_SHIFT] :
                                                {QUOTIENT_WIDTH{1'b0}};
 
     //=========================================================================

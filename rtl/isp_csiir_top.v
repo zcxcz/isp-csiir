@@ -3,14 +3,14 @@
 // Purpose: Top-level module for ISP-CSIIR image processing
 // Author: rtl-impl
 // Date: 2026-03-23
-// Version: v2.2 - Updated Stage 3 with true row delay architecture
+// Version: v3.0 - Added valid/ready handshake protocol for back-pressure support
 //-----------------------------------------------------------------------------
 // Description:
 //   Top-level integration of ISP-CSIIR pipeline including:
 //   - APB register configuration
 //   - 5x5 line buffer with IIR feedback
 //   - 4-stage processing pipeline
-//   - Video stream I/O
+//   - Video stream I/O with valid/ready handshake
 //
 // Data Format:
 //   - Line buffer storage: u10 (10-bit unsigned)
@@ -26,6 +26,11 @@
 //     * First row has no valid output (buffering)
 //   - Stage 4: 5 cycles (IIR blend)
 //   - Total: 1 row + 24 cycles from din_valid to dout_valid
+//
+// Handshake Protocol:
+//   - din_valid/din_ready: Input handshake (back-pressure support)
+//   - dout_valid/dout_ready: Output handshake (downstream back-pressure)
+//   - Ready signals propagate upstream from Stage 4 -> Stage 3 -> Stage 2 -> Stage 1 -> Line Buffer
 //-----------------------------------------------------------------------------
 
 module isp_csiir_top #(
@@ -56,10 +61,12 @@ module isp_csiir_top #(
     input  wire                      hsync,
     input  wire [DATA_WIDTH-1:0]     din,
     input  wire                      din_valid,
+    output wire                      din_ready,
 
     // Video Output Interface
     output wire [DATA_WIDTH-1:0]     dout,
     output wire                      dout_valid,
+    input  wire                      dout_ready,
     output wire                      dout_vsync,
     output wire                      dout_hsync
 );
@@ -79,6 +86,7 @@ module isp_csiir_top #(
     // Line buffer interface
     wire [DATA_WIDTH-1:0]       window [0:4][0:4];
     wire                        window_valid;
+    wire                        window_ready;
     wire [LINE_ADDR_WIDTH-1:0]  center_x;
     wire [ROW_CNT_WIDTH-1:0]    center_y;
 
@@ -86,6 +94,7 @@ module isp_csiir_top #(
     wire [GRAD_WIDTH-1:0]       s1_grad_h, s1_grad_v, s1_grad;
     wire [5:0]                  s1_win_size_clip;
     wire                        s1_valid;
+    wire                        s1_ready;
     wire [DATA_WIDTH-1:0]       s1_center_pixel;
     wire [LINE_ADDR_WIDTH-1:0]  s1_pixel_x;
     wire [ROW_CNT_WIDTH-1:0]    s1_pixel_y;
@@ -94,6 +103,7 @@ module isp_csiir_top #(
     wire signed [SIGNED_WIDTH-1:0] s2_avg0_c, s2_avg0_u, s2_avg0_d, s2_avg0_l, s2_avg0_r;
     wire signed [SIGNED_WIDTH-1:0] s2_avg1_c, s2_avg1_u, s2_avg1_d, s2_avg1_l, s2_avg1_r;
     wire                        s2_valid;
+    wire                        s2_ready;
     wire [GRAD_WIDTH-1:0]       s2_grad;
     wire [5:0]                  s2_win_size_clip;
     wire [DATA_WIDTH-1:0]       s2_center_pixel;
@@ -103,6 +113,7 @@ module isp_csiir_top #(
     // Stage 3 interface (s11 signed format)
     wire signed [SIGNED_WIDTH-1:0] s3_blend0, s3_blend1;
     wire                        s3_valid;
+    wire                        s3_ready;
     wire signed [SIGNED_WIDTH-1:0] s3_avg0_u, s3_avg1_u;
     wire [5:0]                  s3_win_size_clip;
     wire [DATA_WIDTH-1:0]       s3_center_pixel;
@@ -184,8 +195,11 @@ module isp_csiir_top #(
         .clk           (clk),
         .rst_n         (rst_n),
         .enable        (cfg_enable && !cfg_bypass),
+        .img_width     (cfg_img_width[LINE_ADDR_WIDTH-1:0]),
+        .img_height    (cfg_img_height[ROW_CNT_WIDTH-1:0]),
         .din           (din),
         .din_valid     (din_valid),
+        .din_ready     (din_ready),
         .sof           (sof),
         .eol           (eol),
         .lb_wb_en      (lb_wb_en),
@@ -208,6 +222,7 @@ module isp_csiir_top #(
         .window_4_2    (window[4][2]), .window_4_3 (window[4][3]),
         .window_4_4    (window[4][4]),
         .window_valid  (window_valid),
+        .window_ready  (window_ready),
         .center_x      (center_x),
         .center_y      (center_y)
     );
@@ -240,6 +255,7 @@ module isp_csiir_top #(
         .window_4_2    (window[4][2]), .window_4_3 (window[4][3]),
         .window_4_4    (window[4][4]),
         .window_valid  (window_valid),
+        .window_ready  (window_ready),
         .win_size_clip_y_0 (cfg_clip_y_0),
         .win_size_clip_y_1 (cfg_clip_y_1),
         .win_size_clip_y_2 (cfg_clip_y_2),
@@ -249,6 +265,7 @@ module isp_csiir_top #(
         .grad          (s1_grad),
         .win_size_clip (s1_win_size_clip),
         .stage1_valid  (s1_valid),
+        .stage1_ready  (s1_ready),
         .pixel_x       (center_x),
         .pixel_y       (center_y),
         .pixel_x_out   (s1_pixel_x),
@@ -289,6 +306,7 @@ module isp_csiir_top #(
         .grad          (s1_grad),
         .win_size_clip (s1_win_size_clip),
         .stage1_valid  (s1_valid),
+        .stage1_ready  (s1_ready),
         .center_pixel  (s1_center_pixel),
         .win_size_thresh0 (cfg_thresh0),
         .win_size_thresh1 (cfg_thresh1),
@@ -299,6 +317,7 @@ module isp_csiir_top #(
         .avg1_c        (s2_avg1_c), .avg1_u (s2_avg1_u), .avg1_d (s2_avg1_d),
         .avg1_l        (s2_avg1_l), .avg1_r (s2_avg1_r),
         .stage2_valid  (s2_valid),
+        .stage2_ready  (s2_ready),
         .pixel_x       (s1_pixel_x),
         .pixel_y       (s1_pixel_y),
         .pixel_x_out   (s2_pixel_x),
@@ -327,6 +346,7 @@ module isp_csiir_top #(
         .avg1_c        (s2_avg1_c), .avg1_u (s2_avg1_u), .avg1_d (s2_avg1_d),
         .avg1_l        (s2_avg1_l), .avg1_r (s2_avg1_r),
         .stage2_valid  (s2_valid),
+        .stage2_ready  (s2_ready),
         .grad          (s2_grad),
         .win_size_clip (s2_win_size_clip),
         .center_pixel  (s2_center_pixel),
@@ -335,6 +355,7 @@ module isp_csiir_top #(
         .blend0_dir_avg (s3_blend0),
         .blend1_dir_avg (s3_blend1),
         .stage3_valid  (s3_valid),
+        .stage3_ready  (s3_ready),
         .pixel_x       (s2_pixel_x),
         .pixel_y       (s2_pixel_y),
         .pixel_x_out   (s3_pixel_x),
@@ -361,6 +382,7 @@ module isp_csiir_top #(
         .blend0_dir_avg (s3_blend0),
         .blend1_dir_avg (s3_blend1),
         .stage3_valid  (s3_valid),
+        .stage3_ready  (s3_ready),
         .avg0_u        (s3_avg0_u),
         .avg1_u        (s3_avg1_u),
         .win_size_clip (s3_win_size_clip),
@@ -371,6 +393,7 @@ module isp_csiir_top #(
         .blending_ratio_3 (cfg_ratio_3),
         .dout          (s4_dout),
         .dout_valid    (s4_dout_valid),
+        .dout_ready    (dout_ready),
         .pixel_x       (s3_pixel_x),
         .pixel_y       (s3_pixel_y),
         .pixel_x_out   (s4_pixel_x),

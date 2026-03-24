@@ -2,8 +2,8 @@
 // Module: stage3_gradient_fusion
 // Purpose: Gradient-weighted directional fusion
 // Author: rtl-impl
-// Date: 2026-03-23
-// Version: v2.2 - True row delay architecture for grad_d (next row gradient)
+// Date: 2026-03-24
+// Version: v3.0 - Refactored with common_pipe and valid/ready handshake
 //-----------------------------------------------------------------------------
 // Description:
 //   Implements Stage 3 of ISP-CSIIR pipeline:
@@ -24,33 +24,21 @@
 //   Cycle 4: Weighted sum
 //   Cycle 5: Division output (using common_lut_divider)
 //
-// Gradient Line Buffer Design (v2.2 True Row Delay Architecture):
+// Gradient Line Buffer Design (True Row Delay Architecture):
 //   CRITICAL: Stage 3 processing is delayed by 1 FULL ROW
 //   - Stage 2 outputs are stored in row delay buffer for IMG_WIDTH cycles
 //   - When Stage 3 processes row N, Stage 1/2 are already processing row N+1
 //   - The "current" grad input is actually grad(N+1, j) - the NEXT row's gradient
 //   - The gradient buffer contains grad(N) - the CURRENT row being processed
 //
-//   Data Flow Timeline:
-//   | Time        | Stage 1/2       | Stage 3 (delayed) |
-//   |-------------|-----------------|-------------------|
-//   | Row 0       | Process row 0   | Idle (no data)    |
-//   | Row 1       | Process row 1   | Process row 0     |
-//   | Row 2       | Process row 2   | Process row 1     |
-//   | ...         | ...             | ...               |
-//
-//   For processing pixel (i, j) in Stage 3:
-//   - grad_c = grad_buffer[pixel_x] = grad(i, j)   [current row from buffer]
-//   - grad_u = grad_buffer_prev[pixel_x] = grad(i-1, j) [previous row from secondary buffer]
-//   - grad_d = grad_current_input = grad(i+1, j)   [next row from Stage 1]
-//
-//   Architecture Benefits:
-//   - True 3-row gradient access (up, center, down)
-//   - Maintains 1 pixel/clock throughput
-//   - Adds 1 row latency to Stage 3 output
+// Handshake Protocol:
+//   - valid_in/valid_out: Data valid indicators
+//   - ready_in: Downstream back-pressure signal
+//   - ready_out: Always 1 (simple pipeline without skid buffer)
 //
 // Modules Used:
 //   - common_lut_divider: Single-cycle LUT-based divider
+//   - common_pipe: Pipeline register with handshake
 //-----------------------------------------------------------------------------
 
 module stage3_gradient_fusion #(
@@ -73,25 +61,27 @@ module stage3_gradient_fusion #(
     input  wire [GRAD_WIDTH-1:0]       grad,
     input  wire [WIN_SIZE_WIDTH-1:0]   win_size_clip,
     input  wire [DATA_WIDTH-1:0]       center_pixel,
+    output wire                        stage2_ready,
 
     // Configuration
     input  wire [ROW_CNT_WIDTH-1:0]    img_height,
     input  wire [LINE_ADDR_WIDTH-1:0]  img_width,
 
     // Output (s11 signed format)
-    output reg  signed [SIGNED_WIDTH-1:0] blend0_dir_avg,
-    output reg  signed [SIGNED_WIDTH-1:0] blend1_dir_avg,
-    output reg                         stage3_valid,
+    output wire signed [SIGNED_WIDTH-1:0] blend0_dir_avg,
+    output wire signed [SIGNED_WIDTH-1:0] blend1_dir_avg,
+    output wire                         stage3_valid,
+    input  wire                         stage3_ready,
 
     // Pass through signals
     input  wire [LINE_ADDR_WIDTH-1:0]  pixel_x,
     input  wire [ROW_CNT_WIDTH-1:0]    pixel_y,
-    output reg  [LINE_ADDR_WIDTH-1:0]  pixel_x_out,
-    output reg  [ROW_CNT_WIDTH-1:0]    pixel_y_out,
-    output reg  signed [SIGNED_WIDTH-1:0] avg0_u_out,
-    output reg  signed [SIGNED_WIDTH-1:0] avg1_u_out,
-    output reg  [WIN_SIZE_WIDTH-1:0]   win_size_clip_out,
-    output reg  [DATA_WIDTH-1:0]       center_pixel_out
+    output wire [LINE_ADDR_WIDTH-1:0]  pixel_x_out,
+    output wire [ROW_CNT_WIDTH-1:0]    pixel_y_out,
+    output wire signed [SIGNED_WIDTH-1:0] avg0_u_out,
+    output wire signed [SIGNED_WIDTH-1:0] avg1_u_out,
+    output wire [WIN_SIZE_WIDTH-1:0]   win_size_clip_out,
+    output wire [DATA_WIDTH-1:0]       center_pixel_out
 );
 
     //=========================================================================
@@ -99,62 +89,111 @@ module stage3_gradient_fusion #(
     //=========================================================================
     localparam BLEND_WIDTH = SIGNED_WIDTH + GRAD_WIDTH + 2;  // 27-bit for blend sum (signed)
     localparam GRAD_SUM_WIDTH = GRAD_WIDTH + 3;              // 17-bit for grad sum
+    localparam PRODUCT_SHIFT = 26;  // For LUT divider
+
+    //=========================================================================
+    // Ready Signal (Simple Pipeline - Always Ready)
+    //=========================================================================
+    assign stage2_ready = 1'b1;
 
     //=========================================================================
     // Row Delay Control
     //=========================================================================
-    // Row counter to track current processing row
     reg [ROW_CNT_WIDTH-1:0] row_counter;
-    reg                     row_valid;          // At least 1 row has been buffered
-
-    // Column counter for row delay buffer addressing
+    reg                     row_valid;
     reg [LINE_ADDR_WIDTH-1:0] col_counter;
+    reg                     flush_active;
+    reg [LINE_ADDR_WIDTH-1:0] flush_counter;
+    reg                     flush_done;
+    reg                     stage2_valid_d;
 
-    // First row indicator (no valid grad_d available)
     wire is_first_row = (row_counter == 0) || !row_valid;
-
-    // Last row indicator (no next row data available)
-    wire is_last_row = (row_counter >= img_height - 2);  // -2 because we're 1 row behind
+    wire is_last_row = (row_counter >= img_height - 1) || flush_active;
+    wire stage2_stopped = stage2_valid_d && !stage2_valid && row_valid && !flush_done;
 
     //=========================================================================
     // Row Delay Buffer for Stage 2 Outputs
     //=========================================================================
-    // Store Stage 2 outputs for 1 full row duration
-    // These are the signals that Stage 3 will process (delayed by 1 row)
+    reg [GRAD_WIDTH-1:0] grad_line_buf_0 [0:IMG_WIDTH-1];
+    reg [GRAD_WIDTH-1:0] grad_line_buf_1 [0:IMG_WIDTH-1];
+    reg                  grad_buf_sel;
 
-    // Gradient line buffer: stores gradients for 2 rows
-    // buf_0: current row being processed by Stage 3
-    // buf_1: previous row (for grad_u)
-    reg [GRAD_WIDTH-1:0] grad_line_buf_0 [0:IMG_WIDTH-1];  // Current row (row N)
-    reg [GRAD_WIDTH-1:0] grad_line_buf_1 [0:IMG_WIDTH-1];  // Previous row (row N-1)
-    reg                  grad_buf_sel;  // 0: buf_0 is current, 1: buf_1 is current
+    reg signed [SIGNED_WIDTH-1:0] avg0_c_buf_0 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg0_u_buf_0 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg0_d_buf_0 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg0_l_buf_0 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg0_r_buf_0 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg1_c_buf_0 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg1_u_buf_0 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg1_d_buf_0 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg1_l_buf_0 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg1_r_buf_0 [0:IMG_WIDTH-1];
+    reg [DATA_WIDTH-1:0]   center_buf_0 [0:IMG_WIDTH-1];
+    reg [WIN_SIZE_WIDTH-1:0] win_size_buf_0 [0:IMG_WIDTH-1];
+    reg [LINE_ADDR_WIDTH-1:0] pixel_x_buf_0 [0:IMG_WIDTH-1];
+    reg [ROW_CNT_WIDTH-1:0] pixel_y_buf_0 [0:IMG_WIDTH-1];
+    reg                     valid_buf_0 [0:IMG_WIDTH-1];
 
-    // Horizontal gradient shift register for left/right neighbors
-    reg [GRAD_WIDTH-1:0] grad_shift_l;  // Left neighbor (previous column)
+    reg signed [SIGNED_WIDTH-1:0] avg0_c_buf_1 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg0_u_buf_1 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg0_d_buf_1 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg0_l_buf_1 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg0_r_buf_1 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg1_c_buf_1 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg1_u_buf_1 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg1_d_buf_1 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg1_l_buf_1 [0:IMG_WIDTH-1];
+    reg signed [SIGNED_WIDTH-1:0] avg1_r_buf_1 [0:IMG_WIDTH-1];
+    reg [DATA_WIDTH-1:0]   center_buf_1 [0:IMG_WIDTH-1];
+    reg [WIN_SIZE_WIDTH-1:0] win_size_buf_1 [0:IMG_WIDTH-1];
+    reg [LINE_ADDR_WIDTH-1:0] pixel_x_buf_1 [0:IMG_WIDTH-1];
+    reg [ROW_CNT_WIDTH-1:0] pixel_y_buf_1 [0:IMG_WIDTH-1];
+    reg                     valid_buf_1 [0:IMG_WIDTH-1];
 
-    // Row delay buffer for avg signals and metadata (stores 1 full row of data)
-    // These will be read 1 row later by Stage 3 pipeline
-    reg signed [SIGNED_WIDTH-1:0] avg0_c_delay [0:IMG_WIDTH-1];
-    reg signed [SIGNED_WIDTH-1:0] avg0_u_delay [0:IMG_WIDTH-1];
-    reg signed [SIGNED_WIDTH-1:0] avg0_d_delay [0:IMG_WIDTH-1];
-    reg signed [SIGNED_WIDTH-1:0] avg0_l_delay [0:IMG_WIDTH-1];
-    reg signed [SIGNED_WIDTH-1:0] avg0_r_delay [0:IMG_WIDTH-1];
-    reg signed [SIGNED_WIDTH-1:0] avg1_c_delay [0:IMG_WIDTH-1];
-    reg signed [SIGNED_WIDTH-1:0] avg1_u_delay [0:IMG_WIDTH-1];
-    reg signed [SIGNED_WIDTH-1:0] avg1_d_delay [0:IMG_WIDTH-1];
-    reg signed [SIGNED_WIDTH-1:0] avg1_l_delay [0:IMG_WIDTH-1];
-    reg signed [SIGNED_WIDTH-1:0] avg1_r_delay [0:IMG_WIDTH-1];
-    reg [DATA_WIDTH-1:0]   center_pixel_delay [0:IMG_WIDTH-1];
-    reg [WIN_SIZE_WIDTH-1:0] win_size_delay [0:IMG_WIDTH-1];
-    reg [LINE_ADDR_WIDTH-1:0] pixel_x_delay [0:IMG_WIDTH-1];
-    reg [ROW_CNT_WIDTH-1:0] pixel_y_delay [0:IMG_WIDTH-1];
-    reg                     valid_delay [0:IMG_WIDTH-1];
+    reg                     avg_buf_sel;
 
-    // Current gradient from Stage 1/2 (this is grad_d for the delayed row)
-    wire [GRAD_WIDTH-1:0] grad_next_row = grad;  // Gradient of row N+1
+    wire [GRAD_WIDTH-1:0] grad_next_row = grad;
+
+    integer init_i;
+    initial begin
+        for (init_i = 0; init_i < IMG_WIDTH; init_i = init_i + 1) begin
+            grad_line_buf_0[init_i] = {GRAD_WIDTH{1'b0}};
+            grad_line_buf_1[init_i] = {GRAD_WIDTH{1'b0}};
+            avg0_c_buf_0[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg0_u_buf_0[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg0_d_buf_0[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg0_l_buf_0[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg0_r_buf_0[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg1_c_buf_0[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg1_u_buf_0[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg1_d_buf_0[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg1_l_buf_0[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg1_r_buf_0[init_i] = {SIGNED_WIDTH{1'b0}};
+            center_buf_0[init_i] = {DATA_WIDTH{1'b0}};
+            win_size_buf_0[init_i] = {WIN_SIZE_WIDTH{1'b0}};
+            pixel_x_buf_0[init_i] = {LINE_ADDR_WIDTH{1'b0}};
+            pixel_y_buf_0[init_i] = {ROW_CNT_WIDTH{1'b0}};
+            valid_buf_0[init_i] = 1'b0;
+            avg0_c_buf_1[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg0_u_buf_1[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg0_d_buf_1[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg0_l_buf_1[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg0_r_buf_1[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg1_c_buf_1[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg1_u_buf_1[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg1_d_buf_1[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg1_l_buf_1[init_i] = {SIGNED_WIDTH{1'b0}};
+            avg1_r_buf_1[init_i] = {SIGNED_WIDTH{1'b0}};
+            center_buf_1[init_i] = {DATA_WIDTH{1'b0}};
+            win_size_buf_1[init_i] = {WIN_SIZE_WIDTH{1'b0}};
+            pixel_x_buf_1[init_i] = {LINE_ADDR_WIDTH{1'b0}};
+            pixel_y_buf_1[init_i] = {ROW_CNT_WIDTH{1'b0}};
+            valid_buf_1[init_i] = 1'b0;
+        end
+    end
 
     //=========================================================================
-    // Row Delay Buffer Write (Stage 2 outputs -> delay buffer)
+    // Row Delay Buffer Write
     //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -162,44 +201,72 @@ module stage3_gradient_fusion #(
             col_counter <= {LINE_ADDR_WIDTH{1'b0}};
             row_valid   <= 1'b0;
             grad_buf_sel <= 1'b0;
-            grad_shift_l <= {GRAD_WIDTH{1'b0}};
-        end else if (enable) begin
-            // Update horizontal shift register for left neighbor
-            grad_shift_l <= grad;
+            avg_buf_sel <= 1'b0;
+            flush_active <= 1'b0;
+            flush_counter <= {LINE_ADDR_WIDTH{1'b0}};
+            flush_done <= 1'b0;
+            stage2_valid_d <= 1'b0;
+        end else if (enable && stage3_ready) begin
+            stage2_valid_d <= stage2_valid;
 
-            // Write Stage 2 outputs to row delay buffer
+            if (stage2_stopped && !flush_active) begin
+                flush_active <= 1'b1;
+                flush_counter <= {LINE_ADDR_WIDTH{1'b0}};
+            end else if (flush_active) begin
+                if (flush_counter >= img_width - 1) begin
+                    flush_active <= 1'b0;
+                    flush_done <= 1'b1;
+                end else begin
+                    flush_counter <= flush_counter + 1'b1;
+                end
+            end
+
             if (stage2_valid) begin
-                // Store avg signals and metadata for delayed processing
-                avg0_c_delay[col_counter] <= avg0_c;
-                avg0_u_delay[col_counter] <= avg0_u;
-                avg0_d_delay[col_counter] <= avg0_d;
-                avg0_l_delay[col_counter] <= avg0_l;
-                avg0_r_delay[col_counter] <= avg0_r;
-                avg1_c_delay[col_counter] <= avg1_c;
-                avg1_u_delay[col_counter] <= avg1_u;
-                avg1_d_delay[col_counter] <= avg1_d;
-                avg1_l_delay[col_counter] <= avg1_l;
-                avg1_r_delay[col_counter] <= avg1_r;
-                center_pixel_delay[col_counter] <= center_pixel;
-                win_size_delay[col_counter]     <= win_size_clip;
-                pixel_x_delay[col_counter]      <= pixel_x;
-                pixel_y_delay[col_counter]      <= pixel_y;
-                valid_delay[col_counter]        <= stage2_valid;
+                if (avg_buf_sel == 0) begin
+                    avg0_c_buf_0[col_counter] <= avg0_c;
+                    avg0_u_buf_0[col_counter] <= avg0_u;
+                    avg0_d_buf_0[col_counter] <= avg0_d;
+                    avg0_l_buf_0[col_counter] <= avg0_l;
+                    avg0_r_buf_0[col_counter] <= avg0_r;
+                    avg1_c_buf_0[col_counter] <= avg1_c;
+                    avg1_u_buf_0[col_counter] <= avg1_u;
+                    avg1_d_buf_0[col_counter] <= avg1_d;
+                    avg1_l_buf_0[col_counter] <= avg1_l;
+                    avg1_r_buf_0[col_counter] <= avg1_r;
+                    center_buf_0[col_counter] <= center_pixel;
+                    win_size_buf_0[col_counter] <= win_size_clip;
+                    pixel_x_buf_0[col_counter] <= pixel_x;
+                    pixel_y_buf_0[col_counter] <= pixel_y;
+                    valid_buf_0[col_counter] <= stage2_valid;
+                end else begin
+                    avg0_c_buf_1[col_counter] <= avg0_c;
+                    avg0_u_buf_1[col_counter] <= avg0_u;
+                    avg0_d_buf_1[col_counter] <= avg0_d;
+                    avg0_l_buf_1[col_counter] <= avg0_l;
+                    avg0_r_buf_1[col_counter] <= avg0_r;
+                    avg1_c_buf_1[col_counter] <= avg1_c;
+                    avg1_u_buf_1[col_counter] <= avg1_u;
+                    avg1_d_buf_1[col_counter] <= avg1_d;
+                    avg1_l_buf_1[col_counter] <= avg1_l;
+                    avg1_r_buf_1[col_counter] <= avg1_r;
+                    center_buf_1[col_counter] <= center_pixel;
+                    win_size_buf_1[col_counter] <= win_size_clip;
+                    pixel_x_buf_1[col_counter] <= pixel_x;
+                    pixel_y_buf_1[col_counter] <= pixel_y;
+                    valid_buf_1[col_counter] <= stage2_valid;
+                end
 
-                // Store current gradient to line buffer (for next row's grad_c)
                 if (grad_buf_sel)
                     grad_line_buf_1[col_counter] <= grad;
                 else
                     grad_line_buf_0[col_counter] <= grad;
 
-                // Update column counter
                 if (col_counter >= img_width - 1) begin
                     col_counter <= {LINE_ADDR_WIDTH{1'b0}};
-                    // Swap buffer selection at end of row
                     grad_buf_sel <= ~grad_buf_sel;
-                    // Update row counter
+                    avg_buf_sel <= ~avg_buf_sel;
                     row_counter <= row_counter + 1'b1;
-                    row_valid   <= 1'b1;  // After first row, we have valid delayed data
+                    row_valid   <= 1'b1;
                 end else begin
                     col_counter <= col_counter + 1'b1;
                 end
@@ -208,443 +275,472 @@ module stage3_gradient_fusion #(
     end
 
     //=========================================================================
-    // Cycle 0: Read from Row Delay Buffer and Gradient Fetch
+    // Cycle 0: Read from Previous Buffer
     //=========================================================================
-    // Read delayed data from row buffer (1 row behind Stage 2)
-    // The delayed pixel_x determines which column we're processing
+    wire [LINE_ADDR_WIDTH-1:0] rd_addr = flush_active ? flush_counter : col_counter;
 
-    // Read address is the current col_counter (we're always 1 row behind)
-    wire [LINE_ADDR_WIDTH-1:0] rd_addr = col_counter;
+    wire signed [SIGNED_WIDTH-1:0] avg0_c_rd = avg_buf_sel ? avg0_c_buf_0[rd_addr] : avg0_c_buf_1[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg0_u_rd = avg_buf_sel ? avg0_u_buf_0[rd_addr] : avg0_u_buf_1[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg0_d_rd = avg_buf_sel ? avg0_d_buf_0[rd_addr] : avg0_d_buf_1[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg0_l_rd = avg_buf_sel ? avg0_l_buf_0[rd_addr] : avg0_l_buf_1[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg0_r_rd = avg_buf_sel ? avg0_r_buf_0[rd_addr] : avg0_r_buf_1[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg1_c_rd = avg_buf_sel ? avg1_c_buf_0[rd_addr] : avg1_c_buf_1[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg1_u_rd = avg_buf_sel ? avg1_u_buf_0[rd_addr] : avg1_u_buf_1[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg1_d_rd = avg_buf_sel ? avg1_d_buf_0[rd_addr] : avg1_d_buf_1[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg1_l_rd = avg_buf_sel ? avg1_l_buf_0[rd_addr] : avg1_l_buf_1[rd_addr];
+    wire signed [SIGNED_WIDTH-1:0] avg1_r_rd = avg_buf_sel ? avg1_r_buf_0[rd_addr] : avg1_r_buf_1[rd_addr];
+    wire [DATA_WIDTH-1:0]   center_rd = avg_buf_sel ? center_buf_0[rd_addr] : center_buf_1[rd_addr];
+    wire [WIN_SIZE_WIDTH-1:0] win_size_rd = avg_buf_sel ? win_size_buf_0[rd_addr] : win_size_buf_1[rd_addr];
+    wire [LINE_ADDR_WIDTH-1:0] pixel_x_rd = avg_buf_sel ? pixel_x_buf_0[rd_addr] : pixel_x_buf_1[rd_addr];
+    wire [ROW_CNT_WIDTH-1:0] pixel_y_rd = avg_buf_sel ? pixel_y_buf_0[rd_addr] : pixel_y_buf_1[rd_addr];
+    wire                    valid_rd = avg_buf_sel ? valid_buf_0[rd_addr] : valid_buf_1[rd_addr];
 
-    // Delayed Stage 2 data (for the pixel being processed by Stage 3)
-    wire signed [SIGNED_WIDTH-1:0] avg0_c_rd = avg0_c_delay[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg0_u_rd = avg0_u_delay[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg0_d_rd = avg0_d_delay[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg0_l_rd = avg0_l_delay[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg0_r_rd = avg0_r_delay[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg1_c_rd = avg1_c_delay[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg1_u_rd = avg1_u_delay[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg1_d_rd = avg1_d_delay[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg1_l_rd = avg1_l_delay[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg1_r_rd = avg1_r_delay[rd_addr];
-    wire [DATA_WIDTH-1:0]   center_rd = center_pixel_delay[rd_addr];
-    wire [WIN_SIZE_WIDTH-1:0] win_size_rd = win_size_delay[rd_addr];
-    wire [LINE_ADDR_WIDTH-1:0] pixel_x_rd = pixel_x_delay[rd_addr];
-    wire [ROW_CNT_WIDTH-1:0] pixel_y_rd = pixel_y_delay[rd_addr];
-    wire                    valid_rd = valid_delay[rd_addr];
-
-    // Gradient fetch for the delayed pixel
-    // grad_c: current row gradient (from buffer - stored when this row was processed by Stage 1)
     wire [GRAD_WIDTH-1:0] grad_c = grad_buf_sel ? grad_line_buf_0[rd_addr] : grad_line_buf_1[rd_addr];
-
-    // grad_u: previous row gradient (from secondary buffer)
     wire [GRAD_WIDTH-1:0] grad_u = grad_buf_sel ? grad_line_buf_1[rd_addr] : grad_line_buf_0[rd_addr];
-
-    // grad_d: next row gradient (current input from Stage 1/2) - THIS IS THE KEY CHANGE!
-    // Since Stage 3 is 1 row behind, the current grad input IS the next row's gradient
     wire [GRAD_WIDTH-1:0] grad_d = grad_next_row;
-
-    // grad_l: left neighbor (previous column in same row)
-    wire [GRAD_WIDTH-1:0] grad_l = grad_shift_l;
-
-    // grad_r: right neighbor (simplified - same as center)
+    wire [LINE_ADDR_WIDTH-1:0] grad_l_addr = (rd_addr > 0) ? rd_addr - 1'b1 : {LINE_ADDR_WIDTH{1'b0}};
+    wire [GRAD_WIDTH-1:0] grad_l_raw = grad_buf_sel ? grad_line_buf_0[grad_l_addr] : grad_line_buf_1[grad_l_addr];
+    wire [GRAD_WIDTH-1:0] grad_l = (rd_addr == 0) ? grad_c : grad_l_raw;
     wire [GRAD_WIDTH-1:0] grad_r = grad_c;
 
-    // Boundary handling for first and last rows
     wire [GRAD_WIDTH-1:0] grad_u_bound = is_first_row ? grad_c : grad_u;
     wire [GRAD_WIDTH-1:0] grad_d_bound = is_last_row ? grad_c : grad_d;
 
-    // Pipeline registers for Cycle 0
-    reg [GRAD_WIDTH-1:0]   grad_c_s0, grad_u_s0, grad_d_s0, grad_l_s0, grad_r_s0;
-    reg signed [SIGNED_WIDTH-1:0] avg0_c_s0, avg0_u_s0, avg0_d_s0, avg0_l_s0, avg0_r_s0;
-    reg signed [SIGNED_WIDTH-1:0] avg1_c_s0, avg1_u_s0, avg1_d_s0, avg1_l_s0, avg1_r_s0;
-    reg                    valid_s0;
-    reg [DATA_WIDTH-1:0]   center_s0;
-    reg [WIN_SIZE_WIDTH-1:0] win_size_s0;
-    reg [LINE_ADDR_WIDTH-1:0] pixel_x_s0;
-    reg [ROW_CNT_WIDTH-1:0] pixel_y_s0;
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            grad_c_s0  <= {GRAD_WIDTH{1'b0}};
-            grad_u_s0  <= {GRAD_WIDTH{1'b0}};
-            grad_d_s0  <= {GRAD_WIDTH{1'b0}};
-            grad_l_s0  <= {GRAD_WIDTH{1'b0}};
-            grad_r_s0  <= {GRAD_WIDTH{1'b0}};
-            avg0_c_s0  <= {SIGNED_WIDTH{1'b0}};
-            avg0_u_s0  <= {SIGNED_WIDTH{1'b0}};
-            avg0_d_s0  <= {SIGNED_WIDTH{1'b0}};
-            avg0_l_s0  <= {SIGNED_WIDTH{1'b0}};
-            avg0_r_s0  <= {SIGNED_WIDTH{1'b0}};
-            avg1_c_s0  <= {SIGNED_WIDTH{1'b0}};
-            avg1_u_s0  <= {SIGNED_WIDTH{1'b0}};
-            avg1_d_s0  <= {SIGNED_WIDTH{1'b0}};
-            avg1_l_s0  <= {SIGNED_WIDTH{1'b0}};
-            avg1_r_s0  <= {SIGNED_WIDTH{1'b0}};
-            valid_s0   <= 1'b0;
-            center_s0  <= {DATA_WIDTH{1'b0}};
-            win_size_s0 <= {WIN_SIZE_WIDTH{1'b0}};
-            pixel_x_s0 <= {LINE_ADDR_WIDTH{1'b0}};
-            pixel_y_s0 <= {ROW_CNT_WIDTH{1'b0}};
-        end else if (enable) begin
-            // Only process if we have valid delayed data (after first row)
-            if (row_valid && stage2_valid) begin
-                // Use delayed data from row buffer
-                grad_c_s0  <= grad_c;
-                grad_u_s0  <= grad_u_bound;
-                grad_d_s0  <= grad_d_bound;
-                grad_l_s0  <= grad_l;
-                grad_r_s0  <= grad_r;
-                avg0_c_s0  <= avg0_c_rd;
-                avg0_u_s0  <= avg0_u_rd;
-                avg0_d_s0  <= avg0_d_rd;
-                avg0_l_s0  <= avg0_l_rd;
-                avg0_r_s0  <= avg0_r_rd;
-                avg1_c_s0  <= avg1_c_rd;
-                avg1_u_s0  <= avg1_u_rd;
-                avg1_d_s0  <= avg1_d_rd;
-                avg1_l_s0  <= avg1_l_rd;
-                avg1_r_s0  <= avg1_r_rd;
-                valid_s0   <= valid_rd;
-                center_s0  <= center_rd;
-                win_size_s0 <= win_size_rd;
-                pixel_x_s0 <= pixel_x_rd;
-                pixel_y_s0 <= pixel_y_rd;
-            end else begin
-                // No valid data yet, clear pipeline
-                valid_s0 <= 1'b0;
-            end
-        end
-    end
+    // Valid signal for Cycle 0
+    wire valid_s0_comb = row_valid && valid_rd && (stage2_valid || flush_active);
 
     //=========================================================================
-    // Cycle 1-2: Gradient Sorting Network
+    // Cycle 0 Pipeline Registers
     //=========================================================================
-    // 5-input descending sort using comparison network
-    // Sort: s0 >= s1 >= s2 >= s3 >= s4
+    localparam PIPE_S0_WIDTH = 5 * GRAD_WIDTH + 10 * SIGNED_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
 
-    // Cycle 1: First stage comparisons
+    wire [PIPE_S0_WIDTH-1:0] pipe_s0_din = {grad_c, grad_u_bound, grad_d_bound, grad_l, grad_r,
+                                            avg0_c_rd, avg0_u_rd, avg0_d_rd, avg0_l_rd, avg0_r_rd,
+                                            avg1_c_rd, avg1_u_rd, avg1_d_rd, avg1_l_rd, avg1_r_rd,
+                                            win_size_rd, pixel_x_rd, pixel_y_rd, center_rd, valid_s0_comb};
+
+    wire [PIPE_S0_WIDTH-1:0] pipe_s0_dout;
+    wire                     valid_s0;
+
+    common_pipe #(
+        .DATA_WIDTH (PIPE_S0_WIDTH),
+        .STAGES     (1),
+        .RESET_VAL  (0)
+    ) u_pipe_s0 (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .din       (pipe_s0_din),
+        .valid_in  (valid_s0_comb),
+        .ready_out (),
+        .dout      (pipe_s0_dout),
+        .valid_out (valid_s0),
+        .ready_in  (stage3_ready)
+    );
+
+    // Unpack signals
+    wire [GRAD_WIDTH-1:0]   grad_c_s0  = pipe_s0_dout[PIPE_S0_WIDTH-1 -: GRAD_WIDTH];
+    wire [GRAD_WIDTH-1:0]   grad_u_s0  = pipe_s0_dout[PIPE_S0_WIDTH-1-GRAD_WIDTH -: GRAD_WIDTH];
+    wire [GRAD_WIDTH-1:0]   grad_d_s0  = pipe_s0_dout[PIPE_S0_WIDTH-1-2*GRAD_WIDTH -: GRAD_WIDTH];
+    wire [GRAD_WIDTH-1:0]   grad_l_s0  = pipe_s0_dout[PIPE_S0_WIDTH-1-3*GRAD_WIDTH -: GRAD_WIDTH];
+    wire [GRAD_WIDTH-1:0]   grad_r_s0  = pipe_s0_dout[PIPE_S0_WIDTH-1-4*GRAD_WIDTH -: GRAD_WIDTH];
+
+    wire signed [SIGNED_WIDTH-1:0] avg0_c_s0 = pipe_s0_dout[5*GRAD_WIDTH + 10*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg0_u_s0 = pipe_s0_dout[5*GRAD_WIDTH + 9*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg0_d_s0 = pipe_s0_dout[5*GRAD_WIDTH + 8*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg0_l_s0 = pipe_s0_dout[5*GRAD_WIDTH + 7*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg0_r_s0 = pipe_s0_dout[5*GRAD_WIDTH + 6*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_c_s0 = pipe_s0_dout[5*GRAD_WIDTH + 5*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_u_s0 = pipe_s0_dout[5*GRAD_WIDTH + 4*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_d_s0 = pipe_s0_dout[5*GRAD_WIDTH + 3*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_l_s0 = pipe_s0_dout[5*GRAD_WIDTH + 2*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_r_s0 = pipe_s0_dout[5*GRAD_WIDTH + SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
+
+    wire [WIN_SIZE_WIDTH-1:0]   win_size_s0 = pipe_s0_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s0  = pipe_s0_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s0  = pipe_s0_dout[ROW_CNT_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [DATA_WIDTH-1:0]       center_s0   = pipe_s0_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
+
+    //=========================================================================
+    // Cycle 1: Gradient Sort (First Stage)
+    //=========================================================================
     wire [GRAD_WIDTH-1:0] g0 = grad_c_s0;
     wire [GRAD_WIDTH-1:0] g1 = grad_u_s0;
     wire [GRAD_WIDTH-1:0] g2 = grad_d_s0;
     wire [GRAD_WIDTH-1:0] g3 = grad_l_s0;
     wire [GRAD_WIDTH-1:0] g4 = grad_r_s0;
 
-    // Comparison swap function
-    function [2*GRAD_WIDTH-1:0] cmp_swap;
-        input [GRAD_WIDTH-1:0] a, b;
+    //=========================================================================
+    // Cycle 1 Pipeline Registers
+    //=========================================================================
+    localparam PIPE_S1_WIDTH = 5 * GRAD_WIDTH + 10 * SIGNED_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
+
+    wire [PIPE_S1_WIDTH-1:0] pipe_s1_din = {g0, g1, g2, g3, g4,
+                                            avg0_c_s0, avg0_u_s0, avg0_d_s0, avg0_l_s0, avg0_r_s0,
+                                            avg1_c_s0, avg1_u_s0, avg1_d_s0, avg1_l_s0, avg1_r_s0,
+                                            win_size_s0, pixel_x_s0, pixel_y_s0, center_s0, valid_s0};
+
+    wire [PIPE_S1_WIDTH-1:0] pipe_s1_dout;
+    wire                     valid_s1;
+
+    common_pipe #(
+        .DATA_WIDTH (PIPE_S1_WIDTH),
+        .STAGES     (1),
+        .RESET_VAL  (0)
+    ) u_pipe_s1 (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .din       (pipe_s1_din),
+        .valid_in  (valid_s0),
+        .ready_out (),
+        .dout      (pipe_s1_dout),
+        .valid_out (valid_s1),
+        .ready_in  (stage3_ready)
+    );
+
+    // Unpack signals
+    wire [GRAD_WIDTH-1:0]   g_s1 [0:4];
+    genvar gi;
+    generate
+        for (gi = 0; gi < 5; gi = gi + 1) begin : gen_g_s1
+            assign g_s1[gi] = pipe_s1_dout[PIPE_S1_WIDTH-1-gi*GRAD_WIDTH -: GRAD_WIDTH];
+        end
+    endgenerate
+
+    wire signed [SIGNED_WIDTH-1:0] avg0_s1 [0:4], avg1_s1 [0:4];
+    generate
+        for (gi = 0; gi < 5; gi = gi + 1) begin : gen_avg0_s1
+            assign avg0_s1[gi] = pipe_s1_dout[5*GRAD_WIDTH + (9-gi)*SIGNED_WIDTH +: SIGNED_WIDTH];
+            assign avg1_s1[gi] = pipe_s1_dout[5*GRAD_WIDTH + 5*SIGNED_WIDTH + (4-gi)*SIGNED_WIDTH +: SIGNED_WIDTH];
+        end
+    endgenerate
+
+    wire [WIN_SIZE_WIDTH-1:0]   win_size_s1 = pipe_s1_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s1  = pipe_s1_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s1  = pipe_s1_dout[ROW_CNT_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [DATA_WIDTH-1:0]       center_s1   = pipe_s1_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
+
+    // Pass-through for avg0_u and avg1_u
+    wire signed [SIGNED_WIDTH-1:0] avg0_u_s1 = avg0_s1[1];
+    wire signed [SIGNED_WIDTH-1:0] avg1_u_s1 = avg1_s1[1];
+
+    //=========================================================================
+    // Cycle 2: Complete Sorting (Full 5-input descending sort)
+    //=========================================================================
+    function [5*GRAD_WIDTH-1:0] sort_5_desc;
+        input [GRAD_WIDTH-1:0] in0, in1, in2, in3, in4;
+        reg [GRAD_WIDTH-1:0] a, b, c, d, e;
+        reg [GRAD_WIDTH-1:0] tmp;
         begin
-            cmp_swap = (a >= b) ? {a, b} : {b, a};
+            a = in0; b = in1; c = in2; d = in3; e = in4;
+            if (b > a) begin tmp = a; a = b; b = tmp; end
+            if (c > b) begin tmp = b; b = c; c = tmp; end
+            if (d > c) begin tmp = c; c = d; d = tmp; end
+            if (e > d) begin tmp = d; d = e; e = tmp; end
+            if (b > a) begin tmp = a; a = b; b = tmp; end
+            if (c > b) begin tmp = b; b = c; c = tmp; end
+            if (d > c) begin tmp = c; c = d; d = tmp; end
+            if (b > a) begin tmp = a; a = b; b = tmp; end
+            if (c > b) begin tmp = b; b = c; c = tmp; end
+            if (b > a) begin tmp = a; a = b; b = tmp; end
+            sort_5_desc = {e, d, c, b, a};
         end
     endfunction
 
-    wire [GRAD_WIDTH-1:0] p0_max, p0_min, p1_max, p1_min, p2_max, p2_min;
-    assign {p0_max, p0_min} = cmp_swap(g0, g1);
-    assign {p1_max, p1_min} = cmp_swap(g2, g3);
-    assign {p2_max, p2_min} = cmp_swap(g3, g4);
-
-    // Pipeline registers for Cycle 1
-    reg [GRAD_WIDTH-1:0]   g_s1 [0:4];
-    reg signed [SIGNED_WIDTH-1:0] avg0_s1 [0:4], avg1_s1 [0:4];
-    reg                    valid_s1;
-    reg [DATA_WIDTH-1:0]   center_s1;
-    reg [WIN_SIZE_WIDTH-1:0] win_size_s1;
-    reg [LINE_ADDR_WIDTH-1:0] pixel_x_s1;
-    reg [ROW_CNT_WIDTH-1:0] pixel_y_s1;
-    // Pass-through pipeline for avg0_u and avg1_u
-    reg signed [SIGNED_WIDTH-1:0] avg0_u_s1, avg1_u_s1;
-
-    integer i;
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            for (i = 0; i < 5; i = i + 1) begin
-                g_s1[i]    <= {GRAD_WIDTH{1'b0}};
-                avg0_s1[i] <= {SIGNED_WIDTH{1'b0}};
-                avg1_s1[i] <= {SIGNED_WIDTH{1'b0}};
-            end
-            valid_s1   <= 1'b0;
-            center_s1  <= {DATA_WIDTH{1'b0}};
-            win_size_s1 <= {WIN_SIZE_WIDTH{1'b0}};
-            pixel_x_s1 <= {LINE_ADDR_WIDTH{1'b0}};
-            pixel_y_s1 <= {ROW_CNT_WIDTH{1'b0}};
-            avg0_u_s1  <= {SIGNED_WIDTH{1'b0}};
-            avg1_u_s1  <= {SIGNED_WIDTH{1'b0}};
-        end else if (enable) begin
-            // Simplified sort output (partial sorting)
-            g_s1[0]    <= p0_max;  // Largest candidate
-            g_s1[1]    <= p1_max;
-            g_s1[2]    <= g2;      // Middle
-            g_s1[3]    <= p0_min;
-            g_s1[4]    <= p1_min;  // Smallest candidate
-            // Reorder averages accordingly
-            avg0_s1[0] <= avg0_c_s0;
-            avg0_s1[1] <= avg0_u_s0;
-            avg0_s1[2] <= avg0_d_s0;
-            avg0_s1[3] <= avg0_l_s0;
-            avg0_s1[4] <= avg0_r_s0;
-            avg1_s1[0] <= avg1_c_s0;
-            avg1_s1[1] <= avg1_u_s0;
-            avg1_s1[2] <= avg1_d_s0;
-            avg1_s1[3] <= avg1_l_s0;
-            avg1_s1[4] <= avg1_r_s0;
-            valid_s1   <= valid_s0;
-            center_s1  <= center_s0;
-            win_size_s1 <= win_size_s0;
-            pixel_x_s1 <= pixel_x_s0;
-            pixel_y_s1 <= pixel_y_s0;
-            // Pass-through pipeline
-            avg0_u_s1  <= avg0_u_s0;
-            avg1_u_s1  <= avg1_u_s0;
-        end
-    end
-
-    //=========================================================================
-    // Cycle 2: Complete Sorting
-    //=========================================================================
-    // Final sort stage
+    wire [5*GRAD_WIDTH-1:0] sorted_pack = sort_5_desc(g_s1[0], g_s1[1], g_s1[2], g_s1[3], g_s1[4]);
     wire [GRAD_WIDTH-1:0] g_sorted [0:4];
-    wire [GRAD_WIDTH-1:0] max_01 = (g_s1[0] >= g_s1[1]) ? g_s1[0] : g_s1[1];
-    wire [GRAD_WIDTH-1:0] min_01 = (g_s1[0] >= g_s1[1]) ? g_s1[1] : g_s1[0];
-    wire [GRAD_WIDTH-1:0] max_34 = (g_s1[3] >= g_s1[4]) ? g_s1[3] : g_s1[4];
-    wire [GRAD_WIDTH-1:0] min_34 = (g_s1[3] >= g_s1[4]) ? g_s1[4] : g_s1[3];
+    assign {g_sorted[4], g_sorted[3], g_sorted[2], g_sorted[1], g_sorted[0]} = sorted_pack;
 
-    assign g_sorted[0] = (max_01 >= max_34) ? max_01 : max_34;  // Largest
-    assign g_sorted[4] = (min_01 <= min_34) ? min_01 : min_34;  // Smallest
+    //=========================================================================
+    // Cycle 2 Pipeline Registers
+    //=========================================================================
+    localparam PIPE_S2_WIDTH = 5 * GRAD_WIDTH + 10 * SIGNED_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
 
-    // Middle values (simplified)
-    wire [GRAD_WIDTH-1:0] mid_vals [0:2];
-    assign mid_vals[0] = g_s1[2];
-    assign mid_vals[1] = (min_01 >= max_34) ? min_01 : max_34;
-    assign mid_vals[2] = (min_01 <= max_34) ? min_01 : max_34;
+    wire [PIPE_S2_WIDTH-1:0] pipe_s2_din = {g_sorted[0], g_sorted[1], g_sorted[2], g_sorted[3], g_sorted[4],
+                                            avg0_s1[0], avg0_s1[1], avg0_s1[2], avg0_s1[3], avg0_s1[4],
+                                            avg1_s1[0], avg1_s1[1], avg1_s1[2], avg1_s1[3], avg1_s1[4],
+                                            win_size_s1, pixel_x_s1, pixel_y_s1, center_s1, valid_s1};
 
-    // Sort middle values
-    wire [GRAD_WIDTH-1:0] mid_max = (mid_vals[0] >= mid_vals[1]) ?
-                                    ((mid_vals[0] >= mid_vals[2]) ? mid_vals[0] : mid_vals[2]) :
-                                    ((mid_vals[1] >= mid_vals[2]) ? mid_vals[1] : mid_vals[2]);
-    wire [GRAD_WIDTH-1:0] mid_min = (mid_vals[0] <= mid_vals[1]) ?
-                                    ((mid_vals[0] <= mid_vals[2]) ? mid_vals[0] : mid_vals[2]) :
-                                    ((mid_vals[1] <= mid_vals[2]) ? mid_vals[1] : mid_vals[2]);
-    wire [GRAD_WIDTH-1:0] mid_mid = (mid_vals[0] >= mid_vals[1]) ?
-                                    ((mid_vals[0] <= mid_vals[2]) ? mid_vals[0] :
-                                     ((mid_vals[1] >= mid_vals[2]) ? mid_vals[1] : mid_vals[2])) :
-                                    ((mid_vals[1] <= mid_vals[2]) ? mid_vals[2] : mid_vals[1]);
+    wire [PIPE_S2_WIDTH-1:0] pipe_s2_dout;
+    wire                     valid_s2;
 
-    assign g_sorted[1] = mid_max;
-    assign g_sorted[2] = mid_mid;
-    assign g_sorted[3] = mid_min;
+    common_pipe #(
+        .DATA_WIDTH (PIPE_S2_WIDTH),
+        .STAGES     (1),
+        .RESET_VAL  (0)
+    ) u_pipe_s2 (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .din       (pipe_s2_din),
+        .valid_in  (valid_s1),
+        .ready_out (),
+        .dout      (pipe_s2_dout),
+        .valid_out (valid_s2),
+        .ready_in  (stage3_ready)
+    );
 
-    // Pipeline registers for Cycle 2
-    reg [GRAD_WIDTH-1:0]   g_s2 [0:4];
-    reg signed [SIGNED_WIDTH-1:0] avg0_s2 [0:4], avg1_s2 [0:4];
-    reg                    valid_s2;
-    reg [DATA_WIDTH-1:0]   center_s2;
-    reg [WIN_SIZE_WIDTH-1:0] win_size_s2;
-    reg [LINE_ADDR_WIDTH-1:0] pixel_x_s2;
-    reg [ROW_CNT_WIDTH-1:0] pixel_y_s2;
-    // Pass-through pipeline for avg0_u and avg1_u
-    reg signed [SIGNED_WIDTH-1:0] avg0_u_s2, avg1_u_s2;
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            for (i = 0; i < 5; i = i + 1) begin
-                g_s2[i]    <= {GRAD_WIDTH{1'b0}};
-                avg0_s2[i] <= {SIGNED_WIDTH{1'b0}};
-                avg1_s2[i] <= {SIGNED_WIDTH{1'b0}};
-            end
-            valid_s2   <= 1'b0;
-            center_s2  <= {DATA_WIDTH{1'b0}};
-            win_size_s2 <= {WIN_SIZE_WIDTH{1'b0}};
-            pixel_x_s2 <= {LINE_ADDR_WIDTH{1'b0}};
-            pixel_y_s2 <= {ROW_CNT_WIDTH{1'b0}};
-            avg0_u_s2  <= {SIGNED_WIDTH{1'b0}};
-            avg1_u_s2  <= {SIGNED_WIDTH{1'b0}};
-        end else if (enable) begin
-            for (i = 0; i < 5; i = i + 1) begin
-                g_s2[i]    <= g_sorted[i];
-                avg0_s2[i] <= avg0_s1[i];
-                avg1_s2[i] <= avg1_s1[i];
-            end
-            valid_s2   <= valid_s1;
-            center_s2  <= center_s1;
-            win_size_s2 <= win_size_s1;
-            pixel_x_s2 <= pixel_x_s1;
-            pixel_y_s2 <= pixel_y_s1;
-            // Pass-through pipeline
-            avg0_u_s2  <= avg0_u_s1;
-            avg1_u_s2  <= avg1_u_s1;
+    // Unpack signals
+    wire [GRAD_WIDTH-1:0]   g_s2 [0:4];
+    generate
+        for (gi = 0; gi < 5; gi = gi + 1) begin : gen_g_s2
+            assign g_s2[gi] = pipe_s2_dout[PIPE_S2_WIDTH-1-gi*GRAD_WIDTH -: GRAD_WIDTH];
         end
-    end
+    endgenerate
+
+    wire signed [SIGNED_WIDTH-1:0] avg0_s2 [0:4], avg1_s2 [0:4];
+    generate
+        for (gi = 0; gi < 5; gi = gi + 1) begin : gen_avg_s2
+            assign avg0_s2[gi] = pipe_s2_dout[5*GRAD_WIDTH + (9-gi)*SIGNED_WIDTH +: SIGNED_WIDTH];
+            assign avg1_s2[gi] = pipe_s2_dout[5*GRAD_WIDTH + 5*SIGNED_WIDTH + (4-gi)*SIGNED_WIDTH +: SIGNED_WIDTH];
+        end
+    endgenerate
+
+    wire [WIN_SIZE_WIDTH-1:0]   win_size_s2 = pipe_s2_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s2  = pipe_s2_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s2  = pipe_s2_dout[ROW_CNT_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [DATA_WIDTH-1:0]       center_s2   = pipe_s2_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
+
+    wire signed [SIGNED_WIDTH-1:0] avg0_u_s2 = avg0_s2[1];
+    wire signed [SIGNED_WIDTH-1:0] avg1_u_s2 = avg1_s2[1];
 
     //=========================================================================
     // Cycle 3: Weighted Multiplication (Signed)
     //=========================================================================
-    // Signed multiplication: avg (s11) * grad (u14) -> signed result
-    wire signed [SIGNED_WIDTH+GRAD_WIDTH-1:0] blend0_partial [0:4];
-    wire signed [SIGNED_WIDTH+GRAD_WIDTH-1:0] blend1_partial [0:4];
+    wire signed [SIGNED_WIDTH+GRAD_WIDTH:0] blend0_partial [0:4];
+    wire signed [SIGNED_WIDTH+GRAD_WIDTH:0] blend1_partial [0:4];
 
-    genvar gi;
+    genvar mi;
     generate
-        for (gi = 0; gi < 5; gi = gi + 1) begin : gen_mul
-            // Signed avg * unsigned grad = signed result
-            assign blend0_partial[gi] = avg0_s2[gi] * $signed({1'b0, g_s2[gi]});
-            assign blend1_partial[gi] = avg1_s2[gi] * $signed({1'b0, g_s2[gi]});
+        for (mi = 0; mi < 5; mi = mi + 1) begin : gen_mul
+            assign blend0_partial[mi] = avg0_s2[mi] * $signed({1'b0, g_s2[mi]});
+            assign blend1_partial[mi] = avg1_s2[mi] * $signed({1'b0, g_s2[mi]});
         end
     endgenerate
 
-    // Pipeline registers for Cycle 3
-    reg signed [SIGNED_WIDTH+GRAD_WIDTH-1:0] blend0_p_s3 [0:4];
-    reg signed [SIGNED_WIDTH+GRAD_WIDTH-1:0] blend1_p_s3 [0:4];
-    reg [GRAD_WIDTH-1:0]            g_s3 [0:4];
-    reg                             valid_s3;
-    reg [DATA_WIDTH-1:0]            center_s3;
-    reg [WIN_SIZE_WIDTH-1:0]        win_size_s3;
-    reg [LINE_ADDR_WIDTH-1:0]       pixel_x_s3;
-    reg [ROW_CNT_WIDTH-1:0]         pixel_y_s3;
-    // Pass-through pipeline for avg0_u and avg1_u
-    reg signed [SIGNED_WIDTH-1:0]   avg0_u_s3, avg1_u_s3;
+    //=========================================================================
+    // Cycle 3 Pipeline Registers
+    //=========================================================================
+    localparam PIPE_S3_WIDTH = 10 * (SIGNED_WIDTH + GRAD_WIDTH + 1) + 5 * GRAD_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
 
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            for (i = 0; i < 5; i = i + 1) begin
-                blend0_p_s3[i] <= {SIGNED_WIDTH+GRAD_WIDTH{1'b0}};
-                blend1_p_s3[i] <= {SIGNED_WIDTH+GRAD_WIDTH{1'b0}};
-                g_s3[i]        <= {GRAD_WIDTH{1'b0}};
-            end
-            valid_s3   <= 1'b0;
-            center_s3  <= {DATA_WIDTH{1'b0}};
-            win_size_s3 <= {WIN_SIZE_WIDTH{1'b0}};
-            pixel_x_s3 <= {LINE_ADDR_WIDTH{1'b0}};
-            pixel_y_s3 <= {ROW_CNT_WIDTH{1'b0}};
-            avg0_u_s3  <= {SIGNED_WIDTH{1'b0}};
-            avg1_u_s3  <= {SIGNED_WIDTH{1'b0}};
-        end else if (enable) begin
-            for (i = 0; i < 5; i = i + 1) begin
-                blend0_p_s3[i] <= blend0_partial[i];
-                blend1_p_s3[i] <= blend1_partial[i];
-                g_s3[i]        <= g_s2[i];
-            end
-            valid_s3   <= valid_s2;
-            center_s3  <= center_s2;
-            win_size_s3 <= win_size_s2;
-            pixel_x_s3 <= pixel_x_s2;
-            pixel_y_s3 <= pixel_y_s2;
-            // Pass-through pipeline
-            avg0_u_s3  <= avg0_u_s2;
-            avg1_u_s3  <= avg1_u_s2;
+    wire [PIPE_S3_WIDTH-1:0] pipe_s3_din = {blend0_partial[0], blend0_partial[1], blend0_partial[2], blend0_partial[3], blend0_partial[4],
+                                            blend1_partial[0], blend1_partial[1], blend1_partial[2], blend1_partial[3], blend1_partial[4],
+                                            g_s2[0], g_s2[1], g_s2[2], g_s2[3], g_s2[4],
+                                            win_size_s2, pixel_x_s2, pixel_y_s2, center_s2, valid_s2};
+
+    wire [PIPE_S3_WIDTH-1:0] pipe_s3_dout;
+    wire                     valid_s3;
+
+    common_pipe #(
+        .DATA_WIDTH (PIPE_S3_WIDTH),
+        .STAGES     (1),
+        .RESET_VAL  (0)
+    ) u_pipe_s3 (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .din       (pipe_s3_din),
+        .valid_in  (valid_s2),
+        .ready_out (),
+        .dout      (pipe_s3_dout),
+        .valid_out (valid_s3),
+        .ready_in  (stage3_ready)
+    );
+
+    // Unpack signals
+    localparam MUL_WIDTH = SIGNED_WIDTH + GRAD_WIDTH + 1;
+    wire signed [MUL_WIDTH-1:0] blend0_p_s3 [0:4], blend1_p_s3 [0:4];
+    generate
+        for (gi = 0; gi < 5; gi = gi + 1) begin : gen_blend_p_s3
+            assign blend0_p_s3[gi] = pipe_s3_dout[PIPE_S3_WIDTH-1-gi*MUL_WIDTH -: MUL_WIDTH];
+            assign blend1_p_s3[gi] = pipe_s3_dout[PIPE_S3_WIDTH-1-(5+gi)*MUL_WIDTH -: MUL_WIDTH];
         end
-    end
+    endgenerate
+
+    wire [GRAD_WIDTH-1:0]   g_s3 [0:4];
+    generate
+        for (gi = 0; gi < 5; gi = gi + 1) begin : gen_g_s3
+            assign g_s3[gi] = pipe_s3_dout[10*MUL_WIDTH + (4-gi)*GRAD_WIDTH +: GRAD_WIDTH];
+        end
+    endgenerate
+
+    wire [WIN_SIZE_WIDTH-1:0]   win_size_s3 = pipe_s3_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s3  = pipe_s3_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0]    pixel_y_s3  = pipe_s3_dout[ROW_CNT_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    wire [DATA_WIDTH-1:0]       center_s3   = pipe_s3_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
+
+    wire signed [SIGNED_WIDTH-1:0] avg0_u_s3 = avg0_u_s2;
+    wire signed [SIGNED_WIDTH-1:0] avg1_u_s3 = avg1_u_s2;
 
     //=========================================================================
-    // Cycle 4: Weighted Sum (Signed)
+    // Cycle 4: Weighted Sum (Signed) + Sign Extraction
     //=========================================================================
-    // Signed addition for blend sums
-    wire signed [BLEND_WIDTH-1:0] blend0_sum_comb = blend0_p_s3[0] + blend0_p_s3[1] + blend0_p_s3[2] +
-                                                    blend0_p_s3[3] + blend0_p_s3[4];
-    wire signed [BLEND_WIDTH-1:0] blend1_sum_comb = blend1_p_s3[0] + blend1_p_s3[1] + blend1_p_s3[2] +
-                                                    blend1_p_s3[3] + blend1_p_s3[4];
+    wire signed [BLEND_WIDTH-1:0] blend0_sum_comb = blend0_p_s3[0] + blend0_p_s3[1] + blend0_p_s3[2] + blend0_p_s3[3] + blend0_p_s3[4];
+    wire signed [BLEND_WIDTH-1:0] blend1_sum_comb = blend1_p_s3[0] + blend1_p_s3[1] + blend1_p_s3[2] + blend1_p_s3[3] + blend1_p_s3[4];
     wire [GRAD_SUM_WIDTH-1:0] grad_sum_comb = g_s3[0] + g_s3[1] + g_s3[2] + g_s3[3] + g_s3[4];
 
-    // Pipeline registers for Cycle 4
-    reg signed [BLEND_WIDTH-1:0]     blend0_sum_s4, blend1_sum_s4;
-    reg [GRAD_SUM_WIDTH-1:0]  grad_sum_s4;
-    reg                       valid_s4;
-    reg [DATA_WIDTH-1:0]      center_s4;
-    reg [WIN_SIZE_WIDTH-1:0]  win_size_s4;
-    reg [LINE_ADDR_WIDTH-1:0] pixel_x_s4;
-    reg [ROW_CNT_WIDTH-1:0]   pixel_y_s4;
-    // Pass-through pipeline for avg0_u and avg1_u
-    reg signed [SIGNED_WIDTH-1:0] avg0_u_s4, avg1_u_s4;
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            blend0_sum_s4 <= {BLEND_WIDTH{1'b0}};
-            blend1_sum_s4 <= {BLEND_WIDTH{1'b0}};
-            grad_sum_s4   <= {GRAD_SUM_WIDTH{1'b0}};
-            valid_s4      <= 1'b0;
-            center_s4     <= {DATA_WIDTH{1'b0}};
-            win_size_s4   <= {WIN_SIZE_WIDTH{1'b0}};
-            pixel_x_s4    <= {LINE_ADDR_WIDTH{1'b0}};
-            pixel_y_s4    <= {ROW_CNT_WIDTH{1'b0}};
-            avg0_u_s4     <= {SIGNED_WIDTH{1'b0}};
-            avg1_u_s4     <= {SIGNED_WIDTH{1'b0}};
-        end else if (enable) begin
-            blend0_sum_s4 <= blend0_sum_comb;
-            blend1_sum_s4 <= blend1_sum_comb;
-            grad_sum_s4   <= grad_sum_comb;
-            valid_s4      <= valid_s3;
-            center_s4     <= center_s3;
-            win_size_s4   <= win_size_s3;
-            pixel_x_s4    <= pixel_x_s3;
-            pixel_y_s4    <= pixel_y_s3;
-            // Pass-through pipeline
-            avg0_u_s4     <= avg0_u_s3;
-            avg1_u_s4     <= avg1_u_s3;
-        end
-    end
+    wire blend0_sign = blend0_sum_comb[BLEND_WIDTH-1];
+    wire blend1_sign = blend1_sum_comb[BLEND_WIDTH-1];
+    wire signed [BLEND_WIDTH-1:0] blend0_abs_full = blend0_sign ? -blend0_sum_comb : blend0_sum_comb;
+    wire signed [BLEND_WIDTH-1:0] blend1_abs_full = blend1_sign ? -blend1_sum_comb : blend1_sum_comb;
+    wire [PRODUCT_SHIFT-1:0] blend0_abs = blend0_abs_full[PRODUCT_SHIFT-1:0];
+    wire [PRODUCT_SHIFT-1:0] blend1_abs = blend1_abs_full[PRODUCT_SHIFT-1:0];
 
     //=========================================================================
-    // Cycle 5: Division Output using LUT-based Divider Module
+    // Cycle 4 Pipeline Registers
     //=========================================================================
-    // Note: LUT divider works with unsigned values, need to handle sign separately
-    // For now, use signed division directly (synthesizable but may have timing impact)
+    localparam PIPE_S4_WIDTH = 2 * BLEND_WIDTH + GRAD_SUM_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 3;
 
-    // Signed division result
-    wire signed [SIGNED_WIDTH-1:0] blend0_div_comb = (grad_sum_s4 != 0) ?
-                                                     (blend0_sum_s4 / $signed({{BLEND_WIDTH-GRAD_SUM_WIDTH{1'b0}}, grad_sum_s4})) :
-                                                     {SIGNED_WIDTH{1'b0}};
-    wire signed [SIGNED_WIDTH-1:0] blend1_div_comb = (grad_sum_s4 != 0) ?
-                                                     (blend1_sum_s4 / $signed({{BLEND_WIDTH-GRAD_SUM_WIDTH{1'b0}}, grad_sum_s4})) :
-                                                     {SIGNED_WIDTH{1'b0}};
+    wire [PIPE_S4_WIDTH-1:0] pipe_s4_din = {blend0_sum_comb, blend1_sum_comb, grad_sum_comb,
+                                            win_size_s3, pixel_x_s3, pixel_y_s3, center_s3,
+                                            blend0_sign, blend1_sign, valid_s3};
 
-    // Pass-through signals for Cycle 5 (registered with divider output)
-    reg [LINE_ADDR_WIDTH-1:0] pixel_x_s5;
-    reg [ROW_CNT_WIDTH-1:0]   pixel_y_s5;
-    reg signed [SIGNED_WIDTH-1:0] avg0_u_s5, avg1_u_s5;
-    reg [WIN_SIZE_WIDTH-1:0]  win_size_s5;
-    reg [DATA_WIDTH-1:0]      center_s5;
+    wire [PIPE_S4_WIDTH-1:0] pipe_s4_dout;
+    wire                     valid_s4;
 
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            pixel_x_s5    <= {LINE_ADDR_WIDTH{1'b0}};
-            pixel_y_s5    <= {ROW_CNT_WIDTH{1'b0}};
-            avg0_u_s5     <= {SIGNED_WIDTH{1'b0}};
-            avg1_u_s5     <= {SIGNED_WIDTH{1'b0}};
-            win_size_s5   <= {WIN_SIZE_WIDTH{1'b0}};
-            center_s5     <= {DATA_WIDTH{1'b0}};
-        end else if (enable) begin
-            pixel_x_s5    <= pixel_x_s4;
-            pixel_y_s5    <= pixel_y_s4;
-            avg0_u_s5     <= avg0_u_s4;  // Pass through from pipeline
-            avg1_u_s5     <= avg1_u_s4;
-            win_size_s5   <= win_size_s4;
-            center_s5     <= center_s4;
-        end
-    end
+    common_pipe #(
+        .DATA_WIDTH (PIPE_S4_WIDTH),
+        .STAGES     (1),
+        .RESET_VAL  (0)
+    ) u_pipe_s4 (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .din       (pipe_s4_din),
+        .valid_in  (valid_s3),
+        .ready_out (),
+        .dout      (pipe_s4_dout),
+        .valid_out (valid_s4),
+        .ready_in  (stage3_ready)
+    );
 
-    // Output registers
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            blend0_dir_avg  <= {SIGNED_WIDTH{1'b0}};
-            blend1_dir_avg  <= {SIGNED_WIDTH{1'b0}};
-            stage3_valid    <= 1'b0;
-            pixel_x_out     <= {LINE_ADDR_WIDTH{1'b0}};
-            pixel_y_out     <= {ROW_CNT_WIDTH{1'b0}};
-            avg0_u_out      <= {SIGNED_WIDTH{1'b0}};
-            avg1_u_out      <= {SIGNED_WIDTH{1'b0}};
-            win_size_clip_out <= {WIN_SIZE_WIDTH{1'b0}};
-            center_pixel_out <= {DATA_WIDTH{1'b0}};
-        end else if (enable) begin
-            blend0_dir_avg  <= blend0_div_comb;
-            blend1_dir_avg  <= blend1_div_comb;
-            stage3_valid    <= valid_s4;
-            pixel_x_out     <= pixel_x_s5;
-            pixel_y_out     <= pixel_y_s5;
-            avg0_u_out      <= avg0_u_s5;
-            avg1_u_out      <= avg1_u_s5;
-            win_size_clip_out <= win_size_s5;
-            center_pixel_out <= center_s5;
-        end
-    end
+    // Unpack signals
+    wire signed [BLEND_WIDTH-1:0] blend0_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1 -: BLEND_WIDTH];
+    wire signed [BLEND_WIDTH-1:0] blend1_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-BLEND_WIDTH -: BLEND_WIDTH];
+    wire [GRAD_SUM_WIDTH-1:0] grad_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-2*BLEND_WIDTH -: GRAD_SUM_WIDTH];
+    wire [WIN_SIZE_WIDTH-1:0] win_size_s4 = pipe_s4_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 3 +: WIN_SIZE_WIDTH];
+    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s4 = pipe_s4_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 3 +: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0] pixel_y_s4 = pipe_s4_dout[ROW_CNT_WIDTH + DATA_WIDTH + 3 +: ROW_CNT_WIDTH];
+    wire [DATA_WIDTH-1:0] center_s4 = pipe_s4_dout[DATA_WIDTH + 3 +: DATA_WIDTH];
+    wire blend0_sign_s4 = pipe_s4_dout[2];
+    wire blend1_sign_s4 = pipe_s4_dout[1];
+
+    wire signed [SIGNED_WIDTH-1:0] avg0_u_s4 = avg0_u_s3;
+    wire signed [SIGNED_WIDTH-1:0] avg1_u_s4 = avg1_u_s3;
+
+    //=========================================================================
+    // Cycle 5: Division Output using LUT-based Divider
+    //=========================================================================
+    wire signed [BLEND_WIDTH-1:0] blend0_abs_full_s4 = blend0_sign_s4 ? -blend0_sum_s4 : blend0_sum_s4;
+    wire signed [BLEND_WIDTH-1:0] blend1_abs_full_s4 = blend1_sign_s4 ? -blend1_sum_s4 : blend1_sum_s4;
+    wire [PRODUCT_SHIFT-1:0] blend0_abs_s4 = blend0_abs_full_s4[PRODUCT_SHIFT-1:0];
+    wire [PRODUCT_SHIFT-1:0] blend1_abs_s4 = blend1_abs_full_s4[PRODUCT_SHIFT-1:0];
+
+    wire [SIGNED_WIDTH-1:0] blend0_quot, blend1_quot;
+    wire                    div_valid;
+
+    common_lut_divider #(
+        .DIVIDEND_WIDTH (GRAD_SUM_WIDTH),
+        .QUOTIENT_WIDTH (SIGNED_WIDTH),
+        .PRODUCT_SHIFT  (PRODUCT_SHIFT)
+    ) u_lut_div_0 (
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .enable   (enable),
+        .dividend (grad_sum_s4),
+        .numerator(blend0_abs_s4),
+        .valid_in (valid_s4),
+        .quotient (blend0_quot),
+        .valid_out(div_valid)
+    );
+
+    common_lut_divider #(
+        .DIVIDEND_WIDTH (GRAD_SUM_WIDTH),
+        .QUOTIENT_WIDTH (SIGNED_WIDTH),
+        .PRODUCT_SHIFT  (PRODUCT_SHIFT)
+    ) u_lut_div_1 (
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .enable   (enable),
+        .dividend (grad_sum_s4),
+        .numerator(blend1_abs_s4),
+        .valid_in (valid_s4),
+        .quotient (blend1_quot),
+        .valid_out()
+    );
+
+    //=========================================================================
+    // Pass-through signals for Cycle 5
+    //=========================================================================
+    localparam PIPE_S5_WIDTH = LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 2 * SIGNED_WIDTH + WIN_SIZE_WIDTH + DATA_WIDTH + 2;
+
+    wire [PIPE_S5_WIDTH-1:0] pipe_s5_din = {pixel_x_s4, pixel_y_s4, avg0_u_s4, avg1_u_s4, win_size_s4, center_s4, blend0_sign_s4, blend1_sign_s4};
+
+    wire [PIPE_S5_WIDTH-1:0] pipe_s5_dout;
+
+    common_pipe #(
+        .DATA_WIDTH (PIPE_S5_WIDTH),
+        .STAGES     (1),
+        .RESET_VAL  (0)
+    ) u_pipe_s5 (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .din       (pipe_s5_din),
+        .valid_in  (valid_s4),
+        .ready_out (),
+        .dout      (pipe_s5_dout),
+        .valid_out (),
+        .ready_in  (stage3_ready)
+    );
+
+    wire [LINE_ADDR_WIDTH-1:0] pixel_x_s5 = pipe_s5_dout[PIPE_S5_WIDTH-1 -: LINE_ADDR_WIDTH];
+    wire [ROW_CNT_WIDTH-1:0] pixel_y_s5 = pipe_s5_dout[PIPE_S5_WIDTH-1-LINE_ADDR_WIDTH -: ROW_CNT_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg0_u_s5 = pipe_s5_dout[2*SIGNED_WIDTH + WIN_SIZE_WIDTH + DATA_WIDTH + 2 +: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_u_s5 = pipe_s5_dout[SIGNED_WIDTH + WIN_SIZE_WIDTH + DATA_WIDTH + 2 +: SIGNED_WIDTH];
+    wire [WIN_SIZE_WIDTH-1:0] win_size_s5 = pipe_s5_dout[WIN_SIZE_WIDTH + DATA_WIDTH + 2 +: WIN_SIZE_WIDTH];
+    wire [DATA_WIDTH-1:0] center_s5 = pipe_s5_dout[DATA_WIDTH + 2 +: DATA_WIDTH];
+    wire blend0_sign_s5 = pipe_s5_dout[1];
+    wire blend1_sign_s5 = pipe_s5_dout[0];
+
+    //=========================================================================
+    // Restore sign and saturate
+    //=========================================================================
+    wire signed [SIGNED_WIDTH-1:0] blend0_div_signed = blend0_sign_s5 ? -blend0_quot : blend0_quot;
+    wire signed [SIGNED_WIDTH-1:0] blend1_div_signed = blend1_sign_s5 ? -blend1_quot : blend1_quot;
+
+    wire signed [SIGNED_WIDTH-1:0] blend0_div_comb = (blend0_div_signed > $signed(11'sd511)) ? $signed(11'sd511) :
+                                                     (blend0_div_signed < $signed(-11'sd512)) ? $signed(-11'sd512) : blend0_div_signed;
+    wire signed [SIGNED_WIDTH-1:0] blend1_div_comb = (blend1_div_signed > $signed(11'sd511)) ? $signed(11'sd511) :
+                                                     (blend1_div_signed < $signed(-11'sd512)) ? $signed(-11'sd512) : blend1_div_signed;
+
+    //=========================================================================
+    // Output Registers
+    //=========================================================================
+    localparam PIPE_OUT_WIDTH = 2 * SIGNED_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
+
+    wire [PIPE_OUT_WIDTH-1:0] pipe_out_din = {blend0_div_comb, blend1_div_comb, win_size_s5, pixel_x_s5, pixel_y_s5, avg0_u_s5, avg1_u_s5, center_s5, div_valid};
+
+    wire [PIPE_OUT_WIDTH-1:0] pipe_out_dout;
+
+    common_pipe #(
+        .DATA_WIDTH (PIPE_OUT_WIDTH),
+        .STAGES     (1),
+        .RESET_VAL  (0)
+    ) u_pipe_out (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .din       (pipe_out_din),
+        .valid_in  (div_valid),
+        .ready_out (),
+        .dout      (pipe_out_dout),
+        .valid_out (stage3_valid),
+        .ready_in  (stage3_ready)
+    );
+
+    // Unpack output signals
+    assign blend0_dir_avg  = pipe_out_dout[PIPE_OUT_WIDTH-1 -: SIGNED_WIDTH];
+    assign blend1_dir_avg  = pipe_out_dout[PIPE_OUT_WIDTH-1-SIGNED_WIDTH -: SIGNED_WIDTH];
+    assign win_size_clip_out = pipe_out_dout[WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 2*SIGNED_WIDTH + DATA_WIDTH + 1 +: WIN_SIZE_WIDTH];
+    assign pixel_x_out     = pipe_out_dout[LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 2*SIGNED_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
+    assign pixel_y_out     = pipe_out_dout[ROW_CNT_WIDTH + 2*SIGNED_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
+    assign avg0_u_out      = pipe_out_dout[2*SIGNED_WIDTH + DATA_WIDTH + 1 +: SIGNED_WIDTH];
+    assign avg1_u_out      = pipe_out_dout[SIGNED_WIDTH + DATA_WIDTH + 1 +: SIGNED_WIDTH];
+    assign center_pixel_out = pipe_out_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
 
 endmodule
