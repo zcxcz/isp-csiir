@@ -196,8 +196,12 @@ module isp_csiir_line_buffer #(
     wire [2:0] win_row_0_phys = (row_cnt < 2) ? wr_row_ptr : wr_row_prev2;  // Duplicate center for first 2 rows
     wire [2:0] win_row_1_phys = (row_cnt < 1) ? wr_row_ptr : wr_row_prev;
     wire [2:0] win_row_2_phys = wr_row_ptr;  // Center row = current write row
-    wire [2:0] win_row_3_phys = (row_cnt >= img_height - 1) ? wr_row_ptr : wr_row_next;
-    wire [2:0] win_row_4_phys = (row_cnt >= img_height - 2) ? wr_row_ptr : wr_row_next2;
+    // For win_row_3: duplicate center if row_cnt < 1, else if at bottom, duplicate center, else next row
+    wire [2:0] win_row_3_phys = (row_cnt < 1) ? wr_row_ptr :
+                                (row_cnt >= img_height - 1) ? wr_row_ptr : wr_row_next;
+    // For win_row_4: duplicate center if row_cnt < 2, else if at bottom, duplicate center, else two rows ahead
+    wire [2:0] win_row_4_phys = (row_cnt < 2) ? wr_row_ptr :
+                                (row_cnt >= img_height - 2) ? wr_row_ptr : wr_row_next2;
 
     // Column offsets for 5x5 window with duplicate padding (clamp to valid range)
     // When window_valid goes high, rd_col_ptr has advanced by 1
