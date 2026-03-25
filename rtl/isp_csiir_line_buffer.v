@@ -61,7 +61,7 @@ module isp_csiir_line_buffer #(
     output wire [DATA_WIDTH-1:0]       window_4_0, window_4_1, window_4_2, window_4_3, window_4_4,
     output reg                         window_valid,
     input  wire                        window_ready,
-    output reg  [LINE_ADDR_WIDTH-1:0]   center_x,
+    output wire [LINE_ADDR_WIDTH-1:0]  center_x,
     output wire [12:0]                 center_y
 );
 
@@ -98,17 +98,12 @@ module isp_csiir_line_buffer #(
 
     // Column counters
     reg [LINE_ADDR_WIDTH-1:0] wr_col_ptr;
-    reg [LINE_ADDR_WIDTH-1:0] rd_col_ptr;
 
     // Row counter
     reg [12:0] row_cnt;
 
-    // Delay for valid generation (need 2 rows + 2 cols before window is valid)
-    reg [3:0] valid_delay;
+    // Frame state
     reg       frame_started;
-
-    // Column delay for window center
-    reg [LINE_ADDR_WIDTH-1:0] center_x_delay;
 
     //=========================================================================
     // Input Handshake - din_ready
@@ -203,14 +198,24 @@ module isp_csiir_line_buffer #(
     wire [2:0] win_row_4_phys = (row_cnt < 2) ? wr_row_ptr :
                                 (row_cnt >= img_height - 2) ? wr_row_ptr : wr_row_next2;
 
+    // Combinational output center calculation
+    // output_center = wr_col_ptr - 3 (valid when wr_col_ptr >= 3)
+    // This ensures col_p1 and col_p2 have been written before output
+    wire [LINE_ADDR_WIDTH-1:0] output_center = (wr_col_ptr >= 3) ? wr_col_ptr - 3'd3 : {LINE_ADDR_WIDTH{1'b0}};
+
+    // Register the output center to keep it stable during window_valid
+    reg [LINE_ADDR_WIDTH-1:0] rd_col_ptr;
+
     // Column offsets for 5x5 window with duplicate padding (clamp to valid range)
-    // When window_valid goes high, rd_col_ptr has advanced by 1
-    // So we need to read from (rd_col_ptr - 1), which is the column that was just written
-    wire [LINE_ADDR_WIDTH-1:0] center_col = (rd_col_ptr > 0) ? rd_col_ptr - 1'b1 : {LINE_ADDR_WIDTH{1'b0}};
+    // Use rd_col_ptr (registered output center) for center column
+    wire [LINE_ADDR_WIDTH-1:0] center_col = rd_col_ptr;
+
+    // Left boundary: clamp to 0
     wire [LINE_ADDR_WIDTH-1:0] col_m2 = (center_col < 2) ? {LINE_ADDR_WIDTH{1'b0}} : center_col - 2;
     wire [LINE_ADDR_WIDTH-1:0] col_m1 = (center_col < 1) ? {LINE_ADDR_WIDTH{1'b0}} : center_col - 1;
     wire [LINE_ADDR_WIDTH-1:0] col_0  = center_col;
-    // For col_p1 and col_p2, clamp to img_width - 1
+
+    // Right boundary: clamp to img_width - 1
     wire [LINE_ADDR_WIDTH-1:0] col_p1 = (center_col >= img_width - 1) ? img_width - 1 : center_col + 1;
     wire [LINE_ADDR_WIDTH-1:0] col_p2 = (center_col >= img_width - 2) ? img_width - 1 : center_col + 2;
 
@@ -233,124 +238,186 @@ module isp_csiir_line_buffer #(
         end
     endfunction
 
-    // Generate window outputs
+    // Generate window outputs (combinational, will be registered below)
     // Window Row 0 (top row)
-    assign window_0_0 = read_line_mem(win_row_0_phys, col_m2);
-    assign window_0_1 = read_line_mem(win_row_0_phys, col_m1);
-    assign window_0_2 = read_line_mem(win_row_0_phys, col_0);
-    assign window_0_3 = read_line_mem(win_row_0_phys, col_p1);
-    assign window_0_4 = read_line_mem(win_row_0_phys, col_p2);
+    wire [DATA_WIDTH-1:0] window_comb_0_0 = read_line_mem(win_row_0_phys, col_m2);
+    wire [DATA_WIDTH-1:0] window_comb_0_1 = read_line_mem(win_row_0_phys, col_m1);
+    wire [DATA_WIDTH-1:0] window_comb_0_2 = read_line_mem(win_row_0_phys, col_0);
+    wire [DATA_WIDTH-1:0] window_comb_0_3 = read_line_mem(win_row_0_phys, col_p1);
+    wire [DATA_WIDTH-1:0] window_comb_0_4 = read_line_mem(win_row_0_phys, col_p2);
 
     // Window Row 1
-    assign window_1_0 = read_line_mem(win_row_1_phys, col_m2);
-    assign window_1_1 = read_line_mem(win_row_1_phys, col_m1);
-    assign window_1_2 = read_line_mem(win_row_1_phys, col_0);
-    assign window_1_3 = read_line_mem(win_row_1_phys, col_p1);
-    assign window_1_4 = read_line_mem(win_row_1_phys, col_p2);
+    wire [DATA_WIDTH-1:0] window_comb_1_0 = read_line_mem(win_row_1_phys, col_m2);
+    wire [DATA_WIDTH-1:0] window_comb_1_1 = read_line_mem(win_row_1_phys, col_m1);
+    wire [DATA_WIDTH-1:0] window_comb_1_2 = read_line_mem(win_row_1_phys, col_0);
+    wire [DATA_WIDTH-1:0] window_comb_1_3 = read_line_mem(win_row_1_phys, col_p1);
+    wire [DATA_WIDTH-1:0] window_comb_1_4 = read_line_mem(win_row_1_phys, col_p2);
 
     // Window Row 2 (center row)
-    assign window_2_0 = read_line_mem(win_row_2_phys, col_m2);
-    assign window_2_1 = read_line_mem(win_row_2_phys, col_m1);
-    assign window_2_2 = read_line_mem(win_row_2_phys, col_0);
-    assign window_2_3 = read_line_mem(win_row_2_phys, col_p1);
-    assign window_2_4 = read_line_mem(win_row_2_phys, col_p2);
+    wire [DATA_WIDTH-1:0] window_comb_2_0 = read_line_mem(win_row_2_phys, col_m2);
+    wire [DATA_WIDTH-1:0] window_comb_2_1 = read_line_mem(win_row_2_phys, col_m1);
+    wire [DATA_WIDTH-1:0] window_comb_2_2 = read_line_mem(win_row_2_phys, col_0);
+    wire [DATA_WIDTH-1:0] window_comb_2_3 = read_line_mem(win_row_2_phys, col_p1);
+    wire [DATA_WIDTH-1:0] window_comb_2_4 = read_line_mem(win_row_2_phys, col_p2);
 
     // Window Row 3
-    assign window_3_0 = read_line_mem(win_row_3_phys, col_m2);
-    assign window_3_1 = read_line_mem(win_row_3_phys, col_m1);
-    assign window_3_2 = read_line_mem(win_row_3_phys, col_0);
-    assign window_3_3 = read_line_mem(win_row_3_phys, col_p1);
-    assign window_3_4 = read_line_mem(win_row_3_phys, col_p2);
+    wire [DATA_WIDTH-1:0] window_comb_3_0 = read_line_mem(win_row_3_phys, col_m2);
+    wire [DATA_WIDTH-1:0] window_comb_3_1 = read_line_mem(win_row_3_phys, col_m1);
+    wire [DATA_WIDTH-1:0] window_comb_3_2 = read_line_mem(win_row_3_phys, col_0);
+    wire [DATA_WIDTH-1:0] window_comb_3_3 = read_line_mem(win_row_3_phys, col_p1);
+    wire [DATA_WIDTH-1:0] window_comb_3_4 = read_line_mem(win_row_3_phys, col_p2);
 
     // Window Row 4 (bottom row)
-    assign window_4_0 = read_line_mem(win_row_4_phys, col_m2);
-    assign window_4_1 = read_line_mem(win_row_4_phys, col_m1);
-    assign window_4_2 = read_line_mem(win_row_4_phys, col_0);
-    assign window_4_3 = read_line_mem(win_row_4_phys, col_p1);
-    assign window_4_4 = read_line_mem(win_row_4_phys, col_p2);
+    wire [DATA_WIDTH-1:0] window_comb_4_0 = read_line_mem(win_row_4_phys, col_m2);
+    wire [DATA_WIDTH-1:0] window_comb_4_1 = read_line_mem(win_row_4_phys, col_m1);
+    wire [DATA_WIDTH-1:0] window_comb_4_2 = read_line_mem(win_row_4_phys, col_0);
+    wire [DATA_WIDTH-1:0] window_comb_4_3 = read_line_mem(win_row_4_phys, col_p1);
+    wire [DATA_WIDTH-1:0] window_comb_4_4 = read_line_mem(win_row_4_phys, col_p2);
 
     //=========================================================================
     // Read Pointer and Valid Control with Back-pressure Support
     //=========================================================================
-    // Timing: Data is written on the clock edge when din_valid=1
-    // Window reads are combinational, so they see the OLD value
-    // Solution: Delay window_valid by one cycle so it comes after the write
+    // Window output timing:
+    // For center column C, we need col_p1=C+1 and col_p2=C+2 to be written.
+    // When wr_col_ptr points to NEXT column to write, center C is valid when
+    // wr_col_ptr > C + 2, i.e., C < wr_col_ptr - 2.
     //
-    // Back-pressure handling:
-    // - When window_ready=0, hold rd_col_ptr, rd_row_ptr, and center_x
-    // - window_valid remains asserted (data is valid, just not consumed)
+    // Simple approach: Output one window per input pixel.
+    // When wr_col_ptr >= 3 (after writing pixel 2), output center = wr_col_ptr - 3.
+    // This gives us center 0,1,2,... in sequence.
+    //
+    // Computation:
+    //   - output_center = wr_col_ptr - 3 (valid when wr_col_ptr >= 3)
+    //   - center_x uses registered output_center
+    //
+    // Flush logic: After row ends, we need to output remaining windows for centers
+    // that don't have a corresponding din_valid (the last 2-3 pixels of each row).
 
-    reg window_valid_d;  // Delayed valid
-    reg [LINE_ADDR_WIDTH-1:0] center_x_d;  // Delayed center_x to match window_valid timing
+    // Flush state machine
+    reg [1:0] flush_cnt;        // Count remaining windows to output (0-2)
+    reg       flush_active;     // Currently flushing remaining windows
+    reg [LINE_ADDR_WIDTH-1:0] flush_center;  // Current center during flush
+
+    // Internal signal for when window will be valid next cycle
+    reg window_valid_next;
+
+    // Window output delay register - to align with memory write timing
+    reg [DATA_WIDTH-1:0] window_reg_0_0, window_reg_0_1, window_reg_0_2, window_reg_0_3, window_reg_0_4;
+    reg [DATA_WIDTH-1:0] window_reg_1_0, window_reg_1_1, window_reg_1_2, window_reg_1_3, window_reg_1_4;
+    reg [DATA_WIDTH-1:0] window_reg_2_0, window_reg_2_1, window_reg_2_2, window_reg_2_3, window_reg_2_4;
+    reg [DATA_WIDTH-1:0] window_reg_3_0, window_reg_3_1, window_reg_3_2, window_reg_3_3, window_reg_3_4;
+    reg [DATA_WIDTH-1:0] window_reg_4_0, window_reg_4_1, window_reg_4_2, window_reg_4_3, window_reg_4_4;
+    reg [LINE_ADDR_WIDTH-1:0] center_x_reg;
+    reg [12:0]                center_y_reg;
+
+    // Register window outputs at posedge clk
+    // This ensures window values are stable and aligned with window_valid
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            window_reg_0_0 <= 0; window_reg_0_1 <= 0; window_reg_0_2 <= 0; window_reg_0_3 <= 0; window_reg_0_4 <= 0;
+            window_reg_1_0 <= 0; window_reg_1_1 <= 0; window_reg_1_2 <= 0; window_reg_1_3 <= 0; window_reg_1_4 <= 0;
+            window_reg_2_0 <= 0; window_reg_2_1 <= 0; window_reg_2_2 <= 0; window_reg_2_3 <= 0; window_reg_2_4 <= 0;
+            window_reg_3_0 <= 0; window_reg_3_1 <= 0; window_reg_3_2 <= 0; window_reg_3_3 <= 0; window_reg_3_4 <= 0;
+            window_reg_4_0 <= 0; window_reg_4_1 <= 0; window_reg_4_2 <= 0; window_reg_4_3 <= 0; window_reg_4_4 <= 0;
+            center_x_reg   <= 0;
+            center_y_reg   <= 0;
+        end else if (window_valid_next) begin
+            window_reg_0_0 <= window_comb_0_0; window_reg_0_1 <= window_comb_0_1; window_reg_0_2 <= window_comb_0_2; window_reg_0_3 <= window_comb_0_3; window_reg_0_4 <= window_comb_0_4;
+            window_reg_1_0 <= window_comb_1_0; window_reg_1_1 <= window_comb_1_1; window_reg_1_2 <= window_comb_1_2; window_reg_1_3 <= window_comb_1_3; window_reg_1_4 <= window_comb_1_4;
+            window_reg_2_0 <= window_comb_2_0; window_reg_2_1 <= window_comb_2_1; window_reg_2_2 <= window_comb_2_2; window_reg_2_3 <= window_comb_2_3; window_reg_2_4 <= window_comb_2_4;
+            window_reg_3_0 <= window_comb_3_0; window_reg_3_1 <= window_comb_3_1; window_reg_3_2 <= window_comb_3_2; window_reg_3_3 <= window_comb_3_3; window_reg_3_4 <= window_comb_3_4;
+            window_reg_4_0 <= window_comb_4_0; window_reg_4_1 <= window_comb_4_1; window_reg_4_2 <= window_comb_4_2; window_reg_4_3 <= window_comb_4_3; window_reg_4_4 <= window_comb_4_4;
+            center_x_reg   <= center_col;
+            center_y_reg   <= row_cnt;
+        end
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            rd_col_ptr     <= {LINE_ADDR_WIDTH{1'b0}};
-            rd_row_ptr     <= 3'd0;
-            window_valid   <= 1'b0;
-            window_valid_d <= 1'b0;
-            frame_started  <= 1'b0;
-            center_x       <= {LINE_ADDR_WIDTH{1'b0}};
-            center_x_d     <= {LINE_ADDR_WIDTH{1'b0}};
+            rd_col_ptr         <= {LINE_ADDR_WIDTH{1'b0}};
+            rd_row_ptr         <= 3'd0;
+            window_valid       <= 1'b0;
+            frame_started      <= 1'b0;
+            flush_cnt          <= 2'd0;
+            flush_active       <= 1'b0;
+            flush_center       <= {LINE_ADDR_WIDTH{1'b0}};
+            window_valid_next  <= 1'b0;
         end else if (sof) begin
-            rd_col_ptr     <= {LINE_ADDR_WIDTH{1'b0}};
-            rd_row_ptr     <= 3'd0;
-            window_valid   <= 1'b0;
-            window_valid_d <= 1'b0;
-            frame_started  <= 1'b1;
-            center_x       <= {LINE_ADDR_WIDTH{1'b0}};
-            center_x_d     <= {LINE_ADDR_WIDTH{1'b0}};
+            rd_col_ptr         <= {LINE_ADDR_WIDTH{1'b0}};
+            rd_row_ptr         <= 3'd0;
+            window_valid       <= 1'b0;
+            frame_started      <= 1'b1;
+            flush_cnt          <= 2'd0;
+            flush_active       <= 1'b0;
+            flush_center       <= {LINE_ADDR_WIDTH{1'b0}};
+            window_valid_next  <= 1'b0;
         end else if (enable && frame_started) begin
+            // window_valid follows window_valid_next with one cycle delay
+            // This ensures memory writes complete before window output
+            window_valid <= window_valid_next;
+            window_valid_next <= 1'b0;  // Default: no window next cycle
+
             // Back-pressure handling:
-            // When window_ready=0, pause read pointer updates
-            // but keep window_valid high (data is valid)
+            // When window_ready=0, pause updates but keep window_valid high
             if (!window_ready && window_valid) begin
-                // Back-pressure: hold all output state
-                // rd_col_ptr, rd_row_ptr, center_x, window_valid remain unchanged
+                // Back-pressure: hold all output state, re-assert window_valid_next
+                window_valid_next <= 1'b1;
             end
-            else begin
-                // Normal operation or no valid data to hold
-                // Handle EOL separately to reset column pointer
-                if (eol) begin
-                    rd_col_ptr <= {LINE_ADDR_WIDTH{1'b0}};
+            else if (flush_active) begin
+                // Flush mode: output remaining windows after EOL
+                if (flush_cnt > 0) begin
+                    rd_col_ptr         <= flush_center;
+                    window_valid_next  <= 1'b1;  // Window valid NEXT cycle
+                    flush_center       <= flush_center + 1'b1;
+                    flush_cnt          <= flush_cnt - 1'b1;
+                end else begin
+                    // Flush complete
+                    window_valid_next  <= 1'b0;
+                    flush_active       <= 1'b0;
+                    rd_col_ptr         <= {LINE_ADDR_WIDTH{1'b0}};
                     // Advance row pointer after 2 rows filled
                     if (row_cnt >= 2) begin
                         rd_row_ptr <= (rd_row_ptr == 3'd4) ? 3'd0 : rd_row_ptr + 1'b1;
                     end
-                    window_valid   <= window_valid_d;
-                    window_valid_d <= 1'b0;
-                    center_x       <= center_x_d;  // Use delayed center_x
+                end
+            end
+            else begin
+                // Handle EOL to start flush
+                if (eol) begin
+                    // Start flush for remaining windows
+                    // During din_valid, we output center = wr_col_ptr - 3 (PRE-increment value)
+                    // When writing pixel 15, wr_col_ptr = 15, output_center = 12
+                    // After all writes, wr_col_ptr = 16
+                    // Remaining centers: 13, 14, 15 (3 windows)
+                    flush_active       <= 1'b1;
+                    flush_cnt          <= 2'd3;  // 3 remaining windows
+                    flush_center       <= rd_col_ptr + 1'b1;  // Start from next center (13)
+                    window_valid_next  <= 1'b0;
                 end else if (din_valid && din_ready) begin
-                    // Update read column pointer
-                    rd_col_ptr <= rd_col_ptr + 1'b1;
-
-                    // Valid generation for full-size output with duplicate padding
-                    // Set valid_d for next cycle (after write completes)
-                    if (rd_col_ptr < img_width && row_cnt < img_height) begin
-                        window_valid   <= window_valid_d;
-                        window_valid_d <= 1'b1;
-                        center_x_d     <= rd_col_ptr;  // Save for next cycle
-                        center_x       <= center_x_d;  // Use delayed center_x
-                    end else begin
-                        window_valid   <= window_valid_d;
-                        window_valid_d <= 1'b0;
+                    // Output window when wr_col_ptr >= 3 (center 0,1,2,... are valid)
+                    // output_center = wr_col_ptr - 3
+                    // Memory writes happen in this cycle via non-blocking assignment
+                    // Window output delayed to NEXT cycle via window_valid_next
+                    if (wr_col_ptr >= 3 && row_cnt < img_height) begin
+                        rd_col_ptr         <= output_center;
+                        window_valid_next  <= 1'b1;  // Window valid NEXT cycle
                     end
-                end else begin
-                    // No din_valid, propagate the delayed valid
-                    // But first, check if we need to output the last center_x
-                    if (window_valid_d && row_cnt < img_height) begin
-                        // Output the saved last center_x from the previous cycle
-                        center_x       <= center_x_d;
-                    end
-                    window_valid   <= window_valid_d;
-                    window_valid_d <= 1'b0;
                 end
             end
         end
     end
 
-    // center_y is computed combinationally from row_cnt
-    // center_y = row_cnt (no offset for full-size output)
-    assign center_y = row_cnt;
+    // center_y output uses registered value
+    assign center_y = center_y_reg;
+
+    // center_x output uses registered value
+    assign center_x = center_x_reg;
+
+    // Window outputs use registered values for timing alignment
+    assign window_0_0 = window_reg_0_0; assign window_0_1 = window_reg_0_1; assign window_0_2 = window_reg_0_2; assign window_0_3 = window_reg_0_3; assign window_0_4 = window_reg_0_4;
+    assign window_1_0 = window_reg_1_0; assign window_1_1 = window_reg_1_1; assign window_1_2 = window_reg_1_2; assign window_1_3 = window_reg_1_3; assign window_1_4 = window_reg_1_4;
+    assign window_2_0 = window_reg_2_0; assign window_2_1 = window_reg_2_1; assign window_2_2 = window_reg_2_2; assign window_2_3 = window_reg_2_3; assign window_2_4 = window_reg_2_4;
+    assign window_3_0 = window_reg_3_0; assign window_3_1 = window_reg_3_1; assign window_3_2 = window_reg_3_2; assign window_3_3 = window_reg_3_3; assign window_3_4 = window_reg_3_4;
+    assign window_4_0 = window_reg_4_0; assign window_4_1 = window_reg_4_1; assign window_4_2 = window_reg_4_2; assign window_4_3 = window_reg_4_3; assign window_4_4 = window_reg_4_4;
 
 endmodule

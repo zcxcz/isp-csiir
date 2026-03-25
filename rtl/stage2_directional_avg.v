@@ -320,11 +320,11 @@ module stage2_directional_avg #(
     wire signed [ACC_WIDTH-1:0] sum_d_s6 = pipe_s6_dout[PIPE_S6_WIDTH-1-2*ACC_WIDTH -: ACC_WIDTH];
     wire signed [ACC_WIDTH-1:0] sum_l_s6 = pipe_s6_dout[PIPE_S6_WIDTH-1-3*ACC_WIDTH -: ACC_WIDTH];
     wire signed [ACC_WIDTH-1:0] sum_r_s6 = pipe_s6_dout[PIPE_S6_WIDTH-1-4*ACC_WIDTH -: ACC_WIDTH];
-    wire [7:0] w_c_s6 = pipe_s6_dout[5*ACC_WIDTH + 5*8 - 1 -: 8];
-    wire [7:0] w_u_s6 = pipe_s6_dout[5*ACC_WIDTH + 4*8 - 1 -: 8];
-    wire [7:0] w_d_s6 = pipe_s6_dout[5*ACC_WIDTH + 3*8 - 1 -: 8];
-    wire [7:0] w_l_s6 = pipe_s6_dout[5*ACC_WIDTH + 2*8 - 1 -: 8];
-    wire [7:0] w_r_s6 = pipe_s6_dout[5*ACC_WIDTH + 8 - 1 -: 8];
+    wire [7:0] w_c_s6 = pipe_s6_dout[PIPE_S6_WIDTH-1-5*ACC_WIDTH -: 8];
+    wire [7:0] w_u_s6 = pipe_s6_dout[PIPE_S6_WIDTH-1-5*ACC_WIDTH-8 -: 8];
+    wire [7:0] w_d_s6 = pipe_s6_dout[PIPE_S6_WIDTH-1-5*ACC_WIDTH-2*8 -: 8];
+    wire [7:0] w_l_s6 = pipe_s6_dout[PIPE_S6_WIDTH-1-5*ACC_WIDTH-3*8 -: 8];
+    wire [7:0] w_r_s6 = pipe_s6_dout[PIPE_S6_WIDTH-1-5*ACC_WIDTH-4*8 -: 8];
     wire [WIN_SIZE_WIDTH-1:0] win_size_s6   = pipe_s6_dout[GRAD_WIDTH + DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: WIN_SIZE_WIDTH];
     wire [LINE_ADDR_WIDTH-1:0] pixel_x_s6   = pipe_s6_dout[GRAD_WIDTH + DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
     wire [ROW_CNT_WIDTH-1:0]  pixel_y_s6    = pipe_s6_dout[GRAD_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
@@ -335,23 +335,39 @@ module stage2_directional_avg #(
     // Cycle 3: Division Output (Signed) with Saturation
     //=========================================================================
     // Integer division for averages (signed result)
-    wire signed [SIGNED_WIDTH-1:0] avg0_c_div = (w_c_s6 != 0) ? (sum_c_s6 / $signed({1'b0, w_c_s6})) : {SIGNED_WIDTH{1'b0}};
-    wire signed [SIGNED_WIDTH-1:0] avg0_u_div = (w_u_s6 != 0) ? (sum_u_s6 / $signed({1'b0, w_u_s6})) : {SIGNED_WIDTH{1'b0}};
-    wire signed [SIGNED_WIDTH-1:0] avg0_d_div = (w_d_s6 != 0) ? (sum_d_s6 / $signed({1'b0, w_d_s6})) : {SIGNED_WIDTH{1'b0}};
-    wire signed [SIGNED_WIDTH-1:0] avg0_l_div = (w_l_s6 != 0) ? (sum_l_s6 / $signed({1'b0, w_l_s6})) : {SIGNED_WIDTH{1'b0}};
-    wire signed [SIGNED_WIDTH-1:0] avg0_r_div = (w_r_s6 != 0) ? (sum_r_s6 / $signed({1'b0, w_r_s6})) : {SIGNED_WIDTH{1'b0}};
+    // Use signed weight for proper division
+    wire signed [7:0] w_c_s6_signed = w_c_s6;
+    wire signed [7:0] w_u_s6_signed = w_u_s6;
+    wire signed [7:0] w_d_s6_signed = w_d_s6;
+    wire signed [7:0] w_l_s6_signed = w_l_s6;
+    wire signed [7:0] w_r_s6_signed = w_r_s6;
 
-    // Saturation to s11 range [-512, +511]
-    wire signed [SIGNED_WIDTH-1:0] avg0_c_comb = (avg0_c_div > $signed(11'sd511)) ? $signed(11'sd511) :
-                                                 (avg0_c_div < $signed(-11'sd512)) ? $signed(-11'sd512) : avg0_c_div;
-    wire signed [SIGNED_WIDTH-1:0] avg0_u_comb = (avg0_u_div > $signed(11'sd511)) ? $signed(11'sd511) :
-                                                 (avg0_u_div < $signed(-11'sd512)) ? $signed(-11'sd512) : avg0_u_div;
-    wire signed [SIGNED_WIDTH-1:0] avg0_d_comb = (avg0_d_div > $signed(11'sd511)) ? $signed(11'sd511) :
-                                                 (avg0_d_div < $signed(-11'sd512)) ? $signed(-11'sd512) : avg0_d_div;
-    wire signed [SIGNED_WIDTH-1:0] avg0_l_comb = (avg0_l_div > $signed(11'sd511)) ? $signed(11'sd511) :
-                                                 (avg0_l_div < $signed(-11'sd512)) ? $signed(-11'sd512) : avg0_l_div;
-    wire signed [SIGNED_WIDTH-1:0] avg0_r_comb = (avg0_r_div > $signed(11'sd511)) ? $signed(11'sd511) :
-                                                 (avg0_r_div < $signed(-11'sd512)) ? $signed(-11'sd512) : avg0_r_div;
+    // Division with signed weights - use wider intermediate result
+    wire signed [ACC_WIDTH-1:0] avg0_c_div_full = (w_c_s6 != 0) ? (sum_c_s6 / w_c_s6_signed) : {ACC_WIDTH{1'b0}};
+    wire signed [ACC_WIDTH-1:0] avg0_u_div_full = (w_u_s6 != 0) ? (sum_u_s6 / w_u_s6_signed) : {ACC_WIDTH{1'b0}};
+    wire signed [ACC_WIDTH-1:0] avg0_d_div_full = (w_d_s6 != 0) ? (sum_d_s6 / w_d_s6_signed) : {ACC_WIDTH{1'b0}};
+    wire signed [ACC_WIDTH-1:0] avg0_l_div_full = (w_l_s6 != 0) ? (sum_l_s6 / w_l_s6_signed) : {ACC_WIDTH{1'b0}};
+    wire signed [ACC_WIDTH-1:0] avg0_r_div_full = (w_r_s6 != 0) ? (sum_r_s6 / w_r_s6_signed) : {ACC_WIDTH{1'b0}};
+
+    // Saturation function (handles signed arithmetic correctly)
+    function automatic signed [SIGNED_WIDTH-1:0] saturate_s11;
+        input signed [ACC_WIDTH-1:0] value;
+        begin
+            if (value > 511)
+                saturate_s11 = 11'sd511;
+            else if (value < -512)
+                saturate_s11 = -11'sd512;
+            else
+                saturate_s11 = value[SIGNED_WIDTH-1:0];
+        end
+    endfunction
+
+    // Apply saturation using function
+    wire signed [SIGNED_WIDTH-1:0] avg0_c_comb = saturate_s11(avg0_c_div_full);
+    wire signed [SIGNED_WIDTH-1:0] avg0_u_comb = saturate_s11(avg0_u_div_full);
+    wire signed [SIGNED_WIDTH-1:0] avg0_d_comb = saturate_s11(avg0_d_div_full);
+    wire signed [SIGNED_WIDTH-1:0] avg0_l_comb = saturate_s11(avg0_l_div_full);
+    wire signed [SIGNED_WIDTH-1:0] avg0_r_comb = saturate_s11(avg0_r_div_full);
 
     // avg1 uses same calculation (for this simplified implementation)
     wire signed [SIGNED_WIDTH-1:0] avg1_c_comb = avg0_c_comb;

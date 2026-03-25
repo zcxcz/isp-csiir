@@ -472,11 +472,14 @@ module stage3_gradient_fusion #(
         end
     endgenerate
 
+    // Avg extraction: packed right after gradients (MSB-first packing)
+    // avg0: bits [(5*GRAD_WIDTH + 5*SIGNED_WIDTH - 1) : 5*GRAD_WIDTH]
+    // avg1: bits [(5*GRAD_WIDTH + 10*SIGNED_WIDTH - 1) : (5*GRAD_WIDTH + 5*SIGNED_WIDTH)]
     wire signed [SIGNED_WIDTH-1:0] avg0_s1 [0:4], avg1_s1 [0:4];
     generate
         for (gi = 0; gi < 5; gi = gi + 1) begin : gen_avg0_s1
-            assign avg0_s1[gi] = pipe_s1_dout[5*GRAD_WIDTH + (9-gi)*SIGNED_WIDTH +: SIGNED_WIDTH];
-            assign avg1_s1[gi] = pipe_s1_dout[5*GRAD_WIDTH + 5*SIGNED_WIDTH + (4-gi)*SIGNED_WIDTH +: SIGNED_WIDTH];
+            assign avg0_s1[gi] = pipe_s1_dout[PIPE_S1_WIDTH - 1 - 5*GRAD_WIDTH - (gi+1)*SIGNED_WIDTH + 1 +: SIGNED_WIDTH];
+            assign avg1_s1[gi] = pipe_s1_dout[PIPE_S1_WIDTH - 1 - 5*GRAD_WIDTH - 5*SIGNED_WIDTH - (gi+1)*SIGNED_WIDTH + 1 +: SIGNED_WIDTH];
         end
     endgenerate
 
@@ -552,11 +555,12 @@ module stage3_gradient_fusion #(
         end
     endgenerate
 
+    // Avg extraction: packed right after gradients (MSB-first packing)
     wire signed [SIGNED_WIDTH-1:0] avg0_s2 [0:4], avg1_s2 [0:4];
     generate
         for (gi = 0; gi < 5; gi = gi + 1) begin : gen_avg_s2
-            assign avg0_s2[gi] = pipe_s2_dout[5*GRAD_WIDTH + (9-gi)*SIGNED_WIDTH +: SIGNED_WIDTH];
-            assign avg1_s2[gi] = pipe_s2_dout[5*GRAD_WIDTH + 5*SIGNED_WIDTH + (4-gi)*SIGNED_WIDTH +: SIGNED_WIDTH];
+            assign avg0_s2[gi] = pipe_s2_dout[PIPE_S2_WIDTH - 1 - 5*GRAD_WIDTH - (gi+1)*SIGNED_WIDTH + 1 +: SIGNED_WIDTH];
+            assign avg1_s2[gi] = pipe_s2_dout[PIPE_S2_WIDTH - 1 - 5*GRAD_WIDTH - 5*SIGNED_WIDTH - (gi+1)*SIGNED_WIDTH + 1 +: SIGNED_WIDTH];
         end
     endgenerate
 
@@ -585,9 +589,11 @@ module stage3_gradient_fusion #(
     //=========================================================================
     // Cycle 3 Pipeline Registers
     //=========================================================================
-    localparam PIPE_S3_WIDTH = 10 * (SIGNED_WIDTH + GRAD_WIDTH + 1) + 5 * GRAD_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
+    // Include avg0_u and avg1_u for proper pipeline timing
+    localparam PIPE_S3_WIDTH = 2 * SIGNED_WIDTH + 10 * (SIGNED_WIDTH + GRAD_WIDTH + 1) + 5 * GRAD_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
 
-    wire [PIPE_S3_WIDTH-1:0] pipe_s3_din = {blend0_partial[0], blend0_partial[1], blend0_partial[2], blend0_partial[3], blend0_partial[4],
+    wire [PIPE_S3_WIDTH-1:0] pipe_s3_din = {avg0_u_s2, avg1_u_s2,
+                                            blend0_partial[0], blend0_partial[1], blend0_partial[2], blend0_partial[3], blend0_partial[4],
                                             blend1_partial[0], blend1_partial[1], blend1_partial[2], blend1_partial[3], blend1_partial[4],
                                             g_s2[0], g_s2[1], g_s2[2], g_s2[3], g_s2[4],
                                             win_size_s2, pixel_x_s2, pixel_y_s2, center_s2, valid_s2};
@@ -610,20 +616,23 @@ module stage3_gradient_fusion #(
         .ready_in  (stage3_ready)
     );
 
-    // Unpack signals
+    // Unpack signals (avg0_u, avg1_u at MSB, then blend partials, grads, etc.)
     localparam MUL_WIDTH = SIGNED_WIDTH + GRAD_WIDTH + 1;
+    wire signed [SIGNED_WIDTH-1:0] avg0_u_s3 = pipe_s3_dout[PIPE_S3_WIDTH-1 -: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_u_s3 = pipe_s3_dout[PIPE_S3_WIDTH-1-SIGNED_WIDTH -: SIGNED_WIDTH];
+
     wire signed [MUL_WIDTH-1:0] blend0_p_s3 [0:4], blend1_p_s3 [0:4];
     generate
         for (gi = 0; gi < 5; gi = gi + 1) begin : gen_blend_p_s3
-            assign blend0_p_s3[gi] = pipe_s3_dout[PIPE_S3_WIDTH-1-gi*MUL_WIDTH -: MUL_WIDTH];
-            assign blend1_p_s3[gi] = pipe_s3_dout[PIPE_S3_WIDTH-1-(5+gi)*MUL_WIDTH -: MUL_WIDTH];
+            assign blend0_p_s3[gi] = pipe_s3_dout[PIPE_S3_WIDTH-1-2*SIGNED_WIDTH-gi*MUL_WIDTH -: MUL_WIDTH];
+            assign blend1_p_s3[gi] = pipe_s3_dout[PIPE_S3_WIDTH-1-2*SIGNED_WIDTH-(5+gi)*MUL_WIDTH -: MUL_WIDTH];
         end
     endgenerate
 
     wire [GRAD_WIDTH-1:0]   g_s3 [0:4];
     generate
         for (gi = 0; gi < 5; gi = gi + 1) begin : gen_g_s3
-            assign g_s3[gi] = pipe_s3_dout[10*MUL_WIDTH + (4-gi)*GRAD_WIDTH +: GRAD_WIDTH];
+            assign g_s3[gi] = pipe_s3_dout[2*SIGNED_WIDTH + 10*MUL_WIDTH + (4-gi)*GRAD_WIDTH +: GRAD_WIDTH];
         end
     endgenerate
 
@@ -631,9 +640,6 @@ module stage3_gradient_fusion #(
     wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s3  = pipe_s3_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
     wire [ROW_CNT_WIDTH-1:0]    pixel_y_s3  = pipe_s3_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
     wire [DATA_WIDTH-1:0]       center_s3   = pipe_s3_dout[1 +: DATA_WIDTH];
-
-    wire signed [SIGNED_WIDTH-1:0] avg0_u_s3 = avg0_u_s2;
-    wire signed [SIGNED_WIDTH-1:0] avg1_u_s3 = avg1_u_s2;
 
     //=========================================================================
     // Cycle 4: Weighted Sum (Signed) + Sign Extraction
@@ -652,9 +658,11 @@ module stage3_gradient_fusion #(
     //=========================================================================
     // Cycle 4 Pipeline Registers
     //=========================================================================
-    localparam PIPE_S4_WIDTH = 2 * BLEND_WIDTH + GRAD_SUM_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 3;
+    // Include avg0_u and avg1_u for proper pipeline timing
+    localparam PIPE_S4_WIDTH = 2 * SIGNED_WIDTH + 2 * BLEND_WIDTH + GRAD_SUM_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 3;
 
-    wire [PIPE_S4_WIDTH-1:0] pipe_s4_din = {blend0_sum_comb, blend1_sum_comb, grad_sum_comb,
+    wire [PIPE_S4_WIDTH-1:0] pipe_s4_din = {avg0_u_s3, avg1_u_s3,
+                                            blend0_sum_comb, blend1_sum_comb, grad_sum_comb,
                                             win_size_s3, pixel_x_s3, pixel_y_s3, center_s3,
                                             blend0_sign, blend1_sign, valid_s3};
 
@@ -676,19 +684,19 @@ module stage3_gradient_fusion #(
         .ready_in  (stage3_ready)
     );
 
-    // Unpack signals
-    wire signed [BLEND_WIDTH-1:0] blend0_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1 -: BLEND_WIDTH];
-    wire signed [BLEND_WIDTH-1:0] blend1_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-BLEND_WIDTH -: BLEND_WIDTH];
-    wire [GRAD_SUM_WIDTH-1:0] grad_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-2*BLEND_WIDTH -: GRAD_SUM_WIDTH];
+    // Unpack signals (avg0_u, avg1_u at MSB)
+    wire signed [SIGNED_WIDTH-1:0] avg0_u_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1 -: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_u_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-SIGNED_WIDTH -: SIGNED_WIDTH];
+
+    wire signed [BLEND_WIDTH-1:0] blend0_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-2*SIGNED_WIDTH -: BLEND_WIDTH];
+    wire signed [BLEND_WIDTH-1:0] blend1_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-2*SIGNED_WIDTH-BLEND_WIDTH -: BLEND_WIDTH];
+    wire [GRAD_SUM_WIDTH-1:0] grad_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-2*SIGNED_WIDTH-2*BLEND_WIDTH -: GRAD_SUM_WIDTH];
     wire [WIN_SIZE_WIDTH-1:0] win_size_s4 = pipe_s4_dout[DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 3 +: WIN_SIZE_WIDTH];
     wire [LINE_ADDR_WIDTH-1:0] pixel_x_s4 = pipe_s4_dout[DATA_WIDTH + ROW_CNT_WIDTH + 3 +: LINE_ADDR_WIDTH];
     wire [ROW_CNT_WIDTH-1:0] pixel_y_s4 = pipe_s4_dout[DATA_WIDTH + 3 +: ROW_CNT_WIDTH];
     wire [DATA_WIDTH-1:0] center_s4 = pipe_s4_dout[3 +: DATA_WIDTH];
     wire blend0_sign_s4 = pipe_s4_dout[2];
     wire blend1_sign_s4 = pipe_s4_dout[1];
-
-    wire signed [SIGNED_WIDTH-1:0] avg0_u_s4 = avg0_u_s3;
-    wire signed [SIGNED_WIDTH-1:0] avg1_u_s4 = avg1_u_s3;
 
     //=========================================================================
     // Cycle 5: Division Output using LUT-based Divider
@@ -800,13 +808,15 @@ module stage3_gradient_fusion #(
     );
 
     // Unpack output signals
+    // LSB layout: valid(1) + center(10) + avg1_u(11) + avg0_u(11) + pixel_y(13) + pixel_x(14) + win_size(6) + blend1(11) + blend0(11)
     assign blend0_dir_avg  = pipe_out_dout[PIPE_OUT_WIDTH-1 -: SIGNED_WIDTH];
     assign blend1_dir_avg  = pipe_out_dout[PIPE_OUT_WIDTH-1-SIGNED_WIDTH -: SIGNED_WIDTH];
     assign win_size_clip_out = pipe_out_dout[SIGNED_WIDTH + SIGNED_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: WIN_SIZE_WIDTH];
     assign pixel_x_out     = pipe_out_dout[SIGNED_WIDTH + SIGNED_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1 +: LINE_ADDR_WIDTH];
     assign pixel_y_out     = pipe_out_dout[SIGNED_WIDTH + SIGNED_WIDTH + DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
-    assign avg0_u_out      = pipe_out_dout[2*SIGNED_WIDTH + 1 +: SIGNED_WIDTH];
-    assign avg1_u_out      = pipe_out_dout[SIGNED_WIDTH + 1 +: SIGNED_WIDTH];
-    assign center_pixel_out = pipe_out_dout[1 +: DATA_WIDTH];
+    // Fixed: avg0_u at bits [22:32], avg1_u at bits [11:21]
+    assign avg0_u_out      = pipe_out_dout[1 + DATA_WIDTH + SIGNED_WIDTH +: SIGNED_WIDTH];  // [22:32]
+    assign avg1_u_out      = pipe_out_dout[1 + DATA_WIDTH +: SIGNED_WIDTH];                // [11:21]
+    assign center_pixel_out = pipe_out_dout[1 +: DATA_WIDTH];                               // [1:10]
 
 endmodule
