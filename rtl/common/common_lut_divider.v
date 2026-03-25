@@ -79,7 +79,7 @@ module common_lut_divider #(
                        (gs[DIVIDEND_WIDTH-1]) ? 8'd255 :                 // Large values clamp to 255
                        (gs[DIVIDEND_WIDTH-2]) ? 8'd255 :
                        (gs[DIVIDEND_WIDTH-3]) ? 8'd255 :
-                       (8'd224 + (gs_m1024[DIVIDEND_WIDTH-1:13] > 31 ? 5'd31 : gs_m1024[17:13]));
+                       (8'd224 + (gs_m1024[DIVIDEND_WIDTH-1:13] > 31 ? 5'd31 : gs_m1024[DIVIDEND_WIDTH-1:13]));
 
     //=========================================================================
     // LUT (256 x 16-bit) for Inverse Values
@@ -89,61 +89,51 @@ module common_lut_divider #(
 
     // Initialize LUT with inverse values
     integer init_i;
-    reg [31:0] lut_tmp;  // Temporary variable for LUT initialization
 
     initial begin
-        // LUT values computed as: inv = round(2^26 / dividend)
-        // dividend = 0: special case (max value)
-        div_lut[0] = 16'd65535;  // dividend = 0
+        // LUT values computed as: inv = round(2^26 / typical_dividend)
+        // Index 0: dividend = 0 (special case, max value)
+        div_lut[0] = 16'd65535;
 
-        // Index 1-127: dividend 1-127 (direct mapping)
-        div_lut[1] = 16'd65535;  // dividend = 1, clamp to max
-        for (init_i = 2; init_i < 128; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / init_i;
-            div_lut[init_i] = (lut_tmp > 65535) ? 16'd65535 : lut_tmp[15:0];
+        // Index 1-223: Small dividends, all clamped to max (2^26/dividend > 65535)
+        for (init_i = 1; init_i < 224; init_i = init_i + 1) begin
+            div_lut[init_i] = 16'd65535;
         end
 
-        // Index 128-159: dividend 128-255 (2:1 compression, use midpoint)
-        for (init_i = 128; init_i < 160; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 128) * 2 + 128);
-            div_lut[init_i] = lut_tmp[15:0];
-        end
-
-        // Index 160-191: dividend 256-511 (8:1 compression)
-        for (init_i = 160; init_i < 192; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 160) * 8 + 256);
-            div_lut[init_i] = lut_tmp[15:0];
-        end
-
-        // Index 192-223: dividend 512-1023 (16:1 compression)
-        for (init_i = 192; init_i < 224; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 192) * 16 + 512);
-            div_lut[init_i] = lut_tmp[15:0];
-        end
-
-        // Index 224-231: dividend 8192-16383
-        for (init_i = 224; init_i < 232; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 224) * 1024 + 8192);
-            div_lut[init_i] = lut_tmp[15:0];
-        end
-
-        // Index 232-239: dividend 16384-32767
-        for (init_i = 232; init_i < 240; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 232) * 2048 + 16384);
-            div_lut[init_i] = lut_tmp[15:0];
-        end
-
-        // Index 240-247: dividend 32768-65535
-        for (init_i = 240; init_i < 248; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 240) * 4096 + 32768);
-            div_lut[init_i] = lut_tmp[15:0];
-        end
-
-        // Index 248-255: dividend 65536-131071
-        for (init_i = 248; init_i < 256; init_i = init_i + 1) begin
-            lut_tmp = 67108864 / ((init_i - 248) * 8192 + 65536);
-            div_lut[init_i] = lut_tmp[15:0];
-        end
+        // Index 224-255: Larger dividends with computed inverse values
+        // dividend range 8192-122880, inverse fits in 16 bits
+        div_lut[224] = 16'd8192;   // dividend = 8192
+        div_lut[225] = 16'd7281;   // dividend = 9216
+        div_lut[226] = 16'd6553;   // dividend = 10240
+        div_lut[227] = 16'd5957;   // dividend = 11264
+        div_lut[228] = 16'd5461;   // dividend = 12288
+        div_lut[229] = 16'd5041;   // dividend = 13312
+        div_lut[230] = 16'd4681;   // dividend = 14336
+        div_lut[231] = 16'd4369;   // dividend = 15360
+        div_lut[232] = 16'd4096;   // dividend = 16384
+        div_lut[233] = 16'd3640;   // dividend = 18432
+        div_lut[234] = 16'd3276;   // dividend = 20480
+        div_lut[235] = 16'd2978;   // dividend = 22528
+        div_lut[236] = 16'd2730;   // dividend = 24576
+        div_lut[237] = 16'd2520;   // dividend = 26624
+        div_lut[238] = 16'd2340;   // dividend = 28672
+        div_lut[239] = 16'd2184;   // dividend = 30720
+        div_lut[240] = 16'd2048;   // dividend = 32768
+        div_lut[241] = 16'd1820;   // dividend = 36864
+        div_lut[242] = 16'd1638;   // dividend = 40960
+        div_lut[243] = 16'd1489;   // dividend = 45056
+        div_lut[244] = 16'd1365;   // dividend = 49152
+        div_lut[245] = 16'd1260;   // dividend = 53248
+        div_lut[246] = 16'd1170;   // dividend = 57344
+        div_lut[247] = 16'd1092;   // dividend = 61440
+        div_lut[248] = 16'd1024;   // dividend = 65536
+        div_lut[249] = 16'd910;    // dividend = 73728
+        div_lut[250] = 16'd819;    // dividend = 81920
+        div_lut[251] = 16'd744;    // dividend = 90112
+        div_lut[252] = 16'd682;    // dividend = 98304
+        div_lut[253] = 16'd630;    // dividend = 106496
+        div_lut[254] = 16'd585;    // dividend = 114688
+        div_lut[255] = 16'd546;    // dividend = 122880
     end
 
     //=========================================================================

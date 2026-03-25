@@ -355,4 +355,42 @@ module tb_isp_csiir_random;
         $dumpvars(0, tb_isp_csiir_random);
     end
 
+    //=========================================================================
+    // Debug: Stage 3 Gradient Line Buffer Tracing (simplified)
+    //=========================================================================
+    integer s3_dbg_cnt;
+    initial s3_dbg_cnt = 0;
+
+    // Track Stage 3 buffer write operations (first few only)
+    always @(posedge clk) begin
+        if (dut.s2_valid && dut.u_stage3.col_counter < 3 && s3_dbg_cnt < 5) begin
+            s3_dbg_cnt = s3_dbg_cnt + 1;
+            $display("[%0t] S3 Buffer Write: col=%0d grad=%0d",
+                $time, dut.u_stage3.col_counter, dut.s2_grad);
+        end
+    end
+
+    // Track Stage 3 output validation (first few only)
+    integer s3_out_cnt;
+    initial s3_out_cnt = 0;
+    always @(posedge clk) begin
+        if (dut.u_stage3.div_valid && s3_out_cnt < 5) begin
+            s3_out_cnt = s3_out_cnt + 1;
+            $display("[%0t] S3 Divider: pixel (%0d,%0d) grad_sum=%0d",
+                $time, dut.u_stage3.pixel_x_s5, dut.u_stage3.pixel_y_s5,
+                dut.u_stage3.grad_sum_s4);
+        end
+    end
+
+    // Track Stage 4 output validation (first few only)
+    integer s4_out_cnt;
+    initial s4_out_cnt = 0;
+    always @(posedge clk) begin
+        if (dut.s4_dout_valid && s4_out_cnt < 5) begin
+            s4_out_cnt = s4_out_cnt + 1;
+            $display("[%0t] S4 Output: pixel (%0d,%0d) dout=%0d",
+                $time, dut.s4_pixel_x, dut.s4_pixel_y, dut.s4_dout);
+        end
+    end
+
 endmodule

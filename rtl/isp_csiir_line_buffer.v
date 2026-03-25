@@ -281,6 +281,7 @@ module isp_csiir_line_buffer #(
     // - window_valid remains asserted (data is valid, just not consumed)
 
     reg window_valid_d;  // Delayed valid
+    reg [LINE_ADDR_WIDTH-1:0] center_x_d;  // Delayed center_x to match window_valid timing
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -290,6 +291,7 @@ module isp_csiir_line_buffer #(
             window_valid_d <= 1'b0;
             frame_started  <= 1'b0;
             center_x       <= {LINE_ADDR_WIDTH{1'b0}};
+            center_x_d     <= {LINE_ADDR_WIDTH{1'b0}};
         end else if (sof) begin
             rd_col_ptr     <= {LINE_ADDR_WIDTH{1'b0}};
             rd_row_ptr     <= 3'd0;
@@ -297,6 +299,7 @@ module isp_csiir_line_buffer #(
             window_valid_d <= 1'b0;
             frame_started  <= 1'b1;
             center_x       <= {LINE_ADDR_WIDTH{1'b0}};
+            center_x_d     <= {LINE_ADDR_WIDTH{1'b0}};
         end else if (enable && frame_started) begin
             // Back-pressure handling:
             // When window_ready=0, pause read pointer updates
@@ -316,6 +319,7 @@ module isp_csiir_line_buffer #(
                     end
                     window_valid   <= window_valid_d;
                     window_valid_d <= 1'b0;
+                    center_x       <= center_x_d;  // Use delayed center_x
                 end else if (din_valid && din_ready) begin
                     // Update read column pointer
                     rd_col_ptr <= rd_col_ptr + 1'b1;
@@ -325,13 +329,19 @@ module isp_csiir_line_buffer #(
                     if (rd_col_ptr < img_width && row_cnt < img_height) begin
                         window_valid   <= window_valid_d;
                         window_valid_d <= 1'b1;
-                        center_x       <= rd_col_ptr;  // Center of window (no offset)
+                        center_x_d     <= rd_col_ptr;  // Save for next cycle
+                        center_x       <= center_x_d;  // Use delayed center_x
                     end else begin
                         window_valid   <= window_valid_d;
                         window_valid_d <= 1'b0;
                     end
                 end else begin
                     // No din_valid, propagate the delayed valid
+                    // But first, check if we need to output the last center_x
+                    if (window_valid_d && row_cnt < img_height) begin
+                        // Output the saved last center_x from the previous cycle
+                        center_x       <= center_x_d;
+                    end
                     window_valid   <= window_valid_d;
                     window_valid_d <= 1'b0;
                 end
