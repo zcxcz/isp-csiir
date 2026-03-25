@@ -107,9 +107,19 @@ module stage3_gradient_fusion #(
     reg                     flush_done;
     reg                     stage2_valid_d;
 
+    // Delayed signals for read timing alignment
+    reg [LINE_ADDR_WIDTH-1:0] rd_col_d;
+    reg                       row_valid_d;
+    reg                       stage2_valid_d2;  // Double delayed for timing
+    reg                       avg_buf_sel_d;    // Delayed buffer selection to match rd_col_d
+
     wire is_first_row = (row_counter == 0) || !row_valid;
     wire is_last_row = (row_counter >= img_height - 1) || flush_active;
-    wire stage2_stopped = stage2_valid_d && !stage2_valid && row_valid && !flush_done;
+    wire is_last_row_written = (row_counter >= img_height - 1);
+    // Only trigger flush when Stage 2 stops AND all rows are written
+    // row_counter >= img_height means we've wrapped after the last row
+    wire last_row_complete = (row_counter >= img_height);
+    wire stage2_stopped = stage2_valid_d && !stage2_valid && row_valid && !flush_done && last_row_complete;
 
     //=========================================================================
     // Row Delay Buffer for Stage 2 Outputs
@@ -277,23 +287,54 @@ module stage3_gradient_fusion #(
     //=========================================================================
     // Cycle 0: Read from Previous Buffer
     //=========================================================================
+    // During normal operation: rd_addr uses col_counter (same as write address)
+    // The "row delay" is achieved through buffer selection (avg_buf_sel)
+    // During flush: use flush_counter to read last row's data
     wire [LINE_ADDR_WIDTH-1:0] rd_addr = flush_active ? flush_counter : col_counter;
 
-    wire signed [SIGNED_WIDTH-1:0] avg0_c_rd = avg_buf_sel ? avg0_c_buf_0[rd_addr] : avg0_c_buf_1[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg0_u_rd = avg_buf_sel ? avg0_u_buf_0[rd_addr] : avg0_u_buf_1[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg0_d_rd = avg_buf_sel ? avg0_d_buf_0[rd_addr] : avg0_d_buf_1[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg0_l_rd = avg_buf_sel ? avg0_l_buf_0[rd_addr] : avg0_l_buf_1[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg0_r_rd = avg_buf_sel ? avg0_r_buf_0[rd_addr] : avg0_r_buf_1[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg1_c_rd = avg_buf_sel ? avg1_c_buf_0[rd_addr] : avg1_c_buf_1[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg1_u_rd = avg_buf_sel ? avg1_u_buf_0[rd_addr] : avg1_u_buf_1[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg1_d_rd = avg_buf_sel ? avg1_d_buf_0[rd_addr] : avg1_d_buf_1[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg1_l_rd = avg_buf_sel ? avg1_l_buf_0[rd_addr] : avg1_l_buf_1[rd_addr];
-    wire signed [SIGNED_WIDTH-1:0] avg1_r_rd = avg_buf_sel ? avg1_r_buf_0[rd_addr] : avg1_r_buf_1[rd_addr];
-    wire [DATA_WIDTH-1:0]   center_rd = avg_buf_sel ? center_buf_0[rd_addr] : center_buf_1[rd_addr];
-    wire [WIN_SIZE_WIDTH-1:0] win_size_rd = avg_buf_sel ? win_size_buf_0[rd_addr] : win_size_buf_1[rd_addr];
-    wire [LINE_ADDR_WIDTH-1:0] pixel_x_rd = avg_buf_sel ? pixel_x_buf_0[rd_addr] : pixel_x_buf_1[rd_addr];
-    wire [ROW_CNT_WIDTH-1:0] pixel_y_rd = avg_buf_sel ? pixel_y_buf_0[rd_addr] : pixel_y_buf_1[rd_addr];
-    wire                    valid_rd = avg_buf_sel ? valid_buf_0[rd_addr] : valid_buf_1[rd_addr];
+    // Buffer selection for flush:
+    // After row N complete: avg_buf_sel toggles to point to buffer for row N+1
+    // For flush, we want to read from buffer for row N (just completed)
+    // Row N was written when avg_buf_sel was the PRE-toggle value
+    // After toggle: new_avg_buf_sel = ~old_avg_buf_sel
+    // old_avg_buf_sel = ~new_avg_buf_sel = ~avg_buf_sel
+    // Write happened to: old_avg_buf_sel ? buf_1 : buf_0
+    // Read from same buffer: flush_buf_sel ? buf_0 : buf_1
+    // To read from buf_1 when old_avg_buf_sel=1: flush_buf_sel=0
+    // To read from buf_0 when old_avg_buf_sel=0: flush_buf_sel=1
+    // So: flush_buf_sel = ~old_avg_buf_sel = avg_buf_sel (the new, toggled value)
+    wire flush_buf_sel = avg_buf_sel;
+
+    wire signed [SIGNED_WIDTH-1:0] avg0_c_rd = flush_active ? (flush_buf_sel ? avg0_c_buf_0[rd_addr] : avg0_c_buf_1[rd_addr]) :
+                                                             (avg_buf_sel ? avg0_c_buf_0[rd_addr] : avg0_c_buf_1[rd_addr]);
+    wire signed [SIGNED_WIDTH-1:0] avg0_u_rd = flush_active ? (flush_buf_sel ? avg0_u_buf_0[rd_addr] : avg0_u_buf_1[rd_addr]) :
+                                                             (avg_buf_sel ? avg0_u_buf_0[rd_addr] : avg0_u_buf_1[rd_addr]);
+    wire signed [SIGNED_WIDTH-1:0] avg0_d_rd = flush_active ? (flush_buf_sel ? avg0_d_buf_0[rd_addr] : avg0_d_buf_1[rd_addr]) :
+                                                             (avg_buf_sel ? avg0_d_buf_0[rd_addr] : avg0_d_buf_1[rd_addr]);
+    wire signed [SIGNED_WIDTH-1:0] avg0_l_rd = flush_active ? (flush_buf_sel ? avg0_l_buf_0[rd_addr] : avg0_l_buf_1[rd_addr]) :
+                                                             (avg_buf_sel ? avg0_l_buf_0[rd_addr] : avg0_l_buf_1[rd_addr]);
+    wire signed [SIGNED_WIDTH-1:0] avg0_r_rd = flush_active ? (flush_buf_sel ? avg0_r_buf_0[rd_addr] : avg0_r_buf_1[rd_addr]) :
+                                                             (avg_buf_sel ? avg0_r_buf_0[rd_addr] : avg0_r_buf_1[rd_addr]);
+    wire signed [SIGNED_WIDTH-1:0] avg1_c_rd = flush_active ? (flush_buf_sel ? avg1_c_buf_0[rd_addr] : avg1_c_buf_1[rd_addr]) :
+                                                             (avg_buf_sel ? avg1_c_buf_0[rd_addr] : avg1_c_buf_1[rd_addr]);
+    wire signed [SIGNED_WIDTH-1:0] avg1_u_rd = flush_active ? (flush_buf_sel ? avg1_u_buf_0[rd_addr] : avg1_u_buf_1[rd_addr]) :
+                                                             (avg_buf_sel ? avg1_u_buf_0[rd_addr] : avg1_u_buf_1[rd_addr]);
+    wire signed [SIGNED_WIDTH-1:0] avg1_d_rd = flush_active ? (flush_buf_sel ? avg1_d_buf_0[rd_addr] : avg1_d_buf_1[rd_addr]) :
+                                                             (avg_buf_sel ? avg1_d_buf_0[rd_addr] : avg1_d_buf_1[rd_addr]);
+    wire signed [SIGNED_WIDTH-1:0] avg1_l_rd = flush_active ? (flush_buf_sel ? avg1_l_buf_0[rd_addr] : avg1_l_buf_1[rd_addr]) :
+                                                             (avg_buf_sel ? avg1_l_buf_0[rd_addr] : avg1_l_buf_1[rd_addr]);
+    wire signed [SIGNED_WIDTH-1:0] avg1_r_rd = flush_active ? (flush_buf_sel ? avg1_r_buf_0[rd_addr] : avg1_r_buf_1[rd_addr]) :
+                                                             (avg_buf_sel ? avg1_r_buf_0[rd_addr] : avg1_r_buf_1[rd_addr]);
+    wire [DATA_WIDTH-1:0]   center_rd = flush_active ? (flush_buf_sel ? center_buf_0[rd_addr] : center_buf_1[rd_addr]) :
+                                                       (avg_buf_sel ? center_buf_0[rd_addr] : center_buf_1[rd_addr]);
+    wire [WIN_SIZE_WIDTH-1:0] win_size_rd = flush_active ? (flush_buf_sel ? win_size_buf_0[rd_addr] : win_size_buf_1[rd_addr]) :
+                                                          (avg_buf_sel ? win_size_buf_0[rd_addr] : win_size_buf_1[rd_addr]);
+    wire [LINE_ADDR_WIDTH-1:0] pixel_x_rd = flush_active ? (flush_buf_sel ? pixel_x_buf_0[rd_addr] : pixel_x_buf_1[rd_addr]) :
+                                                          (avg_buf_sel ? pixel_x_buf_0[rd_addr] : pixel_x_buf_1[rd_addr]);
+    wire [ROW_CNT_WIDTH-1:0] pixel_y_rd = flush_active ? (flush_buf_sel ? pixel_y_buf_0[rd_addr] : pixel_y_buf_1[rd_addr]) :
+                                                        (avg_buf_sel ? pixel_y_buf_0[rd_addr] : pixel_y_buf_1[rd_addr]);
+    wire                    valid_rd = flush_active ? (flush_buf_sel ? valid_buf_0[rd_addr] : valid_buf_1[rd_addr]) :
+                                                    (avg_buf_sel ? valid_buf_0[rd_addr] : valid_buf_1[rd_addr]);
 
     wire [GRAD_WIDTH-1:0] grad_c = grad_buf_sel ? grad_line_buf_0[rd_addr] : grad_line_buf_1[rd_addr];
     wire [GRAD_WIDTH-1:0] grad_u = grad_buf_sel ? grad_line_buf_1[rd_addr] : grad_line_buf_0[rd_addr];
@@ -307,7 +348,28 @@ module stage3_gradient_fusion #(
     wire [GRAD_WIDTH-1:0] grad_d_bound = is_last_row ? grad_c : grad_d;
 
     // Valid signal for Cycle 0
-    wire valid_s0_comb = row_valid && valid_rd && (stage2_valid || flush_active);
+    // CRITICAL: Delay valid generation to match buffer write timing
+    // When col_counter wraps, avg_buf_sel toggles and we should NOT output
+    // immediately from the new buffer position 0 (which is being written)
+    // Track column position for valid generation
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            rd_col_d <= {LINE_ADDR_WIDTH{1'b0}};
+            row_valid_d <= 1'b0;
+            stage2_valid_d2 <= 1'b0;
+            avg_buf_sel_d <= 1'b0;
+        end else if (enable && stage3_ready) begin
+            rd_col_d <= col_counter;  // Delay col_counter by one cycle
+            row_valid_d <= row_valid;
+            stage2_valid_d2 <= stage2_valid_d;
+            avg_buf_sel_d <= avg_buf_sel;  // Delay buffer selection too
+        end
+    end
+
+    // Use original signals for valid generation
+    // CRITICAL: Only output when stage2_valid is active OR during flush (not after flush)
+    wire valid_s0_comb = row_valid && valid_rd && (stage2_valid || flush_active) && !flush_done;
 
     //=========================================================================
     // Cycle 0 Pipeline Registers
@@ -344,16 +406,20 @@ module stage3_gradient_fusion #(
     wire [GRAD_WIDTH-1:0]   grad_l_s0  = pipe_s0_dout[PIPE_S0_WIDTH-1-3*GRAD_WIDTH -: GRAD_WIDTH];
     wire [GRAD_WIDTH-1:0]   grad_r_s0  = pipe_s0_dout[PIPE_S0_WIDTH-1-4*GRAD_WIDTH -: GRAD_WIDTH];
 
-    wire signed [SIGNED_WIDTH-1:0] avg0_c_s0 = pipe_s0_dout[5*GRAD_WIDTH + 10*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
-    wire signed [SIGNED_WIDTH-1:0] avg0_u_s0 = pipe_s0_dout[5*GRAD_WIDTH + 9*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
-    wire signed [SIGNED_WIDTH-1:0] avg0_d_s0 = pipe_s0_dout[5*GRAD_WIDTH + 8*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
-    wire signed [SIGNED_WIDTH-1:0] avg0_l_s0 = pipe_s0_dout[5*GRAD_WIDTH + 7*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
-    wire signed [SIGNED_WIDTH-1:0] avg0_r_s0 = pipe_s0_dout[5*GRAD_WIDTH + 6*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
-    wire signed [SIGNED_WIDTH-1:0] avg1_c_s0 = pipe_s0_dout[5*GRAD_WIDTH + 5*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
-    wire signed [SIGNED_WIDTH-1:0] avg1_u_s0 = pipe_s0_dout[5*GRAD_WIDTH + 4*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
-    wire signed [SIGNED_WIDTH-1:0] avg1_d_s0 = pipe_s0_dout[5*GRAD_WIDTH + 3*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
-    wire signed [SIGNED_WIDTH-1:0] avg1_l_s0 = pipe_s0_dout[5*GRAD_WIDTH + 2*SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
-    wire signed [SIGNED_WIDTH-1:0] avg1_r_s0 = pipe_s0_dout[5*GRAD_WIDTH + SIGNED_WIDTH - 1 -: SIGNED_WIDTH];
+    // Avg extraction from LSB side:
+    // valid(1) + center(10) + pixel_y(13) + pixel_x(14) + win_size(6) + avg1(5*11) + avg0(5*11)
+    // avg0_c is at bit [DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + WIN_SIZE_WIDTH + 5*SIGNED_WIDTH + 4*SIGNED_WIDTH + 1]
+    localparam AVG_LSB_OFFSET = DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + WIN_SIZE_WIDTH + 1;
+    wire signed [SIGNED_WIDTH-1:0] avg1_r_s0 = pipe_s0_dout[AVG_LSB_OFFSET +: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_l_s0 = pipe_s0_dout[AVG_LSB_OFFSET + SIGNED_WIDTH +: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_d_s0 = pipe_s0_dout[AVG_LSB_OFFSET + 2*SIGNED_WIDTH +: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_u_s0 = pipe_s0_dout[AVG_LSB_OFFSET + 3*SIGNED_WIDTH +: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_c_s0 = pipe_s0_dout[AVG_LSB_OFFSET + 4*SIGNED_WIDTH +: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg0_r_s0 = pipe_s0_dout[AVG_LSB_OFFSET + 5*SIGNED_WIDTH +: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg0_l_s0 = pipe_s0_dout[AVG_LSB_OFFSET + 6*SIGNED_WIDTH +: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg0_d_s0 = pipe_s0_dout[AVG_LSB_OFFSET + 7*SIGNED_WIDTH +: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg0_u_s0 = pipe_s0_dout[AVG_LSB_OFFSET + 8*SIGNED_WIDTH +: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg0_c_s0 = pipe_s0_dout[AVG_LSB_OFFSET + 9*SIGNED_WIDTH +: SIGNED_WIDTH];
 
     wire [WIN_SIZE_WIDTH-1:0]   win_size_s0 = pipe_s0_dout[DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: WIN_SIZE_WIDTH];
     wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s0  = pipe_s0_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
@@ -417,7 +483,7 @@ module stage3_gradient_fusion #(
     wire [WIN_SIZE_WIDTH-1:0]   win_size_s1 = pipe_s1_dout[DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: WIN_SIZE_WIDTH];
     wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s1  = pipe_s1_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
     wire [ROW_CNT_WIDTH-1:0]    pixel_y_s1  = pipe_s1_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
-    wire [DATA_WIDTH-1:0]       center_s1   = pipe_s1_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
+    wire [DATA_WIDTH-1:0]       center_s1   = pipe_s1_dout[1 +: DATA_WIDTH];
 
     // Pass-through for avg0_u and avg1_u
     wire signed [SIGNED_WIDTH-1:0] avg0_u_s1 = avg0_s1[1];
@@ -497,7 +563,7 @@ module stage3_gradient_fusion #(
     wire [WIN_SIZE_WIDTH-1:0]   win_size_s2 = pipe_s2_dout[DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 1 +: WIN_SIZE_WIDTH];
     wire [LINE_ADDR_WIDTH-1:0]  pixel_x_s2  = pipe_s2_dout[DATA_WIDTH + ROW_CNT_WIDTH + 1 +: LINE_ADDR_WIDTH];
     wire [ROW_CNT_WIDTH-1:0]    pixel_y_s2  = pipe_s2_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
-    wire [DATA_WIDTH-1:0]       center_s2   = pipe_s2_dout[DATA_WIDTH + 1 +: DATA_WIDTH];
+    wire [DATA_WIDTH-1:0]       center_s2   = pipe_s2_dout[1 +: DATA_WIDTH];
 
     wire signed [SIGNED_WIDTH-1:0] avg0_u_s2 = avg0_s2[1];
     wire signed [SIGNED_WIDTH-1:0] avg1_u_s2 = avg1_s2[1];

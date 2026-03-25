@@ -356,7 +356,7 @@ module tb_isp_csiir_random;
     end
 
     //=========================================================================
-    // Debug: Stage 3 Gradient Line Buffer Tracing (simplified)
+    // Debug: Stage 3 Row Delay Buffer Tracing
     //=========================================================================
     integer s3_dbg_cnt;
     initial s3_dbg_cnt = 0;
@@ -365,8 +365,8 @@ module tb_isp_csiir_random;
     always @(posedge clk) begin
         if (dut.s2_valid && dut.u_stage3.col_counter < 3 && s3_dbg_cnt < 5) begin
             s3_dbg_cnt = s3_dbg_cnt + 1;
-            $display("[%0t] S3 Buffer Write: col=%0d grad=%0d",
-                $time, dut.u_stage3.col_counter, dut.s2_grad);
+            $display("[%0t] S3 Buffer Write: col=%0d grad=%0d avg_buf_sel=%0d",
+                $time, dut.u_stage3.col_counter, dut.s2_grad, dut.u_stage3.avg_buf_sel);
         end
     end
 
@@ -374,11 +374,76 @@ module tb_isp_csiir_random;
     integer s3_out_cnt;
     initial s3_out_cnt = 0;
     always @(posedge clk) begin
-        if (dut.u_stage3.div_valid && s3_out_cnt < 5) begin
+        if (dut.u_stage3.valid_s0_comb && s3_out_cnt < 300) begin
             s3_out_cnt = s3_out_cnt + 1;
-            $display("[%0t] S3 Divider: pixel (%0d,%0d) grad_sum=%0d",
-                $time, dut.u_stage3.pixel_x_s5, dut.u_stage3.pixel_y_s5,
-                dut.u_stage3.grad_sum_s4);
+            $display("[%0t] S3 Valid: col=%0d buf=%0d px=%0d py=%0d flush=%0d",
+                $time, dut.u_stage3.rd_col_d, dut.u_stage3.avg_buf_sel_d,
+                dut.u_stage3.pixel_x_rd, dut.u_stage3.pixel_y_rd, dut.u_stage3.flush_active);
+        end
+    end
+
+    // Track flush trigger condition
+    always @(posedge clk) begin
+        if (dut.u_stage3.stage2_stopped && !dut.u_stage3.flush_active) begin
+            $display("[FLUSH TRIGGER] time=%0t row_counter=%0d col_counter=%0d avg_buf_sel=%0d last_row_complete=%0d",
+                $time, dut.u_stage3.row_counter, dut.u_stage3.col_counter, dut.u_stage3.avg_buf_sel, dut.u_stage3.last_row_complete);
+        end
+    end
+
+    // Track EOL toggle
+    always @(posedge clk) begin
+        if (dut.s2_valid && dut.u_stage3.col_counter == 15) begin
+            $display("[EOL] time=%0t row_counter=%0d col_counter=%0d avg_buf_sel=%0d (about to toggle)",
+                $time, dut.u_stage3.row_counter, dut.u_stage3.col_counter, dut.u_stage3.avg_buf_sel);
+        end
+    end
+
+    // Track Stage 3 final output (for comparison with golden)
+    integer s3_final_cnt;
+    initial s3_final_cnt = 0;
+    always @(posedge clk) begin
+        if (dut.s3_valid && s3_final_cnt < 30) begin
+            s3_final_cnt = s3_final_cnt + 1;
+            $display("[S3 FINAL %0d] px=%0d py=%0d avg0_u=%0d avg1_u=%0d win_size=%0d center=%0d",
+                s3_final_cnt, dut.s3_pixel_x, dut.s3_pixel_y,
+                $signed(dut.s3_avg0_u), $signed(dut.s3_avg1_u),
+                dut.s3_win_size_clip, dut.s3_center_pixel);
+        end
+    end
+
+    // Track Stage 2 output
+    integer s2_out_cnt;
+    initial s2_out_cnt = 0;
+    always @(posedge clk) begin
+        if (dut.s2_valid && s2_out_cnt < 20) begin
+            s2_out_cnt = s2_out_cnt + 1;
+            $display("[S2 OUT %0d] px=%0d py=%0d grad=%0d win_size=%0d center=%0d",
+                s2_out_cnt, dut.s2_pixel_x, dut.s2_pixel_y,
+                dut.s2_grad, dut.s2_win_size_clip, dut.s2_center_pixel);
+        end
+    end
+
+    // Check buffer contents during Stage 3 read
+    integer s3_read_cnt;
+    initial s3_read_cnt = 0;
+    always @(posedge clk) begin
+        if (dut.u_stage3.valid_s0_comb && s3_read_cnt < 10) begin
+            s3_read_cnt = s3_read_cnt + 1;
+            $display("[S3 READ %0d] rd_addr=%0d avg_buf_sel=%0d center_buf_0[0]=%0d center_buf_1[0]=%0d center_rd=%0d",
+                s3_read_cnt, dut.u_stage3.rd_addr, dut.u_stage3.avg_buf_sel,
+                dut.u_stage3.center_buf_0[0], dut.u_stage3.center_buf_1[0], dut.u_stage3.center_rd);
+        end
+    end
+
+    // Check pipe_s0 output
+    integer s3_pipe_cnt;
+    initial s3_pipe_cnt = 0;
+    always @(posedge clk) begin
+        if (dut.u_stage3.valid_s0 && s3_pipe_cnt < 10) begin
+            s3_pipe_cnt = s3_pipe_cnt + 1;
+            $display("[S3 PIPE %0d] center_s0=%0d win_size_s0=%0d pixel_x_s0=%0d pixel_y_s0=%0d",
+                s3_pipe_cnt, dut.u_stage3.center_s0, dut.u_stage3.win_size_s0,
+                dut.u_stage3.pixel_x_s0, dut.u_stage3.pixel_y_s0);
         end
     end
 
@@ -386,10 +451,39 @@ module tb_isp_csiir_random;
     integer s4_out_cnt;
     initial s4_out_cnt = 0;
     always @(posedge clk) begin
-        if (dut.s4_dout_valid && s4_out_cnt < 5) begin
+        if (dut.s4_dout_valid && s4_out_cnt < 30) begin
             s4_out_cnt = s4_out_cnt + 1;
             $display("[%0t] S4 Output: pixel (%0d,%0d) dout=%0d",
                 $time, dut.s4_pixel_x, dut.s4_pixel_y, dut.s4_dout);
+        end
+    end
+
+    //=========================================================================
+    // Flush Debug
+    //=========================================================================
+    integer flush_dbg_cnt;
+    initial flush_dbg_cnt = 0;
+
+    always @(posedge clk) begin
+        if (dut.u_stage3.flush_active && flush_dbg_cnt < 20) begin
+            flush_dbg_cnt = flush_dbg_cnt + 1;
+            $display("[FLUSH %0d] time=%0t flush_counter=%0d avg_buf_sel=%0d flush_buf_sel=%0d",
+                flush_dbg_cnt, $time, dut.u_stage3.flush_counter, dut.u_stage3.avg_buf_sel,
+                dut.u_stage3.flush_buf_sel);
+            $display("  pixel_y_rd=%0d center_rd=%0d valid_rd=%0d",
+                dut.u_stage3.pixel_y_rd, dut.u_stage3.center_rd, dut.u_stage3.valid_rd);
+        end
+    end
+
+    // Track buffer contents at end of each row
+    integer row_end_cnt;
+    initial row_end_cnt = 0;
+    always @(posedge clk) begin
+        if (dut.s2_valid && dut.u_stage3.col_counter == 15 && row_end_cnt < 20) begin
+            row_end_cnt = row_end_cnt + 1;
+            $display("[ROW END %0d] row_counter=%0d avg_buf_sel=%0d pixel_y_buf_0[0]=%0d pixel_y_buf_1[0]=%0d",
+                row_end_cnt, dut.u_stage3.row_counter, dut.u_stage3.avg_buf_sel,
+                dut.u_stage3.pixel_y_buf_0[0], dut.u_stage3.pixel_y_buf_1[0]);
         end
     end
 
