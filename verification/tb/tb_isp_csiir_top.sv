@@ -46,12 +46,14 @@ module tb_isp_csiir_top;
     reg                         hsync;
     reg  [DATA_WIDTH-1:0]       din;
     reg                         din_valid;
+    wire                        din_ready;
 
     // Video Output
     wire [DATA_WIDTH-1:0]       dout;
     wire                        dout_valid;
     wire                        dout_vsync;
     wire                        dout_hsync;
+    wire                        dout_ready;
 
     //=========================================================================
     // Test Variables
@@ -93,11 +95,19 @@ module tb_isp_csiir_top;
         .hsync          (hsync),
         .din            (din),
         .din_valid      (din_valid),
+        .din_ready      (din_ready),
         .dout           (dout),
         .dout_valid     (dout_valid),
+        .dout_ready     (dout_ready),
         .dout_vsync     (dout_vsync),
         .dout_hsync     (dout_hsync)
     );
+
+    //=========================================================================
+    // Ready Signal Drive
+    //=========================================================================
+    // Always ready for output (no back-pressure)
+    assign dout_ready = 1'b1;
 
     //=========================================================================
     // Clock Generation
@@ -129,6 +139,50 @@ module tb_isp_csiir_top;
         end
     end
 
+    // Debug: monitor pipeline stages
+    integer s1_cnt, s2_cnt, s3_cnt, s4_cnt;
+    integer lb_window_cnt;
+    integer din_accepted_cnt;
+    integer flush_complete_cnt;
+    integer eol_cnt;
+    integer normal_window_cnt;
+    integer flush_window_cnt;
+    always @(posedge clk) begin
+        if (dut.s1_valid) s1_cnt++;
+        if (dut.s2_valid) s2_cnt++;
+        if (dut.s3_valid) s3_cnt++;
+        if (dut.s4_dout_valid) s4_cnt++;
+        if (dut.u_line_buffer.window_valid) lb_window_cnt++;
+        if (dut.din_valid && dut.din_ready) din_accepted_cnt++;
+        // Count normal vs flush windows
+        if (dut.u_line_buffer.window_valid_next) begin
+            if (dut.u_line_buffer.flush_active)
+                flush_window_cnt++;
+            else
+                normal_window_cnt++;
+        end
+        // Track flush complete
+        if (dut.u_line_buffer.flush_active && dut.u_line_buffer.flush_cnt == 1)
+            flush_complete_cnt++;
+        if (dut.eol) eol_cnt++;
+    end
+
+    // Task to reset debug counters
+    task reset_debug_counters;
+        begin
+            s1_cnt = 0;
+            s2_cnt = 0;
+            s3_cnt = 0;
+            s4_cnt = 0;
+            lb_window_cnt = 0;
+            din_accepted_cnt = 0;
+            flush_complete_cnt = 0;
+            eol_cnt = 0;
+            normal_window_cnt = 0;
+            flush_window_cnt = 0;
+        end
+    endtask
+
     //=========================================================================
     // Tasks
     //=========================================================================
@@ -136,18 +190,18 @@ module tb_isp_csiir_top;
     // Reset task
     task reset_dut;
         begin
-            rst_n    <= 1'b0;
-            psel     <= 1'b0;
-            penable  <= 1'b0;
-            pwrite   <= 1'b0;
-            paddr    <= 8'b0;
-            pwdata   <= 32'b0;
-            vsync    <= 1'b0;
-            hsync    <= 1'b0;
-            din      <= {DATA_WIDTH{1'b0}};
-            din_valid <= 1'b0;
+            rst_n    = 1'b0;
+            psel     = 1'b0;
+            penable  = 1'b0;
+            pwrite   = 1'b0;
+            paddr    = 8'b0;
+            pwdata   = 32'b0;
+            vsync    = 1'b0;
+            hsync    = 1'b0;
+            din      = {DATA_WIDTH{1'b0}};
+            din_valid = 1'b0;
             repeat(10) @(posedge clk);
-            rst_n    <= 1'b1;
+            rst_n    = 1'b1;
             repeat(5) @(posedge clk);
             $display("[%0t] Reset complete", $time);
         end
@@ -159,15 +213,15 @@ module tb_isp_csiir_top;
         input [31:0] data;
         begin
             @(posedge clk);
-            psel    <= 1'b1;
-            pwrite  <= 1'b1;
-            paddr   <= addr;
-            pwdata  <= data;
+            psel    = 1'b1;
+            pwrite  = 1'b1;
+            paddr   = addr;
+            pwdata  = data;
             @(posedge clk);
-            penable <= 1'b1;
+            penable = 1'b1;
             @(posedge clk);
-            penable <= 1'b0;
-            psel    <= 1'b0;
+            penable = 1'b0;
+            psel    = 1'b0;
             @(posedge clk);
         end
     endtask
@@ -179,8 +233,8 @@ module tb_isp_csiir_top;
         begin
             // CTRL register: enable and bypass
             apb_write(8'h00, {30'b0, bypass, enable});
-            // PIC_SIZE register
-            apb_write(8'h04, {IMG_HEIGHT, IMG_WIDTH});
+            // PIC_SIZE register - must use 16-bit values for proper concatenation
+            apb_write(8'h04, {16'(IMG_HEIGHT), 16'(IMG_WIDTH)});
             // Thresholds
             apb_write(8'h0C, 32'd16);  // THRESH0
             apb_write(8'h10, 32'd24);  // THRESH1
@@ -203,18 +257,15 @@ module tb_isp_csiir_top;
         begin
             pixel_in_count = 0;
 
-            // Start of frame
-            vsync <= 1'b1;
-            hsync <= 1'b1;
+            // Start of frame - use blocking assignments with setup time for proper edge detection
+            #0.5 vsync = 1'b1;
             @(posedge clk);
-            vsync <= 1'b0;
+            #0.5 vsync = 1'b0;
+            @(posedge clk);  // Extra cycle for frame_started to be set
 
             // Send pixels
             for (y = 0; y < IMG_HEIGHT; y++) begin
-                hsync <= 1'b1;
-                @(posedge clk);
-                hsync <= 1'b0;
-
+                // Send pixels first
                 for (x = 0; x < IMG_WIDTH; x++) begin
                     // Generate pattern
                     case (pattern_type)
@@ -225,21 +276,25 @@ module tb_isp_csiir_top;
                         default: pixel_val = 512;
                     endcase
 
-                    din      <= pixel_val[DATA_WIDTH-1:0];
-                    din_valid <= 1'b1;
+                    din      = pixel_val[DATA_WIDTH-1:0];
+                    din_valid = 1'b1;
                     pixel_in_count++;
                     @(posedge clk);
+                    // Only wait for din_ready in processing mode (not bypass)
+                    // In bypass mode, din_ready is 0 but data still flows through bypass path
+                    if (!dut.cfg_bypass) begin
+                        while (!din_ready) @(posedge clk);
+                    end
+                    din_valid = 1'b0;  // Clear after handshake
                 end
 
-                din_valid <= 1'b0;
-                hsync <= 1'b1;
+                // HSYNC pulse at END of row (indicates EOL)
+                din_valid = 1'b0;
+                #0.5 hsync = 1'b1;
+                @(posedge clk);
+                #0.5 hsync = 1'b0;
                 repeat(3) @(posedge clk);
             end
-
-            // End of frame
-            vsync <= 1'b1;
-            repeat(10) @(posedge clk);
-            vsync <= 1'b0;
 
             $display("[%0t] Frame sent, pixels in = %0d", $time, pixel_in_count);
         end
@@ -251,8 +306,13 @@ module tb_isp_csiir_top;
         begin
             timeout = 0;
 
-            // Wait for outputs
-            repeat(IMG_WIDTH * IMG_HEIGHT + 200) begin
+            // Wait for outputs - need extra time for:
+            // 1. Line buffer startup (2 rows)
+            // 2. Stage 3 row delay buffer (1 row)
+            // 3. Pipeline stages (~10 cycles)
+            // 4. Stage 3 flush at end of frame (1 row)
+            // Total: IMG_WIDTH * IMG_HEIGHT + extra rows + margin
+            repeat(IMG_WIDTH * IMG_HEIGHT * 2 + 1000) begin
                 @(posedge clk);
                 if (dout_valid) begin
                     // Output captured by monitor
@@ -262,8 +322,8 @@ module tb_isp_csiir_top;
             $display("[%0t] Output statistics:", $time);
             $display("  Pixels in:    %0d", pixel_in_count);
             $display("  Pixels out:   %0d", pixel_out_count);
-            $display("  Output min:   %0d", min_output);
-            $display("  Output max:   %0d", max_output);
+            $display("  Pipeline:     S1=%0d S2=%0d S3=%0d S4=%0d", s1_cnt, s2_cnt, s3_cnt, s4_cnt);
+            $display("  Output range: %0d - %0d", min_output, max_output);
             $display("  Errors:       %0d", error_count);
 
             if (pixel_out_count >= pixel_in_count - 10 && error_count == 0) begin
@@ -288,6 +348,7 @@ module tb_isp_csiir_top;
             error_count = 0;
             min_output = 1024;
             max_output = 0;
+            reset_debug_counters();
 
             $display("\n========================================");
             $display("[%0t] Starting Smoke Test", $time);
@@ -314,6 +375,7 @@ module tb_isp_csiir_top;
             error_count = 0;
             min_output = 1024;
             max_output = 0;
+            reset_debug_counters();
 
             $display("\n========================================");
             $display("[%0t] Starting Random Test", $time);
@@ -338,6 +400,7 @@ module tb_isp_csiir_top;
             error_count = 0;
             min_output = 1024;
             max_output = 0;
+            reset_debug_counters();
 
             $display("\n========================================");
             $display("[%0t] Starting Bypass Test", $time);
@@ -362,6 +425,7 @@ module tb_isp_csiir_top;
             error_count = 0;
             min_output = 1024;
             max_output = 0;
+            reset_debug_counters();
 
             $display("\n========================================");
             $display("[%0t] Starting Zero Input Test", $time);
@@ -386,6 +450,7 @@ module tb_isp_csiir_top;
             error_count = 0;
             min_output = 1024;
             max_output = 0;
+            reset_debug_counters();
 
             $display("\n========================================");
             $display("[%0t] Starting Max Input Test", $time);
@@ -444,7 +509,7 @@ module tb_isp_csiir_top;
 
     // Timeout watchdog
     initial begin
-        #2000000;  // 2ms timeout
+        #50000000;  // 50ms timeout for multiple tests
         if (!test_done) begin
             $display("[%0t] ERROR: Simulation timeout!", $time);
             $finish;
