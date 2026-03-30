@@ -1,5 +1,7 @@
 # ISP-CSIIR 算法参考文档
 
+本文按处理顺序描述 ISP-CSIIR 参考算法，依次包括：梯度计算与窗口大小确定、多尺度方向性平均、梯度加权方向融合，以及 IIR 滤波与混合输出。
+
 ## 1. 记号与约定
 
 ### 1.1 命名约定
@@ -72,6 +74,8 @@ grad(i, j)   = |grad_h(i, j)| / 5 + |grad_v(i, j)| / 5
 说明：`grad_h` 和 `grad_v` 均基于原始无符号窗口 `src_uv_u10_5x5` 做卷积计算。
 
 ### 2.4 窗口大小 LUT
+
+LUT 输入为 `Max(grad(i-1, j), grad(i, j), grad(i+1, j))`，输出为 `win_size_grad(i, j)`，随后再做一次限幅得到 `win_size_clip(i, j)`。
 
 ```text
 win_size_clip_y   = [15, 23, 31, 39]
@@ -216,6 +220,8 @@ avg1_factor_r = avg1_factor_c * avg_factor_r_mask
 
 ### 3.4 平均值计算
 
+仅当对应核非零时，才启用该路径的平均值计算。
+
 ```text
 avg0_enable(i, j) = (sum(avg0_factor_c) != 0)
 avg1_enable(i, j) = (sum(avg1_factor_c) != 0)
@@ -286,6 +292,8 @@ grad_sum = grad_inv_u + grad_inv_d + grad_inv_l + grad_inv_r + grad_inv_c
 
 ### 4.3 梯度融合
 
+当 `grad_sum == 0` 时，退化为五个方向的等权平均；否则按逆序重映射后的梯度值加权融合。
+
 ```text
 if (grad_sum == 0):
     if (avg0_enable(i, j)):
@@ -328,6 +336,8 @@ else:
 ## 5. IIR 滤波与混合输出
 
 ### 5.1 中心像素与上方向均值融合
+
+该步骤使用 `reg_siir_blending_ratio` 在梯度融合结果与上方向均值之间做线性混合。
 
 ```text
 blend_ratio_idx(i, j) = win_size_clip(i, j) / 8 - 2
@@ -475,6 +485,8 @@ else:
 ```
 
 ### 5.3 最终混合
+
+最终输出根据 `win_size_clip(i, j)` 所在区间，在大小两条窗口路径之间切换或插值。
 
 ```text
 win_size_remain_8(i, j) = win_size_clip(i, j) % 8
