@@ -404,22 +404,91 @@ module tb_isp_csiir_random;
     always @(posedge clk) begin
         if (dut.s3_valid && s3_final_cnt < 30) begin
             s3_final_cnt = s3_final_cnt + 1;
-            $display("[S3 FINAL %0d] px=%0d py=%0d avg0_u=%0d avg1_u=%0d win_size=%0d center=%0d",
+            $display("[S3 FINAL %0d] px=%0d py=%0d blend0=%0d blend1=%0d avg0_u=%0d win_size=%0d center=%0d grad_sum_zero=%0d avg0_avg=%0d avg1_avg=%0d",
                 s3_final_cnt, dut.s3_pixel_x, dut.s3_pixel_y,
-                $signed(dut.s3_avg0_u), $signed(dut.s3_avg1_u),
-                dut.s3_win_size_clip, dut.s3_center_pixel);
+                $signed(dut.s3_blend0), $signed(dut.s3_blend1),
+                $signed(dut.s3_avg0_u), dut.s3_win_size_clip, dut.s3_center_pixel,
+                dut.u_stage3.grad_sum_zero_s5,
+                $signed(dut.u_stage3.avg0_avg_s5), $signed(dut.u_stage3.avg1_avg_s5));
         end
     end
 
-    // Track Stage 2 output
+    // Track Stage 2 output with avg values
     integer s2_out_cnt;
     initial s2_out_cnt = 0;
     always @(posedge clk) begin
         if (dut.s2_valid && s2_out_cnt < 20) begin
             s2_out_cnt = s2_out_cnt + 1;
-            $display("[S2 OUT %0d] px=%0d py=%0d grad=%0d win_size=%0d center=%0d",
+            $display("[S2 OUT %0d] px=%0d py=%0d avg0_c=%0d avg0_u=%0d grad=%0d win_size=%0d center=%0d",
                 s2_out_cnt, dut.s2_pixel_x, dut.s2_pixel_y,
+                $signed(dut.u_stage2.avg0_c), $signed(dut.u_stage2.avg0_u),
                 dut.s2_grad, dut.s2_win_size_clip, dut.s2_center_pixel);
+        end
+    end
+
+    // Track Stage 3 pipeline avg_s2 values
+    integer s3_s2_cnt;
+    initial s3_s2_cnt = 0;
+    always @(posedge clk) begin
+        if (dut.u_stage3.valid_s2 && s3_s2_cnt < 10) begin
+            s3_s2_cnt = s3_s2_cnt + 1;
+            $display("[S3 S2 %0d] avg0_s2[0]=%0d avg0_s2[1]=%0d avg0_s2[2]=%0d avg0_s2[3]=%0d avg0_s2[4]=%0d avg0_sum=%0d avg0_avg=%0d",
+                s3_s2_cnt,
+                $signed(dut.u_stage3.avg0_s2[0]), $signed(dut.u_stage3.avg0_s2[1]),
+                $signed(dut.u_stage3.avg0_s2[2]), $signed(dut.u_stage3.avg0_s2[3]),
+                $signed(dut.u_stage3.avg0_s2[4]),
+                $signed(dut.u_stage3.avg0_sum_s2), $signed(dut.u_stage3.avg0_avg_s2));
+        end
+    end
+
+    // Track window capture edge - limit debug output
+    integer cap_cnt;
+    initial cap_cnt = 0;
+
+    // Debug: Show first few captures to verify timing
+    always @(posedge clk) begin
+        if (dut.u_line_buffer.window_capture && cap_cnt < 5) begin
+            cap_cnt = cap_cnt + 1;
+            $display("[CAP %0d] wr_col_ptr=%0d capture_addr=%0d window_cap_2_2=%0d",
+                cap_cnt, dut.u_line_buffer.wr_col_ptr,
+                dut.u_line_buffer.capture_addr,
+                dut.u_line_buffer.window_cap_2_2);
+        end
+    end
+
+    // Track window_valid edge
+    integer lb_out_cnt;
+    initial lb_out_cnt = 0;
+    always @(posedge clk) begin
+        if (dut.u_line_buffer.window_valid && lb_out_cnt < 10) begin
+            lb_out_cnt = lb_out_cnt + 1;
+            $display("[LB OUT %0d] center_x=%0d center_y=%0d window_2_2=%0d wr_col_ptr=%0d rd_col_ptr=%0d",
+                lb_out_cnt, dut.u_line_buffer.center_x, dut.u_line_buffer.center_y,
+                dut.u_line_buffer.window_2_2, dut.u_line_buffer.wr_col_ptr, dut.u_line_buffer.rd_col_ptr);
+        end
+    end
+
+    // Track memory writes (first few only)
+    integer mem_wr_cnt;
+    initial mem_wr_cnt = 0;
+    always @(posedge clk) begin
+        if (dut.u_line_buffer.din_valid && dut.u_line_buffer.din_ready && mem_wr_cnt < 10) begin
+            mem_wr_cnt = mem_wr_cnt + 1;
+            $display("[MEM WR %0d] wr_col_ptr=%0d din=%0d wr_row_ptr=%0d",
+                mem_wr_cnt, dut.u_line_buffer.wr_col_ptr, dut.u_line_buffer.din, dut.u_line_buffer.wr_row_ptr);
+        end
+    end
+
+    // Track window_valid_next edge (when window is captured)
+    integer wvn_cnt;
+    initial wvn_cnt = 0;
+    always @(posedge clk) begin
+        if (dut.u_line_buffer.window_valid_next && wvn_cnt < 10) begin
+            wvn_cnt = wvn_cnt + 1;
+            $display("[WVN %0d] wr_col_ptr=%0d output_center=%0d col_0=%0d window_comb_2_2=%0d mem0_0=%0d",
+                wvn_cnt, dut.u_line_buffer.wr_col_ptr, dut.u_line_buffer.output_center,
+                dut.u_line_buffer.col_0, dut.u_line_buffer.window_comb_2_2,
+                dut.u_line_buffer.line_mem_0[0]);
         end
     end
 
@@ -447,14 +516,53 @@ module tb_isp_csiir_random;
         end
     end
 
-    // Track Stage 4 output validation (first few only)
+    // Track Stage 4 inputs
+    integer s4_in_cnt;
+    initial s4_in_cnt = 0;
+    always @(posedge clk) begin
+        if (dut.s3_valid && s4_in_cnt < 10) begin
+            s4_in_cnt = s4_in_cnt + 1;
+            $display("[S4 IN %0d] blend0=%0d avg0_u=%0d center=%0d win_size=%0d",
+                s4_in_cnt, $signed(dut.s3_blend0), $signed(dut.s3_avg0_u),
+                dut.s3_center_pixel, dut.s3_win_size_clip);
+        end
+    end
+
+    // Track Stage 4 outputs
     integer s4_out_cnt;
     initial s4_out_cnt = 0;
     always @(posedge clk) begin
-        if (dut.s4_dout_valid && s4_out_cnt < 30) begin
+        if (dut.s4_dout_valid && s4_out_cnt < 20) begin
             s4_out_cnt = s4_out_cnt + 1;
-            $display("[%0t] S4 Output: pixel (%0d,%0d) dout=%0d",
-                $time, dut.s4_pixel_x, dut.s4_pixel_y, dut.s4_dout);
+            $display("[S4 OUT %0d] dout=%0d blend0_iir=%0d blend0_out=%0d center=%0d ratio=%0d",
+                s4_out_cnt, dut.s4_dout,
+                $signed(dut.u_stage4.blend0_iir_sat), $signed(dut.u_stage4.blend0_out_sat),
+                dut.u_stage4.center_s2, dut.u_stage4.ratio_s1);
+        end
+    end
+
+    // Track Stage 4 window mixing
+    integer s4_win_cnt;
+    initial s4_win_cnt = 0;
+    always @(posedge clk) begin
+        if (dut.u_stage4.valid_s3 && s4_win_cnt < 10) begin
+            s4_win_cnt = s4_win_cnt + 1;
+            $display("[S4 WIN %0d] blend0_iir=%0d center=%0d factor=%0d blend0_out=%0d",
+                s4_win_cnt, $signed(dut.u_stage4.blend0_iir_s2), $signed(dut.u_stage4.center_s11),
+                dut.u_stage4.factor_s2, $signed(dut.u_stage4.blend0_out_sat));
+        end
+    end
+
+    // Track Stage 4 IIR calculation internals
+    integer s4_iir_cnt;
+    initial s4_iir_cnt = 0;
+    always @(posedge clk) begin
+        if (dut.u_stage4.valid_s1 && s4_iir_cnt < 10) begin
+            s4_iir_cnt = s4_iir_cnt + 1;
+            $display("[S4 IIR %0d] blend0_s1=%0d avg0_u_s1=%0d ratio_s1=%0d iir_comb=%0d iir_sat=%0d",
+                s4_iir_cnt, $signed(dut.u_stage4.blend0_s1), $signed(dut.u_stage4.avg0_u_s1),
+                dut.u_stage4.ratio_s1, $signed(dut.u_stage4.blend0_iir_comb),
+                $signed(dut.u_stage4.blend0_iir_sat));
         end
     end
 

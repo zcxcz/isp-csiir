@@ -134,8 +134,10 @@ module stage4_iir_blend #(
                                   (ratio_idx_comb == 1) ? blending_ratio_1 :
                                   (ratio_idx_comb == 2) ? blending_ratio_2 : blending_ratio_3;
 
-    // Blend factor for window mixing
-    wire [2:0] blend_factor_comb = |win_size_s0[5:3] ? win_size_s0[5:3] : 3'd1;
+    // Blend factor for window mixing: win_size // 8, capped at 4, min 1
+    wire [2:0] blend_factor_comb = (win_size_s0 >= 6'd32) ? 3'd4 :
+                                   (win_size_s0 >= 6'd24) ? 3'd3 :
+                                   (win_size_s0 >= 6'd16) ? 3'd2 : 3'd1;
 
     // Window size remainder
     wire [2:0] win_remain_comb = win_size_s0[2:0];
@@ -183,8 +185,10 @@ module stage4_iir_blend #(
     // Cycle 2: IIR Mixing (Signed Arithmetic)
     //=========================================================================
     // IIR blend: ratio * current + (64 - ratio) * previous / 64
-    wire signed [IIR_WIDTH-1:0] blend0_iir_comb = (ratio_s1 * blend0_s1 + (64 - ratio_s1) * avg0_u_s1) >>> 6;
-    wire signed [IIR_WIDTH-1:0] blend1_iir_comb = (ratio_s1 * blend1_s1 + (64 - ratio_s1) * avg1_u_s1) >>> 6;
+    // IMPORTANT: Must use $signed() cast on ratio to prevent signed/unsigned mixing
+    // which causes signed values to be treated as unsigned
+    wire signed [IIR_WIDTH-1:0] blend0_iir_comb = ($signed(ratio_s1) * blend0_s1 + $signed(64 - ratio_s1) * avg0_u_s1) >>> 6;
+    wire signed [IIR_WIDTH-1:0] blend1_iir_comb = ($signed(ratio_s1) * blend1_s1 + $signed(64 - ratio_s1) * avg1_u_s1) >>> 6;
 
     // Saturate to s11 range [-512, +511]
     wire signed [SIGNED_WIDTH-1:0] blend0_iir_sat;

@@ -573,6 +573,22 @@ module stage3_gradient_fusion #(
     wire signed [SIGNED_WIDTH-1:0] avg1_u_s2 = avg1_s2[1];
 
     //=========================================================================
+    // Compute simple average for grad_sum=0 fallback (at Stage 2)
+    //=========================================================================
+    // This is computed here and passed through the pipeline to Stage 4
+    // Sum of 5 x 11-bit values needs 14 bits to avoid overflow
+    wire signed [13:0] avg0_sum_s2 = avg0_s2[0] + avg0_s2[1] + avg0_s2[2] + avg0_s2[3] + avg0_s2[4];
+    wire signed [13:0] avg1_sum_s2 = avg1_s2[0] + avg1_s2[1] + avg1_s2[2] + avg1_s2[3] + avg1_s2[4];
+
+    // Divide by 5: x/5 ≈ x*205 >> 10 (since 205/1024 ≈ 0.200)
+    // 14-bit * 10-bit = 24-bit result
+    wire signed [23:0] avg0_avg_full = avg0_sum_s2 * $signed(10'd205);
+    wire signed [23:0] avg1_avg_full = avg1_sum_s2 * $signed(10'd205);
+    // Use arithmetic right shift (>>>) for signed division
+    wire signed [SIGNED_WIDTH-1:0] avg0_avg_s2 = avg0_avg_full >>> 10;
+    wire signed [SIGNED_WIDTH-1:0] avg1_avg_s2 = avg1_avg_full >>> 10;
+
+    //=========================================================================
     // Cycle 3: Weighted Multiplication (Signed)
     //=========================================================================
     wire signed [SIGNED_WIDTH+GRAD_WIDTH:0] blend0_partial [0:4];
@@ -589,10 +605,10 @@ module stage3_gradient_fusion #(
     //=========================================================================
     // Cycle 3 Pipeline Registers
     //=========================================================================
-    // Include avg0_u and avg1_u for proper pipeline timing
-    localparam PIPE_S3_WIDTH = 2 * SIGNED_WIDTH + 10 * (SIGNED_WIDTH + GRAD_WIDTH + 1) + 5 * GRAD_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
+    // Include avg0_u, avg1_u, and simple averages (avg0_avg, avg1_avg) for grad_sum=0 fallback
+    localparam PIPE_S3_WIDTH = 4 * SIGNED_WIDTH + 10 * (SIGNED_WIDTH + GRAD_WIDTH + 1) + 5 * GRAD_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
 
-    wire [PIPE_S3_WIDTH-1:0] pipe_s3_din = {avg0_u_s2, avg1_u_s2,
+    wire [PIPE_S3_WIDTH-1:0] pipe_s3_din = {avg0_u_s2, avg1_u_s2, avg0_avg_s2, avg1_avg_s2,
                                             blend0_partial[0], blend0_partial[1], blend0_partial[2], blend0_partial[3], blend0_partial[4],
                                             blend1_partial[0], blend1_partial[1], blend1_partial[2], blend1_partial[3], blend1_partial[4],
                                             g_s2[0], g_s2[1], g_s2[2], g_s2[3], g_s2[4],
@@ -616,23 +632,25 @@ module stage3_gradient_fusion #(
         .ready_in  (stage3_ready)
     );
 
-    // Unpack signals (avg0_u, avg1_u at MSB, then blend partials, grads, etc.)
+    // Unpack signals (avg0_u, avg1_u, avg0_avg, avg1_avg at MSB, then blend partials, grads, etc.)
     localparam MUL_WIDTH = SIGNED_WIDTH + GRAD_WIDTH + 1;
     wire signed [SIGNED_WIDTH-1:0] avg0_u_s3 = pipe_s3_dout[PIPE_S3_WIDTH-1 -: SIGNED_WIDTH];
     wire signed [SIGNED_WIDTH-1:0] avg1_u_s3 = pipe_s3_dout[PIPE_S3_WIDTH-1-SIGNED_WIDTH -: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg0_avg_s3 = pipe_s3_dout[PIPE_S3_WIDTH-1-2*SIGNED_WIDTH -: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_avg_s3 = pipe_s3_dout[PIPE_S3_WIDTH-1-3*SIGNED_WIDTH -: SIGNED_WIDTH];
 
     wire signed [MUL_WIDTH-1:0] blend0_p_s3 [0:4], blend1_p_s3 [0:4];
     generate
         for (gi = 0; gi < 5; gi = gi + 1) begin : gen_blend_p_s3
-            assign blend0_p_s3[gi] = pipe_s3_dout[PIPE_S3_WIDTH-1-2*SIGNED_WIDTH-gi*MUL_WIDTH -: MUL_WIDTH];
-            assign blend1_p_s3[gi] = pipe_s3_dout[PIPE_S3_WIDTH-1-2*SIGNED_WIDTH-(5+gi)*MUL_WIDTH -: MUL_WIDTH];
+            assign blend0_p_s3[gi] = pipe_s3_dout[PIPE_S3_WIDTH-1-4*SIGNED_WIDTH-gi*MUL_WIDTH -: MUL_WIDTH];
+            assign blend1_p_s3[gi] = pipe_s3_dout[PIPE_S3_WIDTH-1-4*SIGNED_WIDTH-(5+gi)*MUL_WIDTH -: MUL_WIDTH];
         end
     endgenerate
 
     wire [GRAD_WIDTH-1:0]   g_s3 [0:4];
     generate
         for (gi = 0; gi < 5; gi = gi + 1) begin : gen_g_s3
-            assign g_s3[gi] = pipe_s3_dout[2*SIGNED_WIDTH + 10*MUL_WIDTH + (4-gi)*GRAD_WIDTH +: GRAD_WIDTH];
+            assign g_s3[gi] = pipe_s3_dout[4*SIGNED_WIDTH + 10*MUL_WIDTH + (4-gi)*GRAD_WIDTH +: GRAD_WIDTH];
         end
     endgenerate
 
@@ -658,10 +676,10 @@ module stage3_gradient_fusion #(
     //=========================================================================
     // Cycle 4 Pipeline Registers
     //=========================================================================
-    // Include avg0_u and avg1_u for proper pipeline timing
-    localparam PIPE_S4_WIDTH = 2 * SIGNED_WIDTH + 2 * BLEND_WIDTH + GRAD_SUM_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 3;
+    // Include avg0_u, avg1_u, avg0_avg, avg1_avg for proper pipeline timing
+    localparam PIPE_S4_WIDTH = 4 * SIGNED_WIDTH + 2 * BLEND_WIDTH + GRAD_SUM_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 3;
 
-    wire [PIPE_S4_WIDTH-1:0] pipe_s4_din = {avg0_u_s3, avg1_u_s3,
+    wire [PIPE_S4_WIDTH-1:0] pipe_s4_din = {avg0_u_s3, avg1_u_s3, avg0_avg_s3, avg1_avg_s3,
                                             blend0_sum_comb, blend1_sum_comb, grad_sum_comb,
                                             win_size_s3, pixel_x_s3, pixel_y_s3, center_s3,
                                             blend0_sign, blend1_sign, valid_s3};
@@ -684,13 +702,15 @@ module stage3_gradient_fusion #(
         .ready_in  (stage3_ready)
     );
 
-    // Unpack signals (avg0_u, avg1_u at MSB)
+    // Unpack signals (avg0_u, avg1_u, avg0_avg, avg1_avg at MSB)
     wire signed [SIGNED_WIDTH-1:0] avg0_u_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1 -: SIGNED_WIDTH];
     wire signed [SIGNED_WIDTH-1:0] avg1_u_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-SIGNED_WIDTH -: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg0_avg_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-2*SIGNED_WIDTH -: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_avg_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-3*SIGNED_WIDTH -: SIGNED_WIDTH];
 
-    wire signed [BLEND_WIDTH-1:0] blend0_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-2*SIGNED_WIDTH -: BLEND_WIDTH];
-    wire signed [BLEND_WIDTH-1:0] blend1_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-2*SIGNED_WIDTH-BLEND_WIDTH -: BLEND_WIDTH];
-    wire [GRAD_SUM_WIDTH-1:0] grad_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-2*SIGNED_WIDTH-2*BLEND_WIDTH -: GRAD_SUM_WIDTH];
+    wire signed [BLEND_WIDTH-1:0] blend0_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-4*SIGNED_WIDTH -: BLEND_WIDTH];
+    wire signed [BLEND_WIDTH-1:0] blend1_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-4*SIGNED_WIDTH-BLEND_WIDTH -: BLEND_WIDTH];
+    wire [GRAD_SUM_WIDTH-1:0] grad_sum_s4 = pipe_s4_dout[PIPE_S4_WIDTH-1-4*SIGNED_WIDTH-2*BLEND_WIDTH -: GRAD_SUM_WIDTH];
     wire [WIN_SIZE_WIDTH-1:0] win_size_s4 = pipe_s4_dout[DATA_WIDTH + ROW_CNT_WIDTH + LINE_ADDR_WIDTH + 3 +: WIN_SIZE_WIDTH];
     wire [LINE_ADDR_WIDTH-1:0] pixel_x_s4 = pipe_s4_dout[DATA_WIDTH + ROW_CNT_WIDTH + 3 +: LINE_ADDR_WIDTH];
     wire [ROW_CNT_WIDTH-1:0] pixel_y_s4 = pipe_s4_dout[DATA_WIDTH + 3 +: ROW_CNT_WIDTH];
@@ -742,9 +762,9 @@ module stage3_gradient_fusion #(
     //=========================================================================
     // Pass-through signals for Cycle 5
     //=========================================================================
-    localparam PIPE_S5_WIDTH = LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 2 * SIGNED_WIDTH + WIN_SIZE_WIDTH + DATA_WIDTH + 2;
+    localparam PIPE_S5_WIDTH = LINE_ADDR_WIDTH + ROW_CNT_WIDTH + 4 * SIGNED_WIDTH + WIN_SIZE_WIDTH + DATA_WIDTH + GRAD_SUM_WIDTH + 2;
 
-    wire [PIPE_S5_WIDTH-1:0] pipe_s5_din = {pixel_x_s4, pixel_y_s4, avg0_u_s4, avg1_u_s4, win_size_s4, center_s4, blend0_sign_s4, blend1_sign_s4};
+    wire [PIPE_S5_WIDTH-1:0] pipe_s5_din = {pixel_x_s4, pixel_y_s4, avg0_u_s4, avg1_u_s4, avg0_avg_s4, avg1_avg_s4, win_size_s4, center_s4, grad_sum_s4, blend0_sign_s4, blend1_sign_s4};
 
     wire [PIPE_S5_WIDTH-1:0] pipe_s5_dout;
 
@@ -765,23 +785,43 @@ module stage3_gradient_fusion #(
 
     wire [LINE_ADDR_WIDTH-1:0] pixel_x_s5 = pipe_s5_dout[PIPE_S5_WIDTH-1 -: LINE_ADDR_WIDTH];
     wire [ROW_CNT_WIDTH-1:0] pixel_y_s5 = pipe_s5_dout[PIPE_S5_WIDTH-1-LINE_ADDR_WIDTH -: ROW_CNT_WIDTH];
-    wire signed [SIGNED_WIDTH-1:0] avg0_u_s5 = pipe_s5_dout[WIN_SIZE_WIDTH + DATA_WIDTH + SIGNED_WIDTH + 2 +: SIGNED_WIDTH];
-    wire signed [SIGNED_WIDTH-1:0] avg1_u_s5 = pipe_s5_dout[WIN_SIZE_WIDTH + DATA_WIDTH + 2 +: SIGNED_WIDTH];
-    wire [WIN_SIZE_WIDTH-1:0] win_size_s5 = pipe_s5_dout[DATA_WIDTH + 2 +: WIN_SIZE_WIDTH];
-    wire [DATA_WIDTH-1:0] center_s5 = pipe_s5_dout[2 +: DATA_WIDTH];
+    // Unpacking from LSB side: blend_signs(2) + grad_sum(17) + center(10) + win_size(6) + avg1_avg(11) + avg0_avg(11) + avg1_u(11) + avg0_u(11)
+    wire signed [SIGNED_WIDTH-1:0] avg0_u_s5 = pipe_s5_dout[GRAD_SUM_WIDTH + WIN_SIZE_WIDTH + DATA_WIDTH + 3*SIGNED_WIDTH + 2 +: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_u_s5 = pipe_s5_dout[GRAD_SUM_WIDTH + WIN_SIZE_WIDTH + DATA_WIDTH + 2*SIGNED_WIDTH + 2 +: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg0_avg_s5 = pipe_s5_dout[GRAD_SUM_WIDTH + WIN_SIZE_WIDTH + DATA_WIDTH + SIGNED_WIDTH + 2 +: SIGNED_WIDTH];
+    wire signed [SIGNED_WIDTH-1:0] avg1_avg_s5 = pipe_s5_dout[GRAD_SUM_WIDTH + WIN_SIZE_WIDTH + DATA_WIDTH + 2 +: SIGNED_WIDTH];
+    wire [WIN_SIZE_WIDTH-1:0] win_size_s5 = pipe_s5_dout[GRAD_SUM_WIDTH + DATA_WIDTH + 2 +: WIN_SIZE_WIDTH];
+    wire [DATA_WIDTH-1:0] center_s5 = pipe_s5_dout[GRAD_SUM_WIDTH + 2 +: DATA_WIDTH];
+    wire [GRAD_SUM_WIDTH-1:0] grad_sum_s5 = pipe_s5_dout[2 +: GRAD_SUM_WIDTH];
     wire blend0_sign_s5 = pipe_s5_dout[1];
     wire blend1_sign_s5 = pipe_s5_dout[0];
 
     //=========================================================================
-    // Restore sign and saturate
+    // Restore sign and saturate with grad_sum=0 special case
     //=========================================================================
+    // When grad_sum = 0, the LUT divider returns 0, but the algorithm
+    // should use a simple average of the avg values instead.
+    // This matches Python model: if grad_sum == 0: blend = sum(avg) // 5
+    //
+    // FIXED: All values are now properly aligned at Stage 5:
+    // - grad_sum_s5 is from S5 pipeline (aligned with divider output)
+    // - avg0_avg_s5, avg1_avg_s5 are pre-computed simple averages from S2
+
+    // Detect grad_sum = 0 (using grad_sum_s5 from pipe_s5_dout)
+    wire grad_sum_zero_s5 = (grad_sum_s5 == 0);
+
+    // Select between LUT divider output and simple average
     wire signed [SIGNED_WIDTH-1:0] blend0_div_signed = blend0_sign_s5 ? -blend0_quot : blend0_quot;
     wire signed [SIGNED_WIDTH-1:0] blend1_div_signed = blend1_sign_s5 ? -blend1_quot : blend1_quot;
 
-    wire signed [SIGNED_WIDTH-1:0] blend0_div_comb = (blend0_div_signed > $signed(11'sd511)) ? $signed(11'sd511) :
-                                                     (blend0_div_signed < $signed(-11'sd512)) ? $signed(-11'sd512) : blend0_div_signed;
-    wire signed [SIGNED_WIDTH-1:0] blend1_div_comb = (blend1_div_signed > $signed(11'sd511)) ? $signed(11'sd511) :
-                                                     (blend1_div_signed < $signed(-11'sd512)) ? $signed(-11'sd512) : blend1_div_signed;
+    // Use simple average when grad_sum = 0, otherwise use LUT divider result
+    wire signed [SIGNED_WIDTH-1:0] blend0_with_fallback = grad_sum_zero_s5 ? avg0_avg_s5 : blend0_div_signed;
+    wire signed [SIGNED_WIDTH-1:0] blend1_with_fallback = grad_sum_zero_s5 ? avg1_avg_s5 : blend1_div_signed;
+
+    wire signed [SIGNED_WIDTH-1:0] blend0_div_comb = (blend0_with_fallback > $signed(11'sd511)) ? $signed(11'sd511) :
+                                                     (blend0_with_fallback < $signed(-11'sd512)) ? $signed(-11'sd512) : blend0_with_fallback;
+    wire signed [SIGNED_WIDTH-1:0] blend1_div_comb = (blend1_with_fallback > $signed(11'sd511)) ? $signed(11'sd511) :
+                                                     (blend1_with_fallback < $signed(-11'sd512)) ? $signed(-11'sd512) : blend1_with_fallback;
 
     //=========================================================================
     // Output Registers

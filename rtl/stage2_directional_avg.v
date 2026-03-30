@@ -335,19 +335,16 @@ module stage2_directional_avg #(
     // Cycle 3: Division Output (Signed) with Saturation
     //=========================================================================
     // Integer division for averages (signed result)
-    // Use signed weight for proper division
-    wire signed [7:0] w_c_s6_signed = w_c_s6;
-    wire signed [7:0] w_u_s6_signed = w_u_s6;
-    wire signed [7:0] w_d_s6_signed = w_d_s6;
-    wire signed [7:0] w_l_s6_signed = w_l_s6;
-    wire signed [7:0] w_r_s6_signed = w_r_s6;
+    // IMPORTANT: Must use $signed() cast on weight to ensure signed division
+    // Otherwise Icarus Verilog treats signed/unsigned as unsigned/unsigned
 
-    // Division with signed weights - use wider intermediate result
-    wire signed [ACC_WIDTH-1:0] avg0_c_div_full = (w_c_s6 != 0) ? (sum_c_s6 / w_c_s6_signed) : {ACC_WIDTH{1'b0}};
-    wire signed [ACC_WIDTH-1:0] avg0_u_div_full = (w_u_s6 != 0) ? (sum_u_s6 / w_u_s6_signed) : {ACC_WIDTH{1'b0}};
-    wire signed [ACC_WIDTH-1:0] avg0_d_div_full = (w_d_s6 != 0) ? (sum_d_s6 / w_d_s6_signed) : {ACC_WIDTH{1'b0}};
-    wire signed [ACC_WIDTH-1:0] avg0_l_div_full = (w_l_s6 != 0) ? (sum_l_s6 / w_l_s6_signed) : {ACC_WIDTH{1'b0}};
-    wire signed [ACC_WIDTH-1:0] avg0_r_div_full = (w_r_s6 != 0) ? (sum_r_s6 / w_r_s6_signed) : {ACC_WIDTH{1'b0}};
+    // Division with $signed cast on weights for proper signed division
+    // CRITICAL: Must cast the else branch to signed, otherwise ternary result becomes unsigned
+    wire signed [ACC_WIDTH-1:0] avg0_c_div_full = (w_c_s6 != 0) ? (sum_c_s6 / $signed(w_c_s6)) : $signed({ACC_WIDTH{1'b0}});
+    wire signed [ACC_WIDTH-1:0] avg0_u_div_full = (w_u_s6 != 0) ? (sum_u_s6 / $signed(w_u_s6)) : $signed({ACC_WIDTH{1'b0}});
+    wire signed [ACC_WIDTH-1:0] avg0_d_div_full = (w_d_s6 != 0) ? (sum_d_s6 / $signed(w_d_s6)) : $signed({ACC_WIDTH{1'b0}});
+    wire signed [ACC_WIDTH-1:0] avg0_l_div_full = (w_l_s6 != 0) ? (sum_l_s6 / $signed(w_l_s6)) : $signed({ACC_WIDTH{1'b0}});
+    wire signed [ACC_WIDTH-1:0] avg0_r_div_full = (w_r_s6 != 0) ? (sum_r_s6 / $signed(w_r_s6)) : $signed({ACC_WIDTH{1'b0}});
 
     // Saturation function (handles signed arithmetic correctly)
     function automatic signed [SIGNED_WIDTH-1:0] saturate_s11;

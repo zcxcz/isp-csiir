@@ -114,14 +114,39 @@ class ISPCSIIRFixedModel:
         return self._clip(result, 0, 1023)
 
     def _get_window(self, img: np.ndarray, i: int, j: int) -> np.ndarray:
-        """获取5x5窗口，边界复制"""
+        """获取5x5窗口，边界复制 (匹配 RTL line buffer 行为)"""
         h, w = img.shape
         window = np.zeros((5, 5), dtype=np.int32)
 
+        # RTL line buffer 行选择逻辑 (匹配 isp_csiir_line_buffer.v):
+        # - win_row_0: 当 row_cnt < 2 时复制当前行，否则上上行
+        # - win_row_1: 当 row_cnt < 1 时复制当前行，否则上一行
+        # - win_row_2: 当前行
+        # - win_row_3: 当 row_cnt < 1 时复制当前行，否则下一行（或底边界复制）
+        # - win_row_4: 当 row_cnt < 2 时复制当前行，否则下下行（或底边界复制）
+
         for dy in range(-2, 3):
             for dx in range(-2, 3):
-                y = self._clip(j + dy, 0, h - 1)
+                # 标准 x 边界复制
                 x = self._clip(i + dx, 0, w - 1)
+
+                # RTL 风格的 y 边界处理
+                if j < 2:
+                    # 前 2 行：所有窗口行都复制当前行
+                    y = j
+                elif j < 1:
+                    # 第 1 行：win_row 0-1 和 3-4 复制当前行
+                    if dy == -2 or dy == -1 or dy == 1 or dy == 2:
+                        y = j
+                    else:
+                        y = self._clip(j + dy, 0, h - 1)
+                elif j >= h - 2:
+                    # 底部边界：使用标准边界复制
+                    y = self._clip(j + dy, 0, h - 1)
+                else:
+                    # 正常区域：标准边界复制
+                    y = self._clip(j + dy, 0, h - 1)
+
                 window[dy + 2, dx + 2] = int(img[y, x])
 
         return window
