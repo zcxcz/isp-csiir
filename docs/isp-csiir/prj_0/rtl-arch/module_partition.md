@@ -4,10 +4,12 @@
 | 项目 | 内容 |
 |------|------|
 | 模块名称 | isp_csiir_top |
-| 版本 | v1.0 |
+| 版本 | v1.1 |
 | 作者 | rtl-arch |
 | 创建日期 | 2026-03-22 |
-| 状态 | 正式版 |
+| 更新日期 | 2026-03-31 |
+| 状态 | 架构冻结 |
+| 功能基线 | `isp-csiir-ref.md` |
 
 ---
 
@@ -15,637 +17,219 @@
 
 ### 1.1 模块总览
 
-| 模块名称 | 功能描述 | 流水深度 | 存储需求 |
-|----------|----------|----------|----------|
-| isp_csiir_top | 顶层模块，集成所有子模块 | - | - |
-| isp_csiir_reg_block | APB 寄存器配置块 | 0 | 配置参数 |
-| isp_csiir_line_buffer | 行缓存，5x5 窗口生成 | 1 | 4 lines |
-| stage1_gradient | 梯度计算与窗口大小确定 | 4 | 无 |
-| stage2_directional_avg | 多尺度方向性平均 | 6 | 无 |
-| stage3_gradient_fusion | 梯度加权方向融合 | 4 | 1 line (梯度) |
-| stage4_iir_blend | IIR 滤波与混合输出 | 4 | 无 |
+| 模块名称 | 功能描述 | 流水角色 | 关键新增职责 |
+|----------|----------|----------|--------------|
+| `isp_csiir_top` | 顶层集成与握手汇总 | 控制/集成 | 串接 stream path 与 patch path，导出 `din_ready`，接入 `dout_ready` |
+| `isp_csiir_reg_block` | 寄存器配置块 | 配置 | 导出 `reg_edge_protect` 到 Stage4 |
+| `isp_csiir_line_buffer` | 5x5 窗口生成与反馈归并 | 存储/入口 | patch feedback merge、窗口输出回压、输入回压 |
+| `stage1_gradient` | 梯度计算与窗口大小确定 | Stage1 | 输出 `grad_h` / `grad_v`，提供 Stage4 所需 metadata 起点 |
+| `stage2_directional_avg` | 双路径方向平均 | Stage2 | 真正实现 avg0/avg1 双路径，并透传 patch/gradient metadata |
+| `stage3_gradient_fusion` | 方向绑定梯度融合 | Stage3 | 因果性安全的 delayed-center 融合，并透传 metadata |
+| `stage4_iir_blend` | patch 级混合与输出 | Stage4 | 消费 `src_patch_5x5`、`grad_h`、`grad_v`、`reg_edge_protect`，输出 `patch_valid` |
 
-### 1.2 模块职责详述
+### 1.2 设计边界总原则
 
-#### 1.2.1 isp_csiir_top (顶层模块)
-
-**职责:**
-- 集成所有子模块
-- 视频时序生成
-- 延迟链管理
-- bypass 路径实现
-- 输出选择
-
-**关键功能:**
-- 视频时序解析 (vsync/hsync 检测)
-- 像素/行计数器管理
-- 梯度延迟链 (对齐 Stage 2 输出)
-- bypass 模式延迟链
-
-#### 1.2.2 isp_csiir_reg_block (寄存器配置块)
-
-**职责:**
-- APB 协议接口实现
-- 配置参数存储与管理
-- 寄存器读写控制
-
-**寄存器列表:**
-| 地址 | 名称 | 位宽 | 描述 |
-|------|------|------|------|
-| 0x00 | CTRL | 32 | 控制寄存器 |
-| 0x04 | PIC_SIZE | 32 | 图像尺寸 |
-| 0x0C-0x18 | THRESH0-3 | 32 | 窗口大小阈值 |
-| 0x1C | BLEND_RATIO | 32 | 混合比例 |
-| 0x20 | CLIP_Y | 32 | 梯度裁剪阈值 |
-
-#### 1.2.3 isp_csiir_line_buffer (行缓存模块)
-
-**职责:**
-- 存储历史行像素数据
-- 生成 5x5 滑动窗口
-- 边界处理 (复制模式)
-- 窗口中心位置追踪
-
-**存储结构:**
-```
-line_mem_0 [0:IMG_WIDTH-1]  // 第 -1 行
-line_mem_1 [0:IMG_WIDTH-1]  // 第 -2 行
-line_mem_2 [0:IMG_WIDTH-1]  // 第 -3 行
-line_mem_3 [0:IMG_WIDTH-1]  // 第 -4 行
-
-// 输出: window_0_0 ... window_4_4 (25 个像素)
-//       window_center_x, window_center_y
-```
-
-**关键信号:**
-| 信号 | 方向 | 描述 |
-|------|------|------|
-| din | input | 输入像素 |
-| din_valid | input | 输入有效 |
-| sof | input | 帧起始 |
-| eol | input | 行结束 |
-| window_0_0 ~ window_4_4 | output | 5x5 窗口像素 |
-| window_valid | output | 窗口有效 |
-| window_center_x/y | output | 窗口中心位置 |
-
-#### 1.2.4 stage1_gradient (梯度计算模块)
-
-**职责:**
-- Sobel 水平/垂直梯度计算
-- 综合梯度计算
-- 窗口大小 LUT 查表
-- 位置信息流水传递
-
-**流水线结构:**
-```
-S1: Sobel 卷积 (row_sum, col_sum)
-S2: 绝对值与除法 (grad_abs, grad_sum)
-S3: 梯度最大值 (grad_max)
-S4: LUT 查表输出 (win_size_clip)
-```
-
-**关键信号:**
-| 信号 | 方向 | 位宽 | 描述 |
-|------|------|------|------|
-| window_0_0 ~ window_4_4 | input | 10 | 5x5 窗口 |
-| window_valid | input | 1 | 窗口有效 |
-| grad_h | output | 14 | 水平梯度 |
-| grad_v | output | 14 | 垂直梯度 |
-| grad | output | 14 | 综合梯度 |
-| win_size_clip | output | 6 | 窗口大小 |
-| stage1_valid | output | 1 | 输出有效 |
-
-#### 1.2.5 stage2_directional_avg (方向性平均模块)
-
-**职责:**
-- 根据 win_size 选择核尺寸
-- 计算 5 方向加权平均
-- 输出 avg0/avg1 两组平均值
-- 流水传递 center_pixel 和 win_size
-
-**核选择逻辑:**
-| win_size | avg0 核 | avg1 核 |
-|----------|---------|---------|
-| < 16 | zeros | 2x2 |
-| 16-24 | 2x2 | 3x3 |
-| 24-32 | 3x3 | 4x4 |
-| 32-40 | 4x4 | 5x5 |
-| >= 40 | 5x5 | zeros |
-
-**关键信号:**
-| 信号 | 方向 | 位宽 | 描述 |
-|------|------|------|------|
-| window[5x5] | input | 10 | 5x5 窗口 |
-| win_size_clip | input | 6 | 窗口大小 |
-| stage1_valid | input | 1 | 输入有效 |
-| avg0_c/u/d/l/r | output | 10 | avg0 各方向 |
-| avg1_c/u/d/l/r | output | 10 | avg1 各方向 |
-| center_pixel_out | output | 10 | 中心像素 |
-| win_size_out | output | 6 | 窗口大小 |
-| stage2_valid | output | 1 | 输出有效 |
-
-#### 1.2.6 stage3_gradient_fusion (梯度融合模块)
-
-**职责:**
-- 获取 5 方向梯度 (从行缓存读取 grad_u)
-- 梯度逆序排序
-- 加权融合计算
-- 维护梯度行缓存
-
-**存储结构:**
-```
-grad_line_buf [0:4095]   // 上一行梯度
-grad_shadow_buf [0:4095] // 当前行梯度影子缓冲
-grad_left_buf            // 左邻居梯度
-```
-
-**关键信号:**
-| 信号 | 方向 | 位宽 | 描述 |
-|------|------|------|------|
-| avg0_c/u/d/l/r | input | 10 | avg0 各方向 |
-| avg1_c/u/d/l/r | input | 10 | avg1 各方向 |
-| grad | input | 14 | 当前梯度 |
-| grad_h/v | input | 14 | 方向梯度 |
-| stage2_valid | input | 1 | 输入有效 |
-| grad_instant | input | 14 | 即时梯度 (写行缓存) |
-| stage1_valid | input | 1 | 行缓存写使能 |
-| blend0_dir_avg | output | 10 | avg0 融合结果 |
-| blend1_dir_avg | output | 10 | avg1 融合结果 |
-| avg0_u_out | output | 10 | avg0_u (用于 IIR) |
-| avg1_u_out | output | 10 | avg1_u (用于 IIR) |
-| stage3_valid | output | 1 | 输出有效 |
-
-#### 1.2.7 stage4_iir_blend (IIR 混合输出模块)
-
-**职责:**
-- 水平 IIR 混合
-- 窗混合 (blend_factor)
-- 最终混合输出
-- 输出饱和截断
-
-**关键信号:**
-| 信号 | 方向 | 位宽 | 描述 |
-|------|------|------|------|
-| blend0_dir_avg | input | 10 | avg0 融合结果 |
-| blend1_dir_avg | input | 10 | avg1 融合结果 |
-| avg0_u | input | 10 | avg0_u (IIR 输入) |
-| avg1_u | input | 10 | avg1_u (IIR 输入) |
-| win_size_clip | input | 6 | 窗口大小 |
-| center_pixel | input | 10 | 中心像素 |
-| stage3_valid | input | 1 | 输入有效 |
-| dout | output | 10 | 输出像素 |
-| dout_valid | output | 1 | 输出有效 |
+1. 功能语义以 `isp-csiir-ref.md` 为唯一基线。
+2. 所有模块都必须遵守 valid/ready stall-safe contract。
+3. `stage4_iir_blend` 不允许以独立 IIR 行缓存替代 patch feedback 语义。
+4. `isp_csiir_line_buffer` 只负责 **窗口生成 + feedback merge + 输入回压**，不承担 Stage4 算法决策。
 
 ---
 
-## 2. 模块接口定义
+## 2. 各模块职责详述
 
-### 2.1 isp_csiir_top 接口
+### 2.1 `isp_csiir_top`
 
-```verilog
-module isp_csiir_top #(
-    parameter IMG_WIDTH    = 5472,
-    parameter IMG_HEIGHT   = 3076,
-    parameter DATA_WIDTH   = 10,
-    parameter GRAD_WIDTH   = 14,
-    parameter LINE_ADDR_WIDTH = 14,
-    parameter ROW_CNT_WIDTH = 13
-)(
-    // 时钟与复位
-    input  wire                      clk,
-    input  wire                      rst_n,
+**职责：**
+- 集成所有子模块。
+- 连接 `din_ready`、`window_ready`、`stage1_ready`、`stage2_ready`、`stage3_ready`、`dout_ready`、`patch_ready`。
+- 汇总并转发 `src_patch_5x5`、`grad_h`、`grad_v`、`win_size_clip`、坐标等 metadata。
+- 将 `reg_edge_protect` 从寄存器块显式送入 Stage4。
+- 串接 Stage4 → line buffer 的 patch feedback 总线。
+- 确保 Stage4 对同一中心的 stream 输出与 patch feedback 采用原子提交语义。
 
-    // APB 配置接口
-    input  wire                      psel,
-    input  wire                      penable,
-    input  wire                      pwrite,
-    input  wire [7:0]                paddr,
-    input  wire [31:0]               pwdata,
-    output wire [31:0]               prdata,
-    output wire                      pready,
-    output wire                      pslverr,
+**不负责：**
+- 不在顶层重新实现 Stage2/3/4 算法。
+- 不在顶层复制一套 feedback merge 存储。
 
-    // 视频输入接口
-    input  wire                      vsync,
-    input  wire                      hsync,
-    input  wire [DATA_WIDTH-1:0]     din,
-    input  wire                      din_valid,
+### 2.2 `isp_csiir_reg_block`
 
-    // 视频输出接口
-    output wire [DATA_WIDTH-1:0]     dout,
-    output wire                      dout_valid,
-    output wire                      dout_vsync,
-    output wire                      dout_hsync
-);
-```
+**职责：**
+- 提供寄存器读写接口。
+- 输出阈值、blend ratio、clip 参数。
+- 导出 `reg_edge_protect`。
 
-### 2.2 isp_csiir_reg_block 接口
+**接口边界：**
+- `reg_edge_protect` 必须作为稳定配置输入送至 `isp_csiir_top` 和 `stage4_iir_blend`。
 
-```verilog
-module isp_csiir_reg_block #(
-    parameter APB_ADDR_WIDTH = 8,
-    parameter PIC_WIDTH_BITS = 14,
-    parameter PIC_HEIGHT_BITS = 13,
-    parameter DATA_WIDTH = 10
-)(
-    input  wire                        clk,
-    input  wire                        rst_n,
+### 2.3 `isp_csiir_line_buffer`
 
-    // APB 接口
-    input  wire                        psel,
-    input  wire                        penable,
-    input  wire                        pwrite,
-    input  wire [APB_ADDR_WIDTH-1:0]   paddr,
-    input  wire [31:0]                 pwdata,
-    output wire [31:0]                 prdata,
-    output wire                        pready,
-    output wire                        pslverr,
+**职责：**
+- 接收 `din / din_valid / din_ready`。
+- 生成 5x5 `src_patch_5x5` 窗口。
+- 输出 `window_valid`，接收 `window_ready`。
+- 接收 `patch_valid / patch_ready / patch_center_x / patch_center_y / patch_5x5`。
+- 在不改变 ref 语义前提下，把 patch feedback merge 到后续窗口读取路径。
 
-    // 配置输出
-    output wire [PIC_WIDTH_BITS-1:0]   pic_width_m1,
-    output wire [PIC_HEIGHT_BITS-1:0]  pic_height_m1,
-    output wire [15:0]                 win_size_thresh0,
-    output wire [15:0]                 win_size_thresh1,
-    output wire [15:0]                 win_size_thresh2,
-    output wire [15:0]                 win_size_thresh3,
-    output wire [7:0]                  blending_ratio_0,
-    output wire [7:0]                  blending_ratio_1,
-    output wire [7:0]                  blending_ratio_2,
-    output wire [7:0]                  blending_ratio_3,
-    output wire [DATA_WIDTH-1:0]       win_size_clip_y_0,
-    output wire [DATA_WIDTH-1:0]       win_size_clip_y_1,
-    output wire [DATA_WIDTH-1:0]       win_size_clip_y_2,
-    output wire [DATA_WIDTH-1:0]       win_size_clip_y_3,
-    output wire [7:0]                  win_size_clip_sft_0,
-    output wire [7:0]                  win_size_clip_sft_1,
-    output wire [7:0]                  win_size_clip_sft_2,
-    output wire [7:0]                  win_size_clip_sft_3,
-    output wire                        enable,
-    output wire                        bypass,
-    output wire                        regs_updated
-);
-```
+**命名冻结：**
+- line buffer → Stage1 窗口边界的正式 ready 名称固定为 `window_ready`。
+- `stage1_ready` 仅用于 Stage1 → Stage2 边界，不再混用于 line buffer 输出边界。
 
-### 2.3 isp_csiir_line_buffer 接口
+**冻结约束：**
+- 行列指针、flush 状态只能在本地 handshake 成功时前进。
+- `patch_valid && !patch_ready` 时不得提前 commit patch。
+- `din_ready` 不得只依赖 frame_started；必须受下游回压影响。
 
-```verilog
-module isp_csiir_line_buffer #(
-    parameter IMG_WIDTH       = 5472,
-    parameter DATA_WIDTH      = 10,
-    parameter LINE_ADDR_WIDTH = 14,
-    parameter ROW_CNT_WIDTH   = 13
-)(
-    input  wire                        clk,
-    input  wire                        rst_n,
-    input  wire                        enable,
-    input  wire                        sof,
-    input  wire                        eol,
-    input  wire [DATA_WIDTH-1:0]       din,
-    input  wire                        din_valid,
+### 2.4 `stage1_gradient`
 
-    // 5x5 窗口输出
-    output wire [DATA_WIDTH-1:0]       window_0_0, window_0_1, window_0_2, window_0_3, window_0_4,
-    output wire [DATA_WIDTH-1:0]       window_1_0, window_1_1, window_1_2, window_1_3, window_1_4,
-    output wire [DATA_WIDTH-1:0]       window_2_0, window_2_1, window_2_2, window_2_3, window_2_4,
-    output wire [DATA_WIDTH-1:0]       window_3_0, window_3_1, window_3_2, window_3_3, window_3_4,
-    output wire [DATA_WIDTH-1:0]       window_4_0, window_4_1, window_4_2, window_4_3, window_4_4,
-    output reg                         window_valid,
+**职责：**
+- 从 5x5 `src_patch_5x5` 计算 `grad_h`、`grad_v`、`grad`、`win_size_clip`。
+- 起始打包并透传中心坐标、window size、source patch。
+- 输出 `stage1_valid`，接收 `stage1_ready`。
 
-    // 窗口中心位置
-    output wire [LINE_ADDR_WIDTH-1:0]  window_center_x,
-    output wire [ROW_CNT_WIDTH-1:0]    window_center_y,
+**冻结约束：**
+- `stage1_ready` 真实参与回压，不能硬编码常高。
+- stall 时 Stage1 输出寄存器与 metadata 保持稳定。
 
-    // 边界模式
-    input  wire [1:0]                  boundary_mode
-);
-```
+### 2.5 `stage2_directional_avg`
 
-### 2.4 stage1_gradient 接口
+**职责：**
+- 根据 `win_size_clip` 选择 avg0/avg1 两条不同 kernel 路径。
+- 输出 avg0/avg1 五方向结果。
+- 继续透传 `src_patch_5x5`、`grad_h`、`grad_v`、坐标、window size。
+- 输出 `stage2_valid`，接收 `stage2_ready`。
 
-```verilog
-module stage1_gradient #(
-    parameter DATA_WIDTH     = 10,
-    parameter GRAD_WIDTH     = 14,
-    parameter WIN_SIZE_WIDTH = 6,
-    parameter PIC_WIDTH_BITS  = 14,
-    parameter PIC_HEIGHT_BITS = 13
-)(
-    input  wire                        clk,
-    input  wire                        rst_n,
-    input  wire                        enable,
+**冻结约束：**
+- avg0 与 avg1 不允许塌缩为同一路。
+- kernel 为 zero-path 时，该路径必须 disable。
+- stall 时双路径结果与 metadata 保持稳定。
 
-    // 5x5 窗口输入
-    input  wire [DATA_WIDTH-1:0]       window_0_0, window_0_1, window_0_2, window_0_3, window_0_4,
-    // ... (共 25 个窗口像素)
-    input  wire                        window_valid,
+### 2.6 `stage3_gradient_fusion`
 
-    // 配置参数
-    input  wire [DATA_WIDTH-1:0]       win_size_clip_y_0, win_size_clip_y_1,
-    input  wire [DATA_WIDTH-1:0]       win_size_clip_y_2, win_size_clip_y_3,
-    input  wire [7:0]                  win_size_clip_sft_0, win_size_clip_sft_1,
-    input  wire [7:0]                  win_size_clip_sft_2, win_size_clip_sft_3,
+**职责：**
+- 对五方向梯度做方向绑定的逆序权重重映射。
+- 输出 `blend0_dir_avg`、`blend1_dir_avg`。
+- 继续透传 `src_patch_5x5`、`grad_h`、`grad_v`、坐标、window size。
+- 输出 `stage3_valid`，接收 `stage3_ready`。
 
-    // 位置信息
-    input  wire [PIC_WIDTH_BITS-1:0]   pixel_x, pixel_y,
-    input  wire [PIC_WIDTH_BITS-1:0]   pic_width_m1, pic_height_m1,
-    input  wire [PIC_WIDTH_BITS-1:0]   window_center_x,
-    input  wire [PIC_HEIGHT_BITS-1:0]  window_center_y,
+**冻结约束：**
+- `grad_r` 必须来自真正的右邻点，不允许复制 `grad_c`。
+- 不得直接读取未来未产生的梯度；必须采用因果性安全的 delayed-center 架构。
+- `grad_sum == 0` 时必须走等权 fallback。
 
-    // 输出
-    output reg  [GRAD_WIDTH-1:0]       grad_h, grad_v, grad,
-    output reg  [WIN_SIZE_WIDTH-1:0]   win_size_clip,
-    output reg                         stage1_valid,
-    output reg  [PIC_WIDTH_BITS-1:0]   center_x_out,
-    output reg  [PIC_HEIGHT_BITS-1:0]  center_y_out
-);
-```
+### 2.7 `stage4_iir_blend`
 
-### 2.5 stage2_directional_avg 接口
+**职责：**
+- 消费 `blend0_dir_avg`、`blend1_dir_avg`、`src_patch_5x5`、`grad_h`、`grad_v`、`reg_edge_protect`。
+- 完成 IIR + 方向性 2x2 + patch 窗混合。
+- 输出 `dout / dout_valid`，接收 `dout_ready`。
+- 输出 `patch_valid / patch_center_x / patch_center_y / patch_5x5`，接收 `patch_ready`。
 
-```verilog
-module stage2_directional_avg #(
-    parameter DATA_WIDTH     = 10,
-    parameter ACC_WIDTH      = 20,
-    parameter WIN_SIZE_WIDTH = 6
-)(
-    input  wire                        clk,
-    input  wire                        rst_n,
-    input  wire                        enable,
-
-    // 5x5 窗口输入
-    input  wire [DATA_WIDTH-1:0]       window_0_0, /* ... */, window_4_4,
-    input  wire                        window_valid,
-
-    // Stage 1 输出
-    input  wire [WIN_SIZE_WIDTH-1:0]   win_size_clip,
-    input  wire                        stage1_valid,
-
-    // 配置阈值
-    input  wire [15:0]                 win_size_thresh0, win_size_thresh1,
-    input  wire [15:0]                 win_size_thresh2, win_size_thresh3,
-
-    // 位置输入
-    input  wire [13:0]                 pixel_x_in,
-    input  wire [12:0]                 pixel_y_in,
-
-    // 输出: 5 方向 x 2 尺度 = 10 个平均值
-    output reg  [DATA_WIDTH-1:0]       avg0_c, avg0_u, avg0_d, avg0_l, avg0_r,
-    output reg  [DATA_WIDTH-1:0]       avg1_c, avg1_u, avg1_d, avg1_l, avg1_r,
-    output reg                         stage2_valid,
-
-    // 流水传递
-    output reg  [DATA_WIDTH-1:0]       center_pixel_out,
-    output reg  [WIN_SIZE_WIDTH-1:0]   win_size_out,
-    output reg  [13:0]                 pixel_x_out,
-    output reg  [12:0]                 pixel_y_out
-);
-```
-
-### 2.6 stage3_gradient_fusion 接口
-
-```verilog
-module stage3_gradient_fusion #(
-    parameter DATA_WIDTH      = 10,
-    parameter GRAD_WIDTH      = 14,
-    parameter PIC_WIDTH_BITS  = 14,
-    parameter PIC_HEIGHT_BITS = 13
-)(
-    input  wire                        clk,
-    input  wire                        rst_n,
-    input  wire                        enable,
-
-    // Stage 2 输出 (10 个平均值)
-    input  wire [DATA_WIDTH-1:0]       avg0_c, avg0_u, avg0_d, avg0_l, avg0_r,
-    input  wire [DATA_WIDTH-1:0]       avg1_c, avg1_u, avg1_d, avg1_l, avg1_r,
-    input  wire                        stage2_valid,
-
-    // 梯度输入 (延迟对齐)
-    input  wire [GRAD_WIDTH-1:0]       grad, grad_h, grad_v,
-
-    // 位置信息
-    input  wire [PIC_WIDTH_BITS-1:0]   pixel_x, pixel_y,
-    input  wire [PIC_WIDTH_BITS-1:0]   pic_width_m1, pic_height_m1,
-
-    // 即时信号 (用于行缓存写)
-    input  wire [GRAD_WIDTH-1:0]       grad_instant,
-    input  wire [PIC_WIDTH_BITS-1:0]   pixel_x_instant, pixel_y_instant,
-    input  wire                        stage1_valid,
-
-    // 流水传递
-    input  wire [DATA_WIDTH-1:0]       center_pixel_in,
-    input  wire [5:0]                  win_size_clip_in,
-
-    // 输出
-    output reg  [DATA_WIDTH-1:0]       blend0_dir_avg, blend1_dir_avg,
-    output reg                         stage3_valid,
-    output reg  [PIC_WIDTH_BITS-1:0]   pixel_x_out,
-    output reg  [PIC_HEIGHT_BITS-1:0]  pixel_y_out,
-
-    // IIR 相关输出
-    output reg  [DATA_WIDTH-1:0]       avg0_u_out, avg1_u_out,
-    output reg  [DATA_WIDTH-1:0]       center_pixel_out,
-    output reg  [5:0]                  win_size_clip_out
-);
-```
-
-### 2.7 stage4_iir_blend 接口
-
-```verilog
-module stage4_iir_blend #(
-    parameter DATA_WIDTH     = 10,
-    parameter GRAD_WIDTH     = 14,
-    parameter WIN_SIZE_WIDTH = 6
-)(
-    input  wire                        clk,
-    input  wire                        rst_n,
-    input  wire                        enable,
-
-    // Stage 3 输出
-    input  wire [DATA_WIDTH-1:0]       blend0_dir_avg, blend1_dir_avg,
-    input  wire                        stage3_valid,
-
-    // 梯度 (用于方向判断)
-    input  wire [GRAD_WIDTH-1:0]       grad_h, grad_v,
-
-    // IIR 输入
-    input  wire [DATA_WIDTH-1:0]       avg0_u, avg1_u,
-
-    // 窗口大小与中心像素
-    input  wire [WIN_SIZE_WIDTH-1:0]   win_size_clip,
-    input  wire [DATA_WIDTH-1:0]       center_pixel,
-
-    // 配置参数
-    input  wire [7:0]                  blending_ratio_0, blending_ratio_1,
-    input  wire [7:0]                  blending_ratio_2, blending_ratio_3,
-    input  wire [15:0]                 win_size_thresh0, win_size_thresh1,
-    input  wire [15:0]                 win_size_thresh2, win_size_thresh3,
-
-    // 位置输入
-    input  wire [13:0]                 pixel_x_in,
-    input  wire [12:0]                 pixel_y_in,
-
-    // 输出
-    output reg  [DATA_WIDTH-1:0]       dout,
-    output reg                         dout_valid,
-    output reg  [13:0]                 pixel_x_out,
-    output reg  [12:0]                 pixel_y_out
-);
-```
+**冻结约束：**
+- 不允许退化为单个 center_pixel 的 scalar mixing。
+- Stage4 对同一中心的 `dout` 与 `patch_5x5` 采用原子提交；提交条件固定为 `dout_valid && patch_valid && dout_ready && patch_ready`。
+- `dout_valid && !dout_ready` 时，输出像素与 metadata 必须保持稳定。
+- `patch_valid && !patch_ready` 时，patch 总线必须保持稳定。
+- 不允许 stream path 已提交但 patch path 未提交，或 patch path 已提交但 stream path 未提交。
 
 ---
 
-## 3. 模块间依赖关系
+## 3. 模块接口边界
 
-### 3.1 数据依赖图
+### 3.1 Stream path 接口链
 
-```
-                          +----------------+
-                          |   reg_block    |
-                          +-------+--------+
-                                  |
-                    +-------------+-------------+
-                    |             |             |
-                    v             v             v
-            +-------+--------+   |   +---------+--------+
-            | win_size_thresh|   |   | blending_ratio  |
-            | clip_y params  |   |   | params          |
-            +----------------+   |   +----------------+
-                                 |
-+--------+     +-----------------+------------------+     +--------+
-|  din   | --> |              line_buffer             | -->| window |
-+--------+     +-----------------+------------------+     | 5x5    |
-                                 |                        +--------+
-                                 v                             |
-                        +--------+--------+                    |
-                        |   stage1_       |<-------------------+
-                        |   gradient      |
-                        +--------+--------+
-                                 |
-                    +------------+------------+
-                    |             |             |
-                    v             v             v
-              +-----+-----+ +-----+-----+ +-----+-----+
-              | win_size  | |   grad    | | center_pos|
-              +-----------+ +-----+-----+ +-----------+
-                                  |
-                                  v
-                        +--------+--------+
-                        |   grad_delay    | (延迟链)
-                        +--------+--------+
-                                 |
-                                 v
-+----------------+     +--------+--------+
-| window_5x5     | --> |   stage2_       |
-| (delayed)      |     |   directional   |
-+----------------+     |   _avg          |
-                       +--------+--------+
-                                |
-                    +-----------+-----------+
-                    |           |           |
-                    v           v           v
-              +-----+-----+ +---+---+ +-----+-----+
-              | avg0[5]   | |avg1[5]| |center_pos |
-              +-----------+ +-------+ +-----------+
-                    |           |
-                    v           v
-              +-----+-----------+-----+
-              |     grad_fusion       |
-              |      (stage3)         |
-              +-----+-----------+-----+
-                    |           |
-                    v           v
-              +-----+-----+ +---+---+
-              |blend0/1   | |avg_u  |
-              +-----------+ +-------+
-                    |           |
-                    v           v
-              +-----+-----------+-----+
-              |     iir_blend         |
-              |       (stage4)        |
-              +----------+------------+
-                         |
-                         v
-                    +----+----+
-                    |   dout  |
-                    +---------+
+```text
+din / din_valid / din_ready
+  -> line_buffer(window_valid / window_ready)
+  -> stage1(stage1_valid / stage2_ready)
+  -> stage2(stage2_valid / stage3_ready)
+  -> stage3(stage3_valid / stage4_ready)
+  -> stage4(dout_valid / dout_ready, patch_valid / patch_ready)
 ```
 
-### 3.2 时序依赖关系
+说明：
+- `window_ready` 是 line buffer → Stage1 边界的正式 ready 命名。
+- `stage1_ready` 在实现命名上保留给 Stage2 回传到 Stage1 的 ready，文档语义上不再等同于 `window_ready`。
 
-| 源模块 | 目标模块 | 数据 | 延迟对齐需求 |
-|--------|----------|------|--------------|
-| line_buffer | stage1 | window[5x5] | 同周期 |
-| stage1 | stage2 | win_size_clip | 0 cycles (组合逻辑) |
-| stage1 | stage2 | window (delayed) | 4 cycles |
-| stage1 | stage3 | grad (delayed) | 6 cycles (delay chain) |
-| stage2 | stage3 | avg[10] | 同周期 |
-| stage2 | stage4 | avg_u (delayed) | 4 cycles |
-| stage3 | stage4 | blend0/1 | 同周期 |
-| stage3 | stage4 | avg_u_out | 同周期 |
+### 3.2 Patch metadata 透传链
 
-### 3.3 跨模块延迟链
-
-```verilog
-// 在顶层模块中实现
-
-// 1. 梯度延迟链 (Stage 1 -> Stage 3)
-// Stage 2 有 6 cycles 延迟，需要延迟 grad 信号
-reg [GRAD_WIDTH-1:0] grad_delay [0:5];
-always @(posedge clk) begin
-    if (enable) begin
-        grad_delay[0] <= stage1_valid ? grad_s1 : 0;
-        for (k = 1; k <= 5; k = k + 1)
-            grad_delay[k] <= grad_delay[k-1];
-    end
-end
-
-// 2. 位置延迟链
-reg [PIC_WIDTH_BITS-1:0] pixel_x_delay [0:5];
-reg [PIC_HEIGHT_BITS-1:0] pixel_y_delay [0:5];
-
-// 3. Bypass 延迟链 (17 cycles)
-reg [DATA_WIDTH-1:0] din_delay [0:20];
-reg [20:0] din_valid_delay;
+```text
+line_buffer: src_patch_5x5, center_x, center_y
+  -> stage1: grad_h, grad_v, grad, win_size_clip
+  -> stage2: avg0/avg1 + metadata passthrough
+  -> stage3: blend0/1 + metadata passthrough
+  -> stage4: patch mix input set
 ```
 
-### 3.4 行缓存依赖
+### 3.3 Feedback path 接口链
 
-| 行缓存位置 | 所属模块 | 用途 | 容量 |
-|------------|----------|------|------|
-| line_mem_0-3 | line_buffer | 5x5 窗口生成 | 4 x IMG_WIDTH x 10-bit |
-| grad_line_buf | stage3 | 上一行梯度 | IMG_WIDTH x 14-bit |
-| grad_shadow_buf | stage3 | 当前行梯度 | IMG_WIDTH x 14-bit |
-
-### 3.5 模块实例化顺序
-
+```text
+stage4_iir_blend
+  -> patch_valid
+  -> patch_ready
+  -> patch_center_x
+  -> patch_center_y
+  -> patch_5x5
+  -> isp_csiir_line_buffer
 ```
-1. isp_csiir_reg_block    (配置最先初始化)
-2. isp_csiir_line_buffer  (数据通路起点)
-3. stage1_gradient        (Stage 1)
-4. stage2_directional_avg (Stage 2)
-5. stage3_gradient_fusion (Stage 3)
-6. stage4_iir_blend       (Stage 4)
-```
+
+### 3.4 Stage4 必须看到的输入集合
+
+| 信号 | 来源模块 | 用途 |
+|------|----------|------|
+| `src_patch_5x5` | line_buffer 经 Stage1/2/3 透传 | patch 级空间混合输入 |
+| `grad_h` | Stage1 | 方向性判断 |
+| `grad_v` | Stage1 | 方向性判断 |
+| `reg_edge_protect` | reg_block | edge protect 混合系数 |
+| `win_size_clip` | Stage1 经 Stage2/3 透传 | bucket 选择 |
+| `center_x / center_y` | line_buffer 经各 stage 透传 | feedback 提交坐标 |
 
 ---
 
-## 4. 附录
+## 4. 跨模块依赖关系
 
-### 4.1 参数汇总
+### 4.1 关键依赖
 
-| 参数名 | 默认值 | 描述 |
-|--------|--------|------|
-| IMG_WIDTH | 5472 | 最大图像宽度 (8K) |
-| IMG_HEIGHT | 3076 | 最大图像高度 (8K) |
-| DATA_WIDTH | 10 | 像素数据位宽 |
-| GRAD_WIDTH | 14 | 梯度数据位宽 |
-| ACC_WIDTH | 20 | 累加器位宽 |
-| WIN_SIZE_WIDTH | 6 | 窗口大小位宽 |
-| LINE_ADDR_WIDTH | 14 | 行地址位宽 |
-| ROW_CNT_WIDTH | 13 | 行计数位宽 |
+| 源模块 | 目标模块 | 依赖内容 | 说明 |
+|--------|----------|----------|------|
+| line_buffer | Stage1 | `src_patch_5x5` + `window_valid` | Stage1 输入窗口 |
+| Stage1 | Stage2 | `grad_h` / `grad_v` / `win_size_clip` / patch metadata | Stage2 计算与透传 |
+| Stage2 | Stage3 | avg0/avg1 + patch metadata | Stage3 方向融合 |
+| Stage3 | Stage4 | blend0/1 + `grad_h` / `grad_v` / `src_patch_5x5` | Stage4 patch 混合 |
+| reg_block | Stage4 | `reg_edge_protect` | edge protect 配置 |
+| Stage4 | line_buffer | `patch_valid` / `patch_ready` / `patch_5x5` | feedback merge |
 
-### 4.2 修订历史
+### 4.2 Causality 备注
+
+Stage3 是唯一必须显式做因果性保护的模块：
+- `grad_u`、`grad_c`、`grad_d` 必须在提交点全部可用。
+- 文档与 RTL 都不得出现“直接读取下一行未来梯度”的表述。
+- 若需要延迟中心点提交，这是架构允许且推荐的实现方式。
+
+---
+
+## 5. 验收导向的模块划分结论
+
+### 5.1 本轮 RTL 改造边界
+
+- `stage1_gradient`：接入真实 `stage1_ready`，并提供 `grad_h` / `grad_v` / source patch metadata 起点。
+- `stage2_directional_avg`：实现双路径 avg0/avg1，并保留 metadata。
+- `stage3_gradient_fusion`：实现方向绑定和因果性安全的邻域梯度组织。
+- `stage4_iir_blend`：实现 patch 级混合与 feedback 打包。
+- `isp_csiir_line_buffer`：实现 feedback merge 与输入回压。
+- `isp_csiir_top`：把 stream path 与 patch path 真正串通。
+
+### 5.2 明确不允许的职责漂移
+
+- 不允许把 patch feedback merge 临时塞进 Stage4 内部存储绕过 line buffer。
+- 不允许让 top 直接替 Stage2/3 保存算法状态。
+- 不允许由 line buffer 决定 Stage4 的混合算法。
+
+---
+
+## 6. 修订历史
 
 | 版本 | 日期 | 作者 | 描述 |
 |------|------|------|------|
 | v1.0 | 2026-03-22 | rtl-arch | 初始版本 |
+| v1.1 | 2026-03-31 | rtl-arch | 冻结 stall-safe 模块边界、patch feedback 接口与 Stage4 输入责任 |
