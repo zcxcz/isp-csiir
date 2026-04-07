@@ -50,6 +50,10 @@ module stage1_gradient #(
     input  wire [DATA_WIDTH-1:0]       win_size_clip_y_1,
     input  wire [DATA_WIDTH-1:0]       win_size_clip_y_2,
     input  wire [DATA_WIDTH-1:0]       win_size_clip_y_3,
+    input  wire [7:0]                  win_size_clip_sft_0,
+    input  wire [7:0]                  win_size_clip_sft_1,
+    input  wire [7:0]                  win_size_clip_sft_2,
+    input  wire [7:0]                  win_size_clip_sft_3,
 
     // Output
     output wire [GRAD_WIDTH-1:0]       grad_h,
@@ -80,15 +84,39 @@ module stage1_gradient #(
     // Local Parameters
     //=========================================================================
     localparam ROW_SUM_WIDTH = DATA_WIDTH + 3;  // 13-bit for 5 pixels sum
+    localparam LUT_X_WIDTH   = GRAD_WIDTH + 1;
+    localparam LUT_Y_WIDTH   = DATA_WIDTH + 1;
+    localparam LUT_MUL_WIDTH = LUT_X_WIDTH + DATA_WIDTH + 2;
     localparam PIPE_S0_WIDTH = 4 * ROW_SUM_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
     localparam PIPE_S1_WIDTH = 4 * ROW_SUM_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
     localparam PIPE_S2_WIDTH = 3 * GRAD_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
     localparam PIPE_S3_WIDTH = 4 * GRAD_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
 
+    function [LUT_Y_WIDTH-1:0] lut_interp_round;
+        input [LUT_X_WIDTH-1:0] x;
+        input [LUT_X_WIDTH-1:0] x0;
+        input [LUT_X_WIDTH-1:0] x1;
+        input [DATA_WIDTH-1:0]  y0;
+        input [DATA_WIDTH-1:0]  y1;
+        reg [LUT_MUL_WIDTH-1:0] numer;
+        reg [LUT_X_WIDTH-1:0]   denom;
+        reg [DATA_WIDTH:0]      y_delta;
+        begin
+            if (x1 <= x0) begin
+                lut_interp_round = {1'b0, y1};
+            end else begin
+                denom = x1 - x0;
+                y_delta = {1'b0, y1} - {1'b0, y0};
+                numer = (x - x0) * y_delta + (denom >> 1);
+                lut_interp_round = {1'b0, y0} + (numer / denom);
+            end
+        end
+    endfunction
+
     //=========================================================================
-    // Ready Signal (Simple Pipeline - Always Ready)
+    // Ready Signal
     //=========================================================================
-    assign window_ready = 1'b1;
+    assign window_ready = stage1_ready;
 
     //=========================================================================
     // Window Delay Line (5 cycles to match pipeline latency)
@@ -338,10 +366,23 @@ module stage1_gradient #(
     //=========================================================================
     // Cycle 4: Window Size LUT (Combinational)
     //=========================================================================
-    wire [WIN_SIZE_WIDTH-1:0] win_size_comb = (grad_max_s3 < {3'b0, win_size_clip_y_0}) ? 6'd16 :
-                                              (grad_max_s3 < {3'b0, win_size_clip_y_1}) ? 6'd24 :
-                                              (grad_max_s3 < {3'b0, win_size_clip_y_2}) ? 6'd32 :
-                                              (grad_max_s3 < {3'b0, win_size_clip_y_3}) ? 6'd40 : 6'd40;
+    wire [LUT_X_WIDTH-1:0] grad_max_ext = {1'b0, grad_max_s3};
+    wire [LUT_X_WIDTH-1:0] lut_x0 = {{GRAD_WIDTH{1'b0}}, 1'b1} << win_size_clip_sft_0;
+    wire [LUT_X_WIDTH-1:0] lut_x1 = lut_x0 + ({{GRAD_WIDTH{1'b0}}, 1'b1} << win_size_clip_sft_1);
+    wire [LUT_X_WIDTH-1:0] lut_x2 = lut_x1 + ({{GRAD_WIDTH{1'b0}}, 1'b1} << win_size_clip_sft_2);
+    wire [LUT_X_WIDTH-1:0] lut_x3 = lut_x2 + ({{GRAD_WIDTH{1'b0}}, 1'b1} << win_size_clip_sft_3);
+
+    wire [LUT_Y_WIDTH-1:0] win_size_grad_comb =
+        (grad_max_ext <= lut_x0) ? {1'b0, win_size_clip_y_0} :
+        (grad_max_ext >= lut_x3) ? {1'b0, win_size_clip_y_3} :
+        (grad_max_ext <= lut_x1) ? lut_interp_round(grad_max_ext, lut_x0, lut_x1, win_size_clip_y_0, win_size_clip_y_1) :
+        (grad_max_ext <= lut_x2) ? lut_interp_round(grad_max_ext, lut_x1, lut_x2, win_size_clip_y_1, win_size_clip_y_2) :
+                                   lut_interp_round(grad_max_ext, lut_x2, lut_x3, win_size_clip_y_2, win_size_clip_y_3);
+
+    wire [WIN_SIZE_WIDTH-1:0] win_size_comb =
+        (win_size_grad_comb < 16) ? 6'd16 :
+        (win_size_grad_comb > 40) ? 6'd40 :
+                                    win_size_grad_comb[WIN_SIZE_WIDTH-1:0];
 
     //=========================================================================
     // Output Registers (Cycle 4)

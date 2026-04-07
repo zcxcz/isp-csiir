@@ -2,60 +2,333 @@
 
 ## 问题记录
 
-### Entry #1: RTL 语法错误修复
-**日期**: 2026-03-22
-**状态**: 已解决
-**模块**: stage4_iir_blend.v
-**描述**:
-编译时报错，嵌套拼接运算符语法错误:
-```
-../rtl/stage4_iir_blend.v:174: error: Syntax error between internal '}' and closing '}' of repeat concatenation.
-```
+### 2026-04-05 验证默认原则冻结
+- 目标: 停止回到旧 top-level / targeted compare / residual closure 线，先固化新的验证默认原则
+- 结论:
+  - 子模块验证与集成验证默认解耦
+  - 集成 compare 默认按 `valid && ready` 采样
+  - compare object / sample edge / valid-ready contract 必须显式写清
+  - 重排/重编码在 reference / compare 路径表达，不默认复制边界专项 TB
+  - 边界专项验证仅作为集成失配后的定位工具
+  - 子模块 TB 继续保留 contract freeze、stall/backpressure、fixed-seed random、trace/replay
+- 下一步: 优先转向 `isp_csiir_line_buffer` 子模块验证，确认 Stage4 之后最关键的 writeback / merge contract
+- 状态: 原则已冻结，进入子模块 TB 落地
 
-**原因分析**:
-Verilog 中嵌套拼接运算符语法不正确:
-```verilog
-// 错误写法
-{IIR_WIDTH-DATA_WIDTH{1'b0}, {DATA_WIDTH{1'b1}}}
-```
+### 2026-04-05 `stage4_iir_blend` / `isp_csiir_line_buffer` 子模块验证
+- `stage4_iir_blend`
+  - 命令: `iverilog -g2012 -o verification/stage4_ref_sim rtl/common/common_ff.v rtl/common/common_pipe.v rtl/common/common_pipe_slice.v rtl/stage4_iir_blend.v verification/tb/tb_stage4_iir_blend_ref.sv && vvp verification/stage4_ref_sim`
+  - 结果: CASE A-F 全 PASS
+  - 结论: Stage4 子模块 reference TB 当前为绿，可继续作为 Stage4 主验证入口
+- `isp_csiir_line_buffer`
+  - 命令: `iverilog -g2012 -o verification/line_buffer_contract_sim rtl/isp_csiir_line_buffer.v verification/tb/tb_isp_csiir_line_buffer_eol_backpressure.sv && vvp verification/line_buffer_contract_sim`
+  - 结果:
+    - CASE A `stalled eol` PASS
+    - CASE B `fixed-seed random ready toggling` PASS
+    - CASE C `writeback commit updates target row` PASS
+  - 修复: `rtl/isp_csiir_line_buffer.v` 恢复 line buffer feedback writeback，并把 feedback commit 合入主写时序块，避免同拍 input write / writeback 对同一组 `line_mem_x` 的语义不确定
+  - 补充验证:
+    - `iverilog -g2012 -f verification/iverilog_csiir.f -o verification/top_compile_smoke verification/tb/tb_isp_csiir_random.sv && vvp verification/top_compile_smoke`
+    - `iverilog -g2012 -f verification/iverilog_csiir.f -o verification/tb_stage4_align_red verification/tb/tb_isp_csiir_stage4_align.sv && vvp verification/tb_stage4_align_red`
+    - 两条回归当前均 PASS
+  - 结论: 当前 line buffer stall/backpressure/writeback 最小 contract 已闭环，但 trace/replay 与更完整的子模块 closure 覆盖仍待补齐
+  - 下一步: 若继续该子模块，应补 trace/replay，并围绕 feedback merge 可见性补最小闭环 case
 
-**解决方案**:
-修复为正确的嵌套拼接语法:
-```verilog
-// 正确写法
-{{IIR_WIDTH-DATA_WIDTH{1'b0}}, {DATA_WIDTH{1'b1}}}
-```
+### 2026-04-05 `stage3_gradient_fusion` 子模块验证补强
+- 选择理由: Stage4 已绿后，Stage3 是最直接的上游关键边界；先把 Stage3 的 contract / stall / replay 入口补实，比继续停在线 buffer writeback 失败点更适合当前阶段
+- 修改:
+  - `verification/tb/tb_stage3_gradient_fusion_ref.sv`
+  - 补了 TB contract header
+  - 把 compare object / sampling edge / valid-ready contract 显式写清
+  - 在同一 TB 内补了 directed output stall、fixed-seed random output backpressure、trace record/replay
+- 命令:
+  - `iverilog -g2012 -o verification/tb_stage3_gradient_fusion_ref_sim rtl/common/common_ff.v rtl/common/common_pipe.v rtl/common/common_pipe_slice.v rtl/common/common_lut_divider.v rtl/stage3_gradient_fusion.v verification/tb/tb_stage3_gradient_fusion_ref.sv && vvp verification/tb_stage3_gradient_fusion_ref_sim`
+  - `iverilog -g2012 -o verification/tb_stage3_casea_ref_sim rtl/common/common_ff.v rtl/common/common_pipe.v rtl/common/common_pipe_slice.v rtl/common/common_lut_divider.v rtl/stage3_gradient_fusion.v verification/tb/tb_stage3_gradient_fusion_casea_ref.sv && vvp verification/tb_stage3_casea_ref_sim`
+  - `iverilog -g2012 -o verification/tb_stage3_fallback_ref_sim rtl/common/common_ff.v rtl/common/common_pipe.v rtl/common/common_pipe_slice.v rtl/common/common_lut_divider.v rtl/stage3_gradient_fusion.v verification/tb/tb_stage3_gradient_fusion_fallback_ref.sv && vvp verification/tb_stage3_fallback_ref_sim`
+- 结果:
+  - `tb_stage3_gradient_fusion_ref.sv` PASS
+    - CASE A direction binding PASS
+    - CASE B zero-sum fallback PASS
+    - CASE C grad_r independence PASS
+    - CASE D tie-rank stability PASS
+    - CASE E pre-output backpressure PASS
+    - CASE F fixed-seed random output backpressure PASS
+    - CASE G trace record/replay PASS
+  - `tb_stage3_gradient_fusion_casea_ref.sv` PASS
+  - `tb_stage3_gradient_fusion_fallback_ref.sv` PASS
+- 结论: `stage3_gradient_fusion` 当前子模块 reference / backpressure / replay 入口为绿，可作为 Stage4 上游主入口
+- 下一步: 继续按同一方法推进 `stage2_directional_avg`
 
-**修改文件**: `/home/sheldon/rtl_project/isp-csiir/rtl/stage4_iir_blend.v`
+### 2026-04-06 `stage2_directional_avg` 子模块验证补强
+- 选择理由: `stage2_directional_avg` 是已绿的 `stage3_gradient_fusion` 的直接上游；先冻结 Stage2 的 compare object 与 stall-safe 结论，比回 top-level 或继续扩散其他边界更高效
+- 修改:
+  - `verification/tb/tb_stage2_directional_avg_ref.sv`
+  - 补了 TB contract header
+  - 把 compare object / sample edge / valid-ready contract 显式写清
+  - 将 stall 检查收敛在同一主 TB 中，不新增额外 pairwise bench
+- 命令:
+  - `iverilog -g2012 -o verification/tb_stage2_directional_avg_ref_sim rtl/common/common_ff.v rtl/common/common_pipe.v rtl/common/common_pipe_slice.v rtl/common/common_lut_divider.v rtl/stage2_directional_avg.v verification/tb/tb_stage2_directional_avg_ref.sv && vvp verification/tb_stage2_directional_avg_ref_sim`
+- 结果:
+  - CASE A `dual-path kernels must diverge at win_size=24` PASS
+  - CASE B `zero-path must disable avg0 when win_size<thresh0` PASS
+  - CASE C `outputs must hold stable during stall` FAIL
+  - 直接现象: `FAIL: stage2 stall-safe contract violated under 4-cycle output stall`
+- 结论:
+  - Stage2 reference 算法语义本身为绿
+  - Stage2 output stall-safe contract 当前不成立
+  - 为避免低效率扩展，fixed-seed random 与 trace/replay 先不继续堆到这个 fail 上
+- 对应 RTL 线索:
+  - `rtl/stage2_directional_avg.v` 输出寄存器只在 `stage2_ready` 为高时更新，位置见 `else if (stage2_ready)` 路径
+  - 当前最小失败已足以说明 Stage2 在多周期 output stall 下需要进一步确认 valid/data hold 语义
+- 下一步: 若继续该子模块，应围绕 output stall-safe contract 做最小 replay / RTL 定位闭环，不回 top-level
 
----
+### 2026-04-06 `stage2_directional_avg` stall-safe 最小 trace / replay 闭环
+- 目标: 只围绕 CASE C 的 4-cycle stall fail 做最小复现，确认 `rtl/stage2_directional_avg.v` 中 `stage2_ready` 门控是否真的破坏输出保持/更新 contract
+- 新增/修改:
+  - `verification/tb/tb_stage2_directional_avg_stall_trace.sv`
+  - `verification/tb/tb_stage2_directional_avg_ref.sv`
+- 命令:
+  - `iverilog -g2012 -o verification/tb_stage2_directional_avg_ref_sim rtl/common/common_ff.v rtl/common/common_pipe.v rtl/common/common_pipe_slice.v rtl/common/common_lut_divider.v rtl/stage2_directional_avg.v verification/tb/tb_stage2_directional_avg_ref.sv && vvp verification/tb_stage2_directional_avg_ref_sim`
+  - `iverilog -g2012 -o verification/tb_stage2_stall_trace_sim rtl/common/common_ff.v rtl/common/common_pipe.v rtl/common/common_pipe_slice.v rtl/common/common_lut_divider.v rtl/stage2_directional_avg.v verification/tb/tb_stage2_directional_avg_stall_trace.sv && vvp verification/tb_stage2_stall_trace_sim`
+- 最小 trace 观察:
+  - `verification/stage2_casec_stall_trace.txt` 在 cycle 8-11 记录到 `stage2_ready=0`、`stage1_ready=0`、`dut.valid_s6=1`、`stage2_valid=0`
+  - cycle 13 在 `stage2_ready` 释放后出现 `stage2_valid=1`
+  - 同期 `avg0c/avg1c` 保持目标事务值 `24/24`，未出现 pending 数据丢失
+- RTL 结论:
+  - `rtl/stage2_directional_avg.v` 输出寄存器位于 `else if (stage2_ready)` 更新路径，本身表达的是“仅在 consumer ready 时提交 S6 数据”
+  - 对 pre-output stall，这个门控与 trace 一致: pending transaction 停留在 `valid_s6`，并在 ready 恢复后再对外提交
+- 根因判断:
+  - 原 CASE C fail 不是现阶段已确认的 RTL 功能 bug
+  - 原 TB 在输出事务已经可被消费后才拉低 `stage2_ready`，把“post-consume stall”误判成“pre-output stall” contract 失败
+- 处理决策:
+  - 先补 TB，不动 RTL
+  - 把主 TB CASE C 改成真正的 pre-output stall 检查: stall 期间验证 `stage1_ready=0`、`valid_s6=1`、`stage2_valid=0`，释放后再 compare 输出
+- 最终结果:
+  - `tb_stage2_directional_avg_ref.sv`
+    - CASE A PASS
+    - CASE B PASS
+    - CASE C PASS
+  - `tb_stage2_directional_avg_stall_trace.sv` 成功写出 trace，支持上述结论
+- 下一步: Stage2 当前可视为子模块验证 PASS，继续按同样方法推进上游 `stage1_gradient`
 
-### Entry #2: 验证环境搭建完成
-**日期**: 2026-03-22
-**状态**: 完成
-**描述**:
-完成 ISP-CSIIR 模块验证环境搭建，包括:
-- SystemVerilog 测试平台 (兼容 Icarus Verilog)
-- Python 定点 Golden Model
-- Makefile 构建系统
+### 2026-04-06 `stage1_gradient` 子模块验证补强
+- 选择理由: `stage1_gradient` 是 Stage2 的直接上游边界；在不回 top-level、也不处理 line buffer merge 的前提下，它是主链上最值得先冻结 contract 的下一个关键模块
+- 新增:
+  - `verification/tb/tb_stage1_gradient_ref.sv`
+- TB contract 冻结:
+  - compare object: `grad_h / grad_v / grad / win_size_clip / pixel_x_out / pixel_y_out / center_pixel / win_out_*`
+  - sample edge: negedge drive, posedge wait
+  - alignment rule: 仅在 `stage1_valid && stage1_ready` compare；pre-output stall 要求 pending transaction 保持
+  - in/out contract: `window_valid && window_ready` 接收；`stage1_valid && stage1_ready` 传输
+- 首轮命令:
+  - `iverilog -g2012 -o verification/tb_stage1_gradient_ref_sim rtl/common/common_pipe.v rtl/stage1_gradient.v verification/tb/tb_stage1_gradient_ref.sv && vvp verification/tb_stage1_gradient_ref_sim`
+- 首轮结果:
+  - CASE A `flat window should produce zero gradient and aligned metadata` PASS
+  - CASE B `row gradient should produce grad_h-only response` PASS
+  - CASE C `pre-output stall must preserve pending stage1 transaction` FAIL
+  - 直接现象: `FAIL: stage1 pre-output stall contract violated under 5-cycle stall`
+- 首个失配定位证据:
+  - 原始最小 stall trace 表明 `dut.valid_s3` 已到 pending 点后，TB 才把 `stage1_ready` 拉低，实际上注入成了 post-commit stall，而不是 pre-output stall
 
-**测试结果**:
-- 所有 5 个测试用例通过
-- 无输出溢出错误
-- 像素处理吞吐量符合预期
+### 2026-04-06 `stage1_gradient` stall-safe 最小 trace / replay 闭环
+- 新增:
+  - `verification/tb/tb_stage1_gradient_stall_trace.sv`
+- 命令:
+  - `iverilog -g2012 -o verification/tb_stage1_stall_trace_sim rtl/common/common_pipe.v rtl/stage1_gradient.v verification/tb/tb_stage1_gradient_stall_trace.sv && vvp verification/tb_stage1_stall_trace_sim`
+  - `iverilog -g2012 -o verification/tb_stage1_gradient_ref_sim rtl/common/common_pipe.v rtl/stage1_gradient.v verification/tb/tb_stage1_gradient_ref.sv && vvp verification/tb_stage1_gradient_ref_sim`
+- trace 结论:
+  - `verification/stage1_casec_stall_trace.txt` 在 cycle 9-13 记录到 `stage1_ready=0`、`window_ready=0`、`dut.valid_s3=1`、`stage1_valid=0`
+  - cycle 15 在 ready 释放后出现 `stage1_valid=1`，并携带 `gv=300`、`grad=60`、`clip=40`、`x=15`、`y=2`
+- RTL 判断:
+  - `rtl/stage1_gradient.v` 把 `window_ready` 直接绑定到 `stage1_ready`
+  - `common_pipe.v` 在 `ready_in=0` 时保持寄存器不更新
+  - 对 pre-output stall，上述实现与 trace 一致，没有新增已确认 RTL 功能 bug
+- 根因判断:
+  - 原 CASE C fail 为 TB stall 注入点晚一拍
+  - 把 CASE C 的 ready 拉低时刻前移后，pre-output stall contract 成立
+- 最终结果:
+  - `tb_stage1_gradient_ref.sv`
+    - CASE A PASS
+    - CASE B PASS
+    - CASE C PASS
+  - `tb_stage1_gradient_stall_trace.sv` PASS，并生成 `verification/stage1_casec_stall_trace.txt`
+- 下一步: `stage1_gradient` 当前可视为子模块验证 PASS；若继续子模块主线且仍避开 top-level / line buffer，需要再选新的非顶层入口
 
----
+### 2026-04-06 集成验证首轮回归
+- 目标: 在子模块基本收敛后，启动现有集成验证入口，先区分“结构/握手问题”与“端到端功能 compare 问题”
+- 命令:
+  - `iverilog -g2012 -f verification/iverilog_csiir.f -o verification/tb_ready_chain_ref_sim verification/tb/tb_isp_csiir_ready_chain_ref.sv && vvp verification/tb_ready_chain_ref_sim`
+  - `iverilog -g2012 -f verification/iverilog_csiir.f -o verification/tb_stage4_align_red verification/tb/tb_isp_csiir_stage4_align.sv && vvp verification/tb_stage4_align_red`
+  - `iverilog -g2012 -f verification/iverilog_csiir.f -o verification/tb_backpressure_ref_sim verification/tb/tb_isp_csiir_backpressure.sv && vvp verification/tb_backpressure_ref_sim`
+  - `python3 verification/run_golden_verification.py --output verification_results_integrated_ramp_20260406 --pattern ramp --width 32 --height 32 --seed 42 --keep`
+- 结果:
+  - `tb_isp_csiir_ready_chain_ref.sv` PASS
+  - `tb_isp_csiir_stage4_align.sv` PASS
+  - `tb_isp_csiir_backpressure.sv` PASS
+  - 32x32 ramp golden compare FAIL
+    - total=1024
+    - matched=1
+    - mismatched=1023
+    - first mismatch 从 index 0 开始
+- 直接现象:
+  - `actual.hex` 在跳过 header 后首批输出为 `001, 001, 002, 003, ...`
+  - `expected.hex` 首批输出为 `009, 00a, 00b, 00c, ...`
+  - `tb_isp_csiir_random.sv` 首拍调试显示: `Output #1: x=0 y=0 val=1 s2_y=1 s3_y=0 lb_y=1`
+- 结论:
+  - 结构性 ready-chain / backpressure / stage4-top 对齐当前不是主阻塞
+  - 当前主阻塞已经收敛到端到端功能 mismatch
+  - first failing boundary 更像是 line buffer 窗口中心与下游 `pixel_y` / 数据采样对齐问题，而不是简单握手断链
+- 下一步:
+  - 按 `valid && ready` compare 语义，优先定位 line buffer → Stage1 / Stage2 的首个 metadata/data 错位边界
+  - 暂不为该集成 fail 额外补 trace/replay
 
-## 问题跟踪表
+### 2026-04-06 width-dependent 子模块 max-width 补测
+- 背景: 现有子模块验证主要覆盖 directed semantic / stall / backpressure，没有把 `IMG_WIDTH=5472` 这一类 width-dependent 基础功能单独拉出来验证
+- 范围选择:
+  - `isp_csiir_line_buffer`
+  - `stage3_gradient_fusion`
+  - 选择理由: 这两个模块内部都按 `IMG_WIDTH` 展开行缓存 / 行延迟 buffer，是最大图宽 support 的主要风险点
+- 新增:
+  - `verification/tb/tb_isp_csiir_line_buffer_max_width_ref.sv`
+  - `verification/tb/tb_stage3_gradient_fusion_max_width_ref.sv`
+- 命令:
+  - `iverilog -g2012 -o verification/tb_linebuffer_max_width_ref_sim rtl/isp_csiir_line_buffer.v verification/tb/tb_isp_csiir_line_buffer_max_width_ref.sv && vvp verification/tb_linebuffer_max_width_ref_sim`
+  - `iverilog -g2012 -o verification/tb_stage3_max_width_ref_sim rtl/common/common_ff.v rtl/common/common_pipe.v rtl/common/common_pipe_slice.v rtl/common/common_lut_divider.v rtl/stage3_gradient_fusion.v verification/tb/tb_stage3_gradient_fusion_max_width_ref.sv && vvp verification/tb_stage3_max_width_ref_sim`
+- 结果:
+  - `linebuffer` max-width cases PASS
+    - tail clamp / eol rollover PASS
+    - last-column writeback PASS
+  - `stage3_gradient_fusion` max-width runtime directed case PASS
+- 结论:
+  - 之前子模块验证没有显式覆盖 max-width basic function，这个判断成立
+  - 当前 width-dependent 子模块已经补上 max-width directed coverage
+  - 端到端 32x32 mismatch 不能再归因于“子模块完全没测过最大图宽”
 
-| ID | 发现日期 | 模块 | 问题描述 | 严重性 | 状态 | 解决日期 |
-|----|----------|------|----------|--------|------|----------|
-| 1 | 2026-03-22 | stage4_iir_blend.v | 嵌套拼接语法错误 | Major | 已解决 | 2026-03-22 |
+### 2026-04-06 主链剩余子模块 max-width 补测
+- 背景: 在 `linebuffer/stage3` 之外，用户要求把其他存在行列计数 / metadata 传递的主链子模块也补上最大图宽 case，尽量在子模块阶段把基础功能覆盖收敛
+- 范围选择:
+  - `stage1_gradient`
+  - `stage2_directional_avg`
+  - `stage4_iir_blend`
+- 新增 / 修改:
+  - `verification/tb/tb_stage1_gradient_ref.sv`
+    - 新增 CASE D: `x=5471, y=3075` 的 max-width coordinate passthrough
+    - 检查 `grad_h / grad_v / grad / win_size_clip / pixel_x_out / pixel_y_out / center_pixel / win_out_*`
+  - `verification/tb/tb_stage2_directional_avg_ref.sv`
+    - 新增 CASE D: `x=5471, y=3075` 的 max-width coordinate passthrough
+    - 检查 dual-path avg 结果不变，同时 `pixel_x_out / pixel_y_out / grad_out / win_size_clip_out / center_pixel_out` 对齐
+  - `verification/tb/tb_stage4_iir_blend_ref.sv`
+    - 新增 CASE D: max-width coordinate writeback metadata
+    - TB 额外接出并检查 `lb_wb_en / lb_wb_addr / lb_wb_data`
+- 命令:
+  - `iverilog -g2012 -o verification/tb_stage1_gradient_ref_sim rtl/common/common_pipe.v rtl/stage1_gradient.v verification/tb/tb_stage1_gradient_ref.sv && vvp verification/tb_stage1_gradient_ref_sim`
+  - `iverilog -g2012 -o verification/tb_stage2_directional_avg_ref_sim rtl/common/common_ff.v rtl/common/common_pipe.v rtl/common/common_pipe_slice.v rtl/common/common_lut_divider.v rtl/stage2_directional_avg.v verification/tb/tb_stage2_directional_avg_ref.sv && vvp verification/tb_stage2_directional_avg_ref_sim`
+  - `iverilog -g2012 -o verification/tb_stage4_iir_blend_ref_sim rtl/common/common_ff.v rtl/common/common_pipe.v rtl/common/common_pipe_slice.v rtl/common/common_lut_divider.v rtl/stage4_iir_blend.v verification/tb/tb_stage4_iir_blend_ref.sv && vvp verification/tb_stage4_iir_blend_ref_sim`
+- 结果:
+  - `stage1_gradient` PASS
+    - CASE A/B/C/D 全部 PASS
+  - `stage2_directional_avg` PASS
+    - CASE A/B/C/D 全部 PASS
+  - `stage4_iir_blend` PASS
+    - CASE A-G 全部 PASS
+    - max-width case 下 `patch_center_x == lb_wb_addr == 5471`，`lb_wb_en` 与原子输出提交一致
+- 结论:
+  - 主链关键子模块当前都已显式覆盖最大图宽相关基础功能
+  - Stage1/2/4 未暴露新的 metadata 计数或 writeback 地址问题
+  - 后续若继续集成验证，重点应回到端到端 first failing boundary，而不是继续补 max-width 基础 case
 
----
+### 2026-04-06 集成首失配边界定位补充：compare object 失配
+- 目标: 在 `32x32 ramp` 的 1023/1024 mismatch 基础上，确认首个真正失配边界到底是 RTL 集成 bug，还是 compare/reference 本身已经脱离当前 RTL contract
+- 使用证据:
+  - 直接复跑 `verification_results_integrated_ramp_20260406/test_20260406_132129/isp_csiir_sim`
+  - 读取现有 top TB 调试打印:
+    - `LB OUT`: `center_x/center_y/window_2_2`
+    - `S2 OUT`: `pixel_x/pixel_y/grad/win_size/center`
+    - `S3 FINAL`
+    - `Output #n`
+  - 修复并复用 focused trace 工具:
+    - `verification/tb/tb_isp_csiir_stage2_trace.sv`
+    - `verification/debug_stage2_trace.py`
+- focused trace 命令:
+  - `iverilog -g2012 -I rtl -f verification/iverilog_csiir.f -o verification_results_integrated_ramp_20260406/test_20260406_132129/stage2_trace_sim verification/tb/tb_isp_csiir_stage2_trace.sv`
+  - `verification_results_integrated_ramp_20260406/test_20260406_132129/stage2_trace_sim`
+  - `python3 verification/debug_stage2_trace.py` (cwd=`test_20260406_132129`)
+- 观察:
+  - top RTL 首拍:
+    - `Output #1: x=0 y=0 val=1 s2_y=1 s3_y=0 lb_y=1`
+  - 同一仿真中的 RTL Stage2 首 10 项:
+    - `px=0..9 py=0 ctr=0..9 sum_c=-4599..-4518 avg0_c=-511..-503`
+    - `grad=2..4`
+    - `win_size=16`
+  - 当前 Python reference / golden Stage2 首 10 项:
+    - `px=0..9 py=0 ctr=0,9,9,... sum_c≈-12305..-12381 avg0_c≈-493..-496`
+    - 对应 Stage1 `grad=66..68`
+    - 对应 `win_size≈39`
+- 对比结论:
+  - 分歧在 Stage2 之前就已经成立，不是 Stage4 transport、atomic valid/ready、也不是 linebuffer writeback 路径导致
+  - 当前 `run_golden_verification.py` / `check_ref_semantics.py` 的 expected 路径，至少在以下 contract 上与 RTL 不一致:
+    - Stage1 梯度定义:
+      - RTL: `row0_sum-row4_sum` 与 `col0_sum-col4_sum` 的绝对值，再乘 `205>>10`
+      - Python reference: 完整 5x5 Sobel 权重
+    - win-size 选择:
+      - RTL: 直接拿 `win_size_clip_y_*` 做阈值比较，输出 `16/24/32/40`
+      - Python reference: 通过 `win_size_clip_sft` 构造 LUT x 节点，再做插值
+    - top boundary/window 语义:
+      - RTL linebuffer 顶部前两行采用自身的流式 duplicate 规则
+      - Python reference 当前使用的是标准边界裁剪语义
+- 根因判断:
+  - 现有 32x32 ramp mismatch 不能继续直接归类为“RTL 集成功能 bug”
+  - 当前更准确的表述是: 集成 compare object / expected source 已经偏离当前 RTL contract
+- 处理结论:
+  - 在 compare object 冻结前，不再把 `1023/1024 mismatch` 当作有效 RTL 失败指标继续扩散定位
+  - 下一步应先二选一:
+    - 按当前 RTL contract 重建 integration reference
+    - 或按算法/spec 回推 RTL，让 Stage1/linebuffer/window-size 重新对齐 reference
 
-## 严重性定义
-- **Critical**: 导致功能完全失效
-- **Major**: 导致主要功能不正确
-- **Minor**: 小问题，不影响主要功能
-- **Enhancement**: 改进建议
+### 2026-04-02 always-ready ramp 输出未知值
+- 现象: `verification_results_always_ready_ramp/test_20260402_133803/actual.hex` 前两项为 `00000020`，从第3项起为 `xxx`
+- 定位: 端到端 compare 与 Stage4 align bench 同时指向 `u_stage4` 输入未驱动
+- 原因: runner 已正常生成 `actual.hex`，未知值来自 RTL 内部而非脚本/环境
+- 方案: 先修 `rtl/isp_csiir_top.v` 的 Stage4 最小接线，再复跑 compare
+- 风险: 若补线后仍有异常，再继续追 Stage4 metadata transport 对齐
+- 状态: 阻塞于 RTL 修复
+
+### 2026-04-07 集成首失配边界再定位：Stage4 patch stream 先于 linebuffer row fail
+- 目标: 在 patch feedback 已接入 linebuffer 后，确认当前 residual mismatch 的 first failing boundary 仍是否是 linebuffer merge/tail，还是已经前移到 Stage4 patch 语义
+- compare object 冻结:
+  - boundary: `stage4 patch stream` (`dut.s4_patch_valid/center_x/center_y/patch_5x5`)
+  - expected source: `verification/isp_csiir_fixed_model.py::export_patch_stream()`
+  - observed source: `verification/tb/tb_isp_csiir_patch_stream.sv` 导出的 `actual_patch_stream.txt`
+  - compare scope: `patch_valid` 采样点上的 `(center_x, center_y, patch_5x5)`
+  - pass/fail: 坐标完全一致且 25 个 patch cell 全等
+- 使用证据:
+  - `python3 verification/compare_patch_stream.py --output /tmp/patch_compare_32 --pattern ramp --width 32 --height 32 --seed 42`
+  - `python3 verification/compare_patch_stream.py --output /tmp/patch_compare_8x4 --pattern ramp --width 8 --height 4 --seed 42`
+  - 辅助 watchdog:
+    - `verification/tb/tb_isp_csiir_patch_stream_watch.sv`
+- 结果:
+  - `32x32 ramp`: `Expected patches=1024`, `Actual patches=1024`
+    - first mismatch: `idx=1`
+    - mismatch type: `patch`
+    - center: expected/actual 都是 `(1,0)`
+    - first diff: `row=0 col=0 expected=11 actual=10`
+  - `8x4 ramp`: first mismatch 同样在 `idx=1`，中心坐标一致，patch 内容失配
+- 关键判据:
+  - `32x32 ramp` 的 `idx=1` RTL patch，逐项等于“原始输入、不做 feedback 更新”的定点模型结果
+  - 说明当前最前面的故障点不是 linebuffer tail bookkeeping，而是 Stage4 所看到的整条上游语义仍是 stale pre-feedback image
+  - 进一步统计可见:
+    - 当前 RTL patch stream 与 no-feedback 近似模型在前 27 项内一致
+    - 当前顶层 output stream 也是从 `index 27` 左右开始出现第一批反馈可见性差异
+  - 这表明反馈不是完全没接入，而是反馈生效延迟大约为一段 pipeline / neighborhood lookahead，而不是定点模型要求的“逐 center 立即生效”
+- 尝试与结论:
+  - 尝试把 linebuffer 改成“发一窗，等对应 patch feedback 回来再发下一窗”
+  - 用 `tb_isp_csiir_patch_stream_watch.sv` 观察:
+    - `window_fire=1`
+    - `patch_fire=0`
+    - `feedback_pending=1`
+  - 说明 naive 单窗串行化不可行；不是 linebuffer 单点问题，而是 Stage3 自身也依赖连续 neighborhood context，不能靠 linebuffer 一处简单停流来复刻定点模型的递归语义
+- 阶段结论:
+  - linebuffer 不是当前 residual mismatch 的 first failing boundary
+  - 当前真正的系统级问题是:
+    - 定点模型语义 = per-center immediate feedback raster update
+    - RTL 现架构语义 = deep streaming + delayed feedback visibility
+  - 因此继续只修 linebuffer merge/tail，不能让集成验证收敛

@@ -82,6 +82,8 @@ module isp_csiir_top #(
     wire [15:0]                 cfg_thresh0, cfg_thresh1, cfg_thresh2, cfg_thresh3;
     wire [7:0]                  cfg_ratio_0, cfg_ratio_1, cfg_ratio_2, cfg_ratio_3;
     wire [DATA_WIDTH-1:0]       cfg_clip_y_0, cfg_clip_y_1, cfg_clip_y_2, cfg_clip_y_3;
+    wire [7:0]                  cfg_clip_sft_0, cfg_clip_sft_1, cfg_clip_sft_2, cfg_clip_sft_3;
+    wire [31:0]                 cfg_mot_protect;
 
     // Line buffer interface
     wire [DATA_WIDTH-1:0]       window [0:4][0:4];
@@ -105,6 +107,7 @@ module isp_csiir_top #(
     wire [DATA_WIDTH-1:0]       s1_win_2_0, s1_win_2_1, s1_win_2_2, s1_win_2_3, s1_win_2_4;
     wire [DATA_WIDTH-1:0]       s1_win_3_0, s1_win_3_1, s1_win_3_2, s1_win_3_3, s1_win_3_4;
     wire [DATA_WIDTH-1:0]       s1_win_4_0, s1_win_4_1, s1_win_4_2, s1_win_4_3, s1_win_4_4;
+    wire [DATA_WIDTH*25-1:0]    s1_patch_5x5;
 
     // Stage 2 interface (s11 signed format)
     wire signed [SIGNED_WIDTH-1:0] s2_avg0_c, s2_avg0_u, s2_avg0_d, s2_avg0_l, s2_avg0_r;
@@ -127,17 +130,36 @@ module isp_csiir_top #(
     wire [LINE_ADDR_WIDTH-1:0]  s3_pixel_x;
     wire [ROW_CNT_WIDTH-1:0]    s3_pixel_y;
 
+    localparam PATCH_WIDTH = DATA_WIDTH * 25;
+
     // Stage 4 interface (u10 unsigned format)
+    wire [PATCH_WIDTH-1:0]      s4_src_patch_5x5;
+    wire [PATCH_WIDTH-1:0]      s4_src_patch_aligned;
+    wire [GRAD_WIDTH-1:0]       s4_grad_h_aligned;
+    wire [GRAD_WIDTH-1:0]       s4_grad_v_aligned;
     wire [DATA_WIDTH-1:0]       s4_dout;
     wire                        s4_dout_valid;
     wire [LINE_ADDR_WIDTH-1:0]  s4_pixel_x;
     wire [ROW_CNT_WIDTH-1:0]    s4_pixel_y;
+
+    reg  [PATCH_WIDTH-1:0]      s4_meta_patch_buf_0 [0:IMG_WIDTH-1];
+    reg  [PATCH_WIDTH-1:0]      s4_meta_patch_buf_1 [0:IMG_WIDTH-1];
+    reg  [GRAD_WIDTH-1:0]       s4_meta_grad_h_buf_0 [0:IMG_WIDTH-1];
+    reg  [GRAD_WIDTH-1:0]       s4_meta_grad_h_buf_1 [0:IMG_WIDTH-1];
+    reg  [GRAD_WIDTH-1:0]       s4_meta_grad_v_buf_0 [0:IMG_WIDTH-1];
+    reg  [GRAD_WIDTH-1:0]       s4_meta_grad_v_buf_1 [0:IMG_WIDTH-1];
+    integer                     meta_i;
 
     // Line buffer writeback signals
     wire                        lb_wb_en;
     wire [LINE_ADDR_WIDTH-1:0]  lb_wb_addr;
     wire [DATA_WIDTH-1:0]       lb_wb_data;
     wire [2:0]                  lb_wb_row_offset;
+    wire                        s4_patch_valid;
+    wire                        s4_patch_ready;
+    wire [LINE_ADDR_WIDTH-1:0]  s4_patch_center_x;
+    wire [ROW_CNT_WIDTH-1:0]    s4_patch_center_y;
+    wire [PATCH_WIDTH-1:0]      s4_patch_5x5;
 
     // Video timing signals
     wire                        sof;
@@ -184,11 +206,11 @@ module isp_csiir_top #(
         .win_size_clip_y_1 (cfg_clip_y_1),
         .win_size_clip_y_2 (cfg_clip_y_2),
         .win_size_clip_y_3 (cfg_clip_y_3),
-        .win_size_clip_sft_0 (),
-        .win_size_clip_sft_1 (),
-        .win_size_clip_sft_2 (),
-        .win_size_clip_sft_3 (),
-        .mot_protect   ()
+        .win_size_clip_sft_0 (cfg_clip_sft_0),
+        .win_size_clip_sft_1 (cfg_clip_sft_1),
+        .win_size_clip_sft_2 (cfg_clip_sft_2),
+        .win_size_clip_sft_3 (cfg_clip_sft_3),
+        .mot_protect   (cfg_mot_protect)
     );
 
     //=========================================================================
@@ -213,6 +235,11 @@ module isp_csiir_top #(
         .lb_wb_data    (lb_wb_data),
         .lb_wb_addr    (lb_wb_addr),
         .lb_wb_row_offset (lb_wb_row_offset),
+        .patch_valid   (s4_patch_valid),
+        .patch_ready   (s4_patch_ready),
+        .patch_center_x(s4_patch_center_x),
+        .patch_center_y(s4_patch_center_y),
+        .patch_5x5     (s4_patch_5x5),
         .window_0_0    (window[0][0]), .window_0_1 (window[0][1]),
         .window_0_2    (window[0][2]), .window_0_3 (window[0][3]),
         .window_0_4    (window[0][4]),
@@ -267,6 +294,10 @@ module isp_csiir_top #(
         .win_size_clip_y_1 (cfg_clip_y_1),
         .win_size_clip_y_2 (cfg_clip_y_2),
         .win_size_clip_y_3 (cfg_clip_y_3),
+        .win_size_clip_sft_0 (cfg_clip_sft_0),
+        .win_size_clip_sft_1 (cfg_clip_sft_1),
+        .win_size_clip_sft_2 (cfg_clip_sft_2),
+        .win_size_clip_sft_3 (cfg_clip_sft_3),
         .grad_h        (s1_grad_h),
         .grad_v        (s1_grad_v),
         .grad          (s1_grad),
@@ -295,6 +326,32 @@ module isp_csiir_top #(
         .win_out_4_2   (s1_win_4_2), .win_out_4_3 (s1_win_4_3),
         .win_out_4_4   (s1_win_4_4)
     );
+
+    assign s1_patch_5x5 = {
+        s1_win_4_4, s1_win_4_3, s1_win_4_2, s1_win_4_1, s1_win_4_0,
+        s1_win_3_4, s1_win_3_3, s1_win_3_2, s1_win_3_1, s1_win_3_0,
+        s1_win_2_4, s1_win_2_3, s1_win_2_2, s1_win_2_1, s1_win_2_0,
+        s1_win_1_4, s1_win_1_3, s1_win_1_2, s1_win_1_1, s1_win_1_0,
+        s1_win_0_4, s1_win_0_3, s1_win_0_2, s1_win_0_1, s1_win_0_0
+    };
+
+    always @(posedge clk) begin
+        if (s1_valid && s1_ready) begin
+            if (s1_pixel_y[0]) begin
+                s4_meta_patch_buf_1[s1_pixel_x]  <= s1_patch_5x5;
+                s4_meta_grad_h_buf_1[s1_pixel_x] <= s1_grad_h;
+                s4_meta_grad_v_buf_1[s1_pixel_x] <= s1_grad_v;
+            end else begin
+                s4_meta_patch_buf_0[s1_pixel_x]  <= s1_patch_5x5;
+                s4_meta_grad_h_buf_0[s1_pixel_x] <= s1_grad_h;
+                s4_meta_grad_v_buf_0[s1_pixel_x] <= s1_grad_v;
+            end
+        end
+    end
+
+    assign s4_src_patch_aligned = s3_pixel_y[0] ? s4_meta_patch_buf_1[s3_pixel_x] : s4_meta_patch_buf_0[s3_pixel_x];
+    assign s4_grad_h_aligned    = s3_pixel_y[0] ? s4_meta_grad_h_buf_1[s3_pixel_x] : s4_meta_grad_h_buf_0[s3_pixel_x];
+    assign s4_grad_v_aligned    = s3_pixel_y[0] ? s4_meta_grad_v_buf_1[s3_pixel_x] : s4_meta_grad_v_buf_0[s3_pixel_x];
 
     //=========================================================================
     // Stage 2: Directional Average (u10 -> s11 conversion)
@@ -407,11 +464,15 @@ module isp_csiir_top #(
         .blend0_dir_avg (s3_blend0),
         .blend1_dir_avg (s3_blend1),
         .stage3_valid  (s3_valid),
-        .stage3_ready  (s3_ready),
         .avg0_u        (s3_avg0_u),
         .avg1_u        (s3_avg1_u),
         .win_size_clip (s3_win_size_clip),
+        .src_patch_5x5 (s4_src_patch_aligned),
+        .grad_h        (s4_grad_h_aligned),
+        .grad_v        (s4_grad_v_aligned),
+        .reg_edge_protect (cfg_mot_protect[7:0]),
         .center_pixel  (s3_center_pixel),
+        .stage3_ready  (s3_ready),
         .blending_ratio_0 (cfg_ratio_0),
         .blending_ratio_1 (cfg_ratio_1),
         .blending_ratio_2 (cfg_ratio_2),
@@ -423,12 +484,21 @@ module isp_csiir_top #(
         .pixel_y       (s3_pixel_y),
         .pixel_x_out   (s4_pixel_x),
         .pixel_y_out   (s4_pixel_y),
-        .lb_wb_en      (lb_wb_en),
-        .lb_wb_addr    (lb_wb_addr),
-        .lb_wb_data    (lb_wb_data)
+        .patch_valid   (s4_patch_valid),
+        .patch_ready   (s4_patch_ready),
+        .patch_center_x(s4_patch_center_x),
+        .patch_center_y(s4_patch_center_y),
+        .patch_5x5     (s4_patch_5x5),
+        .lb_wb_en      (),
+        .lb_wb_addr    (),
+        .lb_wb_data    ()
     );
 
-    // Line buffer writeback row offset (currently not used, set to 0)
+    // Legacy single-pixel writeback path is disabled in favor of patch feedback.
+    // Keep the signals tied off so older debug hooks still compile.
+    assign lb_wb_en = 1'b0;
+    assign lb_wb_addr = {LINE_ADDR_WIDTH{1'b0}};
+    assign lb_wb_data = {DATA_WIDTH{1'b0}};
     assign lb_wb_row_offset = 3'd0;
 
     //=========================================================================

@@ -1,609 +1,478 @@
 #!/usr/bin/env python3
 """
-ISP-CSIIR 定点参考模型 - 匹配 RTL 架构
-
-完全匹配 RTL 的数据处理流程：
-- 5x5 窗口生成（边界复制）
-- Stage 1: 梯度计算 (u10 输入)
-- Stage 2: 方向平均 (s11 有符号)
-- Stage 3: 梯度融合 (s11 有符号, 1-row delay)
-- Stage 4: IIR 混合 (s11→u10)
-
-作者: rtl-verf
-日期: 2026-03-23
-版本: v2.0 - 匹配 RTL 架构
+ISP-CSIIR 定点参考模型 - 对齐 isp-csiir-ref.md 语义
 """
 
 import numpy as np
 from dataclasses import dataclass
-from typing import Tuple, List
+from typing import Dict, List, Tuple
+
+
+AVG_FACTOR_C_2X2 = np.array([
+    [0, 0, 0, 0, 0],
+    [0, 1, 2, 1, 0],
+    [0, 2, 4, 2, 0],
+    [0, 1, 2, 1, 0],
+    [0, 0, 0, 0, 0],
+], dtype=np.int32)
+AVG_FACTOR_C_3X3 = np.array([
+    [0, 0, 0, 0, 0],
+    [0, 1, 1, 1, 0],
+    [0, 1, 1, 1, 0],
+    [0, 1, 1, 1, 0],
+    [0, 0, 0, 0, 0],
+], dtype=np.int32)
+AVG_FACTOR_C_4X4 = np.array([
+    [1, 1, 2, 1, 1],
+    [1, 2, 4, 2, 1],
+    [2, 4, 8, 4, 2],
+    [1, 2, 4, 2, 1],
+    [1, 1, 2, 1, 1],
+], dtype=np.int32)
+AVG_FACTOR_C_5X5 = np.ones((5, 5), dtype=np.int32)
+
+AVG_MASK_U = np.array([
+    [1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+], dtype=np.int32)
+AVG_MASK_D = np.array([
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1],
+], dtype=np.int32)
+AVG_MASK_L = np.array([
+    [1, 1, 1, 0, 0],
+    [1, 1, 1, 0, 0],
+    [1, 1, 1, 0, 0],
+    [1, 1, 1, 0, 0],
+    [1, 1, 1, 0, 0],
+], dtype=np.int32)
+AVG_MASK_R = np.array([
+    [0, 0, 1, 1, 1],
+    [0, 0, 1, 1, 1],
+    [0, 0, 1, 1, 1],
+    [0, 0, 1, 1, 1],
+    [0, 0, 1, 1, 1],
+], dtype=np.int32)
+
+HORIZONTAL_TAP_STEP = 2
+
+BLEND_FACTOR_2X2_H = np.array([
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 1, 1, 1, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+], dtype=np.int32)
+BLEND_FACTOR_2X2_V = np.array([
+    [0, 0, 0, 0, 0],
+    [0, 0, 1, 0, 0],
+    [0, 0, 1, 0, 0],
+    [0, 0, 1, 0, 0],
+    [0, 0, 0, 0, 0],
+], dtype=np.int32)
+BLEND_FACTOR_2X2 = np.array([
+    [0, 0, 0, 0, 0],
+    [0, 1, 2, 1, 0],
+    [0, 2, 4, 2, 0],
+    [0, 1, 2, 1, 0],
+    [0, 0, 0, 0, 0],
+], dtype=np.int32)
+BLEND_FACTOR_3X3 = np.array([
+    [0, 0, 0, 0, 0],
+    [0, 1, 1, 1, 0],
+    [0, 1, 1, 1, 0],
+    [0, 1, 1, 1, 0],
+    [0, 0, 0, 0, 0],
+], dtype=np.int32)
+BLEND_FACTOR_4X4 = np.array([
+    [1, 2, 2, 2, 1],
+    [2, 4, 4, 4, 2],
+    [2, 4, 4, 4, 2],
+    [2, 4, 4, 4, 2],
+    [1, 2, 2, 2, 1],
+], dtype=np.int32)
+BLEND_FACTOR_5X5 = np.full((5, 5), 4, dtype=np.int32)
+
+SOBEL_X = np.array([
+    [1, 1, 1, 1, 1],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [-1, -1, -1, -1, -1],
+], dtype=np.int32)
+SOBEL_Y = np.array([
+    [1, 0, 0, 0, -1],
+    [1, 0, 0, 0, -1],
+    [1, 0, 0, 0, -1],
+    [1, 0, 0, 0, -1],
+    [1, 0, 0, 0, -1],
+], dtype=np.int32)
 
 
 @dataclass
 class FixedPointConfig:
-    """定点配置参数"""
     DATA_WIDTH: int = 10
     GRAD_WIDTH: int = 14
     ACC_WIDTH: int = 20
-
-    # 图像尺寸
     IMG_WIDTH: int = 64
     IMG_HEIGHT: int = 64
-
-    # 窗口阈值
     win_size_thresh: List[int] = None
     win_size_clip_y: List[int] = None
+    win_size_clip_sft: List[int] = None
     blending_ratio: List[int] = None
+    reg_edge_protect: int = 32
 
     def __post_init__(self):
         if self.win_size_thresh is None:
             self.win_size_thresh = [16, 24, 32, 40]
         if self.win_size_clip_y is None:
-            self.win_size_clip_y = [400, 650, 900, 1023]
+            self.win_size_clip_y = [15, 23, 31, 39]
+        if self.win_size_clip_sft is None:
+            self.win_size_clip_sft = [2, 2, 2, 2]
         if self.blending_ratio is None:
             self.blending_ratio = [32, 32, 32, 32]
 
 
 class ISPCSIIRFixedModel:
-    """
-    ISP-CSIIR 定点模型 - 匹配 RTL 架构
-
-    数据格式（匹配 RTL）:
-    - Stage 1 输入/输出: u10 (无符号)
-    - Stage 2-4 内部: s11 (有符号, 零点 = 512)
-    - 最终输出: u10 (无符号)
-    """
-
     def __init__(self, config: FixedPointConfig = None):
         self.config = config if config else FixedPointConfig()
-        self.DATA_MAX = (1 << self.config.DATA_WIDTH) - 1  # 1023
-
-        # IIR 反馈存储
+        self.DATA_MAX = (1 << self.config.DATA_WIDTH) - 1
         self.src_uv = None
 
-        # Initialize LUT for division
-        self._init_div_lut()
-
-    def _init_div_lut(self):
-        """Initialize division LUT - matches RTL common_lut_divider"""
-        self.div_lut = [0] * 256
-
-        # Index 0: grad_sum = 0
-        self.div_lut[0] = 65535
-
-        # Index 1-127: grad_sum 1-127 (direct mapping)
-        for i in range(1, 128):
-            inv = (1 << 26) // i
-            self.div_lut[i] = min(inv, 65535)
-
-        # Index 128-159: grad_sum 128-255 (2:1 compression)
-        for idx in range(128, 160):
-            grad_sum = (idx - 128) * 2 + 128
-            self.div_lut[idx] = min((1 << 26) // grad_sum, 65535)
-
-        # Index 160-191: grad_sum 256-511 (8:1 compression)
-        for idx in range(160, 192):
-            grad_sum = (idx - 160) * 8 + 256
-            self.div_lut[idx] = min((1 << 26) // grad_sum, 65535)
-
-        # Index 192-223: grad_sum 512-1023 (16:1 compression)
-        # This ensures index stays within range for all grad_sum 512-1023
-        # lut_index = 192 + ((gs - 512) >> 4)
-        for idx in range(192, 224):
-            grad_sum = (idx - 192) * 16 + 512
-            self.div_lut[idx] = min((1 << 26) // grad_sum, 65535)
-
-        # Index 224-255: higher grad_sum values (8192:1 compression)
-        for idx in range(224, 256):
-            grad_sum = (idx - 224) * 8192 + 8192
-            self.div_lut[idx] = min((1 << 26) // max(grad_sum, 1), 65535)
-
     def _clip(self, value: int, min_val: int = 0, max_val: int = None) -> int:
-        """限幅函数"""
         if max_val is None:
             max_val = self.DATA_MAX
         return max(min_val, min(max_val, int(value)))
 
+    def _round_div(self, num: int, den: int) -> int:
+        if den == 0:
+            raise ZeroDivisionError("division by zero")
+        if num >= 0:
+            return (num + den // 2) // den
+        return -(((-num) + den // 2) // den)
+
     def _u10_to_s11(self, value: int) -> int:
-        """u10 -> s11 转换: s11 = u10 - 512"""
-        return value - 512
+        return int(value) - 512
 
     def _s11_to_u10(self, value: int) -> int:
-        """s11 -> u10 转换: u10 = clip(s11 + 512, 0, 1023)"""
-        result = value + 512
-        return self._clip(result, 0, 1023)
+        return self._clip(int(value) + 512, 0, 1023)
+
+    def _saturate_s11(self, value: int) -> int:
+        return self._clip(value, -512, 511)
 
     def _get_window(self, img: np.ndarray, i: int, j: int) -> np.ndarray:
-        """获取5x5窗口，边界复制 (匹配 RTL line buffer 行为)"""
         h, w = img.shape
         window = np.zeros((5, 5), dtype=np.int32)
-
-        # RTL line buffer 行选择逻辑 (匹配 isp_csiir_line_buffer.v):
-        # - win_row_0: 当 row_cnt < 2 时复制当前行，否则上上行
-        # - win_row_1: 当 row_cnt < 1 时复制当前行，否则上一行
-        # - win_row_2: 当前行
-        # - win_row_3: 当 row_cnt < 1 时复制当前行，否则下一行（或底边界复制）
-        # - win_row_4: 当 row_cnt < 2 时复制当前行，否则下下行（或底边界复制）
-
         for dy in range(-2, 3):
             for dx in range(-2, 3):
-                # 标准 x 边界复制
-                x = self._clip(i + dx, 0, w - 1)
-
-                # RTL 风格的 y 边界处理
-                if j < 2:
-                    # 前 2 行：所有窗口行都复制当前行
-                    y = j
-                elif j < 1:
-                    # 第 1 行：win_row 0-1 和 3-4 复制当前行
-                    if dy == -2 or dy == -1 or dy == 1 or dy == 2:
-                        y = j
-                    else:
-                        y = self._clip(j + dy, 0, h - 1)
-                elif j >= h - 2:
-                    # 底部边界：使用标准边界复制
-                    y = self._clip(j + dy, 0, h - 1)
-                else:
-                    # 正常区域：标准边界复制
-                    y = self._clip(j + dy, 0, h - 1)
-
+                x = self._clip(i + dx * HORIZONTAL_TAP_STEP, 0, w - 1)
+                y = self._clip(j + dy, 0, h - 1)
                 window[dy + 2, dx + 2] = int(img[y, x])
-
         return window
 
-    def _stage1_gradient(self, win: np.ndarray) -> Tuple[int, int, int, int]:
-        """
-        Stage 1: 梯度计算 (匹配 RTL)
+    def _lut_x_nodes(self) -> List[int]:
+        nodes = []
+        acc = 0
+        for shift in self.config.win_size_clip_sft:
+            acc += 1 << int(shift)
+            nodes.append(acc)
+        return nodes
 
-        输入: u10 5x5 窗口
-        输出: grad (u14), win_size (u6)
-        """
-        # Sobel 行和 (匹配 RTL stage1_gradient.v)
-        row0_sum = int(win[0, :].sum())
-        row4_sum = int(win[4, :].sum())
-
-        # Sobel 列和
-        col0_sum = int(win[:, 0].sum())
-        col4_sum = int(win[:, 4].sum())
-
-        # 梯度（有符号差分）
-        grad_h_raw = row0_sum - row4_sum
-        grad_v_raw = col0_sum - col4_sum
-
-        # 绝对值
-        grad_h = abs(grad_h_raw)
-        grad_v = abs(grad_v_raw)
-
-        # 综合梯度: grad = (grad_h + grad_v) * 205 >> 10 (approximates /5)
-        # With rounding: check bit[9] for round-to-nearest
-        grad_sum = grad_h + grad_v
-        grad_full = grad_sum * 205
-        grad_shifted = grad_full >> 10
-        # Rounding: if bit[9] is set, add 1 to the result
-        round_carry = (grad_full >> 9) & 1
-        grad_rounded = grad_shifted + round_carry
-        # Saturation to 14-bit
-        grad = self._clip(grad_rounded, 0, (1 << self.config.GRAD_WIDTH) - 1)
-
-        # 窗口大小查表 (匹配 RTL win_size_clip_y)
-        win_size = self._lut_win_size(grad)
-
-        return grad_h, grad_v, grad, win_size
-
-    def _lut_win_size(self, grad: int) -> int:
-        """窗口大小LUT (匹配 RTL)"""
-        clip_y = self.config.win_size_clip_y
-
-        if grad < clip_y[0]:
-            return 16
-        elif grad < clip_y[1]:
-            return 24
-        elif grad < clip_y[2]:
-            return 32
-        elif grad < clip_y[3]:
-            return 40
+    def _lut_win_size(self, grad_triplet_max: int) -> int:
+        x_nodes = self._lut_x_nodes()
+        y_nodes = self.config.win_size_clip_y
+        x = int(grad_triplet_max)
+        if x <= x_nodes[0]:
+            win_size_grad = y_nodes[0]
+        elif x >= x_nodes[-1]:
+            win_size_grad = y_nodes[-1]
         else:
-            return 40
+            win_size_grad = y_nodes[-1]
+            for idx in range(len(x_nodes) - 1):
+                x0, x1 = x_nodes[idx], x_nodes[idx + 1]
+                if x0 <= x <= x1:
+                    y0, y1 = y_nodes[idx], y_nodes[idx + 1]
+                    win_size_grad = y0 + self._round_div((x - x0) * (y1 - y0), x1 - x0)
+                    break
+        return self._clip(win_size_grad, 16, 40)
 
-    def _stage2_directional_avg(self, win_u10: np.ndarray) -> Tuple:
-        """
-        Stage 2: 方向平均 (匹配 RTL)
+    def _stage1_gradient(self, win: np.ndarray) -> Tuple[int, int, int]:
+        grad_h = int(np.sum(win * SOBEL_X))
+        grad_v = int(np.sum(win * SOBEL_Y))
+        grad = self._round_div(abs(grad_h), 5) + self._round_div(abs(grad_v), 5)
+        return grad_h, grad_v, grad
 
-        输入: u10 5x5 窗口
-        输出: s11 平均值 (5个方向)
-        """
-        # u10 -> s11 转换 (匹配 RTL line 170)
-        win_s11 = win_u10.astype(np.int32) - 512
+    def _grad_triplet_win_size(self, img: np.ndarray, i: int, j: int) -> Tuple[int, int, int, int, np.ndarray]:
+        h, w = img.shape
+        left_i = self._clip(i - HORIZONTAL_TAP_STEP, 0, w - 1)
+        right_i = self._clip(i + HORIZONTAL_TAP_STEP, 0, w - 1)
+        left_win = self._get_window(img, left_i, j)
+        center_win = self._get_window(img, i, j)
+        right_win = self._get_window(img, right_i, j)
+        grad_h, grad_v, grad_c = self._stage1_gradient(center_win)
+        _, _, grad_l = self._stage1_gradient(left_win)
+        _, _, grad_r = self._stage1_gradient(right_win)
+        win_size = self._lut_win_size(max(grad_l, grad_c, grad_r))
+        return grad_h, grad_v, grad_c, win_size, center_win
 
-        # 计算各方向和（匹配 RTL stage2_directional_avg.v）
-        # sum_c: 全部25像素
-        sum_c = int(win_s11.sum())
-        weight_c = 25
+    def _select_stage2_kernels(self, win_size: int) -> Tuple[np.ndarray, np.ndarray]:
+        t0, t1, t2, t3 = self.config.win_size_thresh
+        if win_size < t0:
+            return np.zeros((5, 5), dtype=np.int32), AVG_FACTOR_C_2X2.copy()
+        if win_size < t1:
+            return AVG_FACTOR_C_3X3.copy(), AVG_FACTOR_C_2X2.copy()
+        if win_size < t2:
+            return AVG_FACTOR_C_4X4.copy(), AVG_FACTOR_C_3X3.copy()
+        if win_size < t3:
+            return AVG_FACTOR_C_5X5.copy(), AVG_FACTOR_C_4X4.copy()
+        return AVG_FACTOR_C_5X5.copy(), np.zeros((5, 5), dtype=np.int32)
 
-        # sum_u: 前3行 (rows 0,1,2)
-        sum_u = int(win_s11[:3, :].sum())
-        weight_u = 15
-
-        # sum_d: 后3行 (rows 2,3,4)
-        sum_d = int(win_s11[2:, :].sum())
-        weight_d = 15
-
-        # sum_l: 前3列 (cols 0,1,2)
-        sum_l = int(win_s11[:, :3].sum())
-        weight_l = 15
-
-        # sum_r: 后3列 (cols 2,3,4)
-        sum_r = int(win_s11[:, 2:].sum())
-        weight_r = 15
-
-        # 有符号整数除法 (匹配 RTL)
-        def signed_divide(sum_val, weight):
-            if weight == 0:
-                return 0
-            result = sum_val // weight
-            # 饱和到 s11 范围
-            return max(-512, min(511, result))
-
-        avg0_c = signed_divide(sum_c, weight_c)
-        avg0_u = signed_divide(sum_u, weight_u)
-        avg0_d = signed_divide(sum_d, weight_d)
-        avg0_l = signed_divide(sum_l, weight_l)
-        avg0_r = signed_divide(sum_r, weight_r)
-
-        # avg1 与 avg0 相同 (简化实现，匹配 RTL)
-        avg1_c, avg1_u, avg1_d, avg1_l, avg1_r = avg0_c, avg0_u, avg0_d, avg0_l, avg0_r
-
-        return (avg0_c, avg0_u, avg0_d, avg0_l, avg0_r,
-                avg1_c, avg1_u, avg1_d, avg1_l, avg1_r)
-
-    def _lut_divide(self, blend_sum: int, grad_sum: int) -> int:
-        """LUT-based division - matches RTL common_lut_divider"""
-        if grad_sum == 0:
+    def _weighted_avg_from_factor(self, win_s11: np.ndarray, factor: np.ndarray) -> int:
+        weight = int(np.sum(factor))
+        if weight == 0:
             return 0
+        total = int(np.sum(win_s11 * factor))
+        return self._saturate_s11(self._round_div(total, weight))
 
-        gs = grad_sum
+    def _build_stage2_path(self, win_s11: np.ndarray, kernel: np.ndarray) -> Dict:
+        factors = {
+            "c": kernel,
+            "u": kernel * AVG_MASK_U,
+            "d": kernel * AVG_MASK_D,
+            "l": kernel * AVG_MASK_L,
+            "r": kernel * AVG_MASK_R,
+        }
+        enable = int(np.sum(kernel)) != 0
+        values = {name: self._weighted_avg_from_factor(win_s11, factor) for name, factor in factors.items()}
+        return {
+            "enable": enable,
+            "kernel": kernel.copy(),
+            "factors": {k: v.copy() for k, v in factors.items()},
+            "values": values,
+        }
 
-        # Index compression (matches RTL)
-        if gs < 128:
-            lut_index = gs
-        elif gs < 256:
-            lut_index = 128 + ((gs - 128) >> 1)  # 2:1 compression
-        elif gs < 512:
-            lut_index = 160 + ((gs - 256) >> 3)  # 8:1 compression (32 entries for 256 values)
-        elif gs < 1024:
-            lut_index = 192 + ((gs - 512) >> 4)  # 16:1 compression
+    def _stage2_directional_avg(self, win_u10: np.ndarray, win_size: int) -> Dict:
+        win_s11 = win_u10.astype(np.int32) - 512
+        avg0_kernel, avg1_kernel = self._select_stage2_kernels(win_size)
+        avg0_path = self._build_stage2_path(win_s11, avg0_kernel)
+        avg1_path = self._build_stage2_path(win_s11, avg1_kernel)
+        return {
+            "avg0_enable": avg0_path["enable"],
+            "avg1_enable": avg1_path["enable"],
+            "avg0": avg0_path["values"],
+            "avg1": avg1_path["values"],
+            "avg0_kernel": avg0_path["kernel"],
+            "avg1_kernel": avg1_path["kernel"],
+            "avg0_factors": avg0_path["factors"],
+            "avg1_factors": avg1_path["factors"],
+        }
+
+    def _stage3_neighbors(self, img: np.ndarray, i: int, j: int) -> Dict[str, int]:
+        h, w = img.shape
+        grad_c = self._stage1_gradient(self._get_window(img, i, j))[2]
+        grad_u = self._stage1_gradient(self._get_window(img, i, self._clip(j - 1, 0, h - 1)))[2]
+        grad_d = self._stage1_gradient(self._get_window(img, i, self._clip(j + 1, 0, h - 1)))[2]
+        grad_l = self._stage1_gradient(self._get_window(img, self._clip(i - HORIZONTAL_TAP_STEP, 0, w - 1), j))[2]
+        grad_r = self._stage1_gradient(self._get_window(img, self._clip(i + HORIZONTAL_TAP_STEP, 0, w - 1), j))[2]
+        return {"c": grad_c, "u": grad_u, "d": grad_d, "l": grad_l, "r": grad_r}
+
+    def _stage3_fusion(self, avg0: Dict[str, int], avg1: Dict[str, int], grads: Dict[str, int]) -> Tuple[int, int]:
+        grad_pairs = [("u", grads["u"]), ("d", grads["d"]), ("l", grads["l"]), ("r", grads["r"]), ("c", grads["c"])]
+        grad_pairs_sorted = sorted(grad_pairs, key=lambda item: item[1], reverse=True)
+        grad_inv = {}
+        for idx, (dir_name, _) in enumerate(grad_pairs_sorted):
+            grad_inv[dir_name] = grad_pairs_sorted[4 - idx][1]
+        grad_sum = sum(grad_inv.values())
+
+        def blend(values: Dict[str, int]) -> int:
+            if grad_sum == 0:
+                return self._saturate_s11(self._round_div(sum(values.values()), 5))
+            total = sum(int(values[key]) * int(grad_inv[key]) for key in ("c", "u", "d", "l", "r"))
+            return self._saturate_s11(self._round_div(total, grad_sum))
+
+        return blend(avg0), blend(avg1)
+
+    def _mix_scalar_with_patch(self, scalar: int, src_uv_s11_5x5: np.ndarray, factor: np.ndarray) -> np.ndarray:
+        out = np.zeros((5, 5), dtype=np.int32)
+        for y in range(5):
+            for x in range(5):
+                out[y, x] = self._saturate_s11(
+                    self._round_div(int(scalar) * int(factor[y, x]) + int(src_uv_s11_5x5[y, x]) * (4 - int(factor[y, x])), 4)
+                )
+        return out
+
+    def _stage4_window_blend(self, win_u10: np.ndarray, win_size: int,
+                             blend0_grad: int, blend1_grad: int,
+                             avg0_u: int, avg1_u: int,
+                             grad_h: int, grad_v: int) -> Dict:
+        src_uv_s11_5x5 = win_u10.astype(np.int32) - 512
+        ratio_idx = self._clip((win_size // 8) - 2, 0, 3)
+        ratio = int(self.config.blending_ratio[ratio_idx])
+
+        blend0_hor = self._saturate_s11(self._round_div(ratio * blend0_grad + (64 - ratio) * avg0_u, 64))
+        blend1_hor = self._saturate_s11(self._round_div(ratio * blend1_grad + (64 - ratio) * avg1_u, 64))
+
+        orient_factor = BLEND_FACTOR_2X2_H if abs(grad_v) > abs(grad_h) else BLEND_FACTOR_2X2_V
+        orientation = "h" if abs(grad_v) > abs(grad_h) else "v"
+
+        t0, t1, t2, t3 = self.config.win_size_thresh
+        blend0_win = None
+        blend1_win = None
+
+        if win_size < t0:
+            blend10 = self._mix_scalar_with_patch(blend1_hor, src_uv_s11_5x5, orient_factor)
+            blend11 = self._mix_scalar_with_patch(blend1_hor, src_uv_s11_5x5, BLEND_FACTOR_2X2)
+            blend1_win = np.zeros((5, 5), dtype=np.int32)
+            for y in range(5):
+                for x in range(5):
+                    blend1_win[y, x] = self._saturate_s11(
+                        self._round_div(int(blend10[y, x]) * self.config.reg_edge_protect + int(blend11[y, x]) * (64 - self.config.reg_edge_protect), 64)
+                    )
+        elif win_size < t1:
+            blend10 = self._mix_scalar_with_patch(blend1_hor, src_uv_s11_5x5, orient_factor)
+            blend11 = self._mix_scalar_with_patch(blend1_hor, src_uv_s11_5x5, BLEND_FACTOR_2X2)
+            blend1_win = np.zeros((5, 5), dtype=np.int32)
+            for y in range(5):
+                for x in range(5):
+                    blend1_win[y, x] = self._saturate_s11(
+                        self._round_div(int(blend10[y, x]) * self.config.reg_edge_protect + int(blend11[y, x]) * (64 - self.config.reg_edge_protect), 64)
+                    )
+            blend0_win = self._mix_scalar_with_patch(blend0_hor, src_uv_s11_5x5, BLEND_FACTOR_3X3)
+        elif win_size < t2:
+            blend1_win = self._mix_scalar_with_patch(blend1_hor, src_uv_s11_5x5, BLEND_FACTOR_3X3)
+            blend0_win = self._mix_scalar_with_patch(blend0_hor, src_uv_s11_5x5, BLEND_FACTOR_4X4)
+        elif win_size < t3:
+            blend1_win = self._mix_scalar_with_patch(blend1_hor, src_uv_s11_5x5, BLEND_FACTOR_4X4)
+            blend0_win = self._mix_scalar_with_patch(blend0_hor, src_uv_s11_5x5, BLEND_FACTOR_5X5)
         else:
-            lut_index = 224 + min(((gs - 1024) >> 13), 31)
+            blend0_win = self._mix_scalar_with_patch(blend0_hor, src_uv_s11_5x5, BLEND_FACTOR_5X5)
 
-        lut_index = min(lut_index, 255)
-
-        # LUT lookup
-        inv = self.div_lut[lut_index]
-
-        # Multiply and truncate (signed)
-        result = (blend_sum * inv) >> 26
-
-        return result
-
-    def _stage3_fusion(self, avg0: Tuple, avg1: Tuple,
-                       grad_c: int, grad_u: int, grad_d: int,
-                       grad_l: int, grad_r: int) -> Tuple[int, int]:
-        """
-        Stage 3: 梯度融合 (匹配 RTL)
-
-        输入:
-          avg0, avg1: s11 平均值 (c, u, d, l, r 顺序)
-          grad_c, grad_u, grad_d, grad_l, grad_r: u14 梯度
-
-        输出: s11 混合值
-        """
-        # 5 个梯度 (匹配 RTL 顺序: c, u, d, l, r)
-        grads = [grad_c, grad_u, grad_d, grad_l, grad_r]
-
-        # 排序梯度（降序，匹配 RTL 排序网络）
-        grads_sorted = sorted(grads, reverse=True)
-        grad_sum = sum(grads_sorted)
-
-        if grad_sum == 0:
-            # 简单平均
-            blend0 = sum(avg0) // 5
-            blend1 = sum(avg1) // 5
-        else:
-            # 加权平均: avg（固定顺序 c,u,d,l,r） * sorted_grad
-            # 匹配 RTL: avg 不重排，只有 grad 重排
-            blend0_sum = sum(int(a) * int(g) for a, g in zip(avg0, grads_sorted))
-            blend1_sum = sum(int(a) * int(g) for a, g in zip(avg1, grads_sorted))
-
-            blend0 = self._lut_divide(blend0_sum, grad_sum)
-            blend1 = self._lut_divide(blend1_sum, grad_sum)
-
-        # 饱和到 s11 范围
-        blend0 = max(-512, min(511, blend0))
-        blend1 = max(-512, min(511, blend1))
-
-        return blend0, blend1
-
-    def _stage4_iir_blend(self, blend0: int, blend1: int,
-                          avg0_u: int, avg1_u: int,
-                          win_size: int, center_u10: int) -> int:
-        """
-        Stage 4: IIR 混合 (匹配 RTL)
-
-        输入: s11 blend 值, s11 avg_u, u10 center
-        输出: u10 最终值
-        """
-        # 混合比例选择 (匹配 RTL stage4_iir_blend.v line 117-119)
-        ratio_idx = (win_size // 8) - 2
-        ratio_idx = max(0, min(3, ratio_idx))
-        ratio = self.config.blending_ratio[ratio_idx]
-
-        # IIR 水平混合 (s11 有符号)
-        # blend_iir = (ratio * blend + (64 - ratio) * avg_u) >> 6
-        blend0_iir = (ratio * blend0 + (64 - ratio) * avg0_u) >> 6
-        blend1_iir = (ratio * blend1 + (64 - ratio) * avg1_u) >> 6
-
-        # 饱和到 s11 范围
-        blend0_iir = max(-512, min(511, blend0_iir))
-        blend1_iir = max(-512, min(511, blend1_iir))
-
-        # 窗混合因子 (匹配 RTL line 126-128)
-        factor = max(1, min(4, win_size // 8))
-
-        # center u10 -> s11 转换 (匹配 RTL line 227)
-        center_s11 = center_u10 - 512
-
-        # 窗混合: (iir * factor + center * (4 - factor)) >> 2
-        blend0_out = (blend0_iir * factor + center_s11 * (4 - factor)) >> 2
-        blend1_out = (blend1_iir * factor + center_s11 * (4 - factor)) >> 2
-
-        # 饱和到 s11 范围
-        blend0_out = max(-512, min(511, blend0_out))
-        blend1_out = max(-512, min(511, blend1_out))
-
-        # 最终混合: (blend0 * remain + blend1 * (8 - remain)) >> 3
         remain = win_size % 8
-        blend_final_s11 = (blend0_out * remain + blend1_out * (8 - remain)) >> 3
+        if win_size < t0:
+            final_patch = blend1_win
+        elif win_size >= t3:
+            final_patch = blend0_win
+        else:
+            final_patch = np.zeros((5, 5), dtype=np.int32)
+            for y in range(5):
+                for x in range(5):
+                    final_patch[y, x] = self._saturate_s11(
+                        self._round_div(int(blend0_win[y, x]) * remain + int(blend1_win[y, x]) * (8 - remain), 8)
+                    )
 
-        # 饱和到 s11 范围
-        blend_final_s11 = max(-512, min(511, blend_final_s11))
+        return {
+            "ratio": ratio,
+            "blend0_hor": blend0_hor,
+            "blend1_hor": blend1_hor,
+            "orientation": orientation,
+            "final_patch": final_patch,
+        }
 
-        # s11 -> u10 转换
-        dout = self._s11_to_u10(blend_final_s11)
+    def _process_feedback_raster(self, input_image: np.ndarray,
+                                 emit_center_stream: bool = False,
+                                 emit_linebuffer_rows: bool = False,
+                                 emit_patch_stream: bool = False):
+        src = input_image.astype(np.int32).copy()
+        self.src_uv = src
+        h, w = src.shape
+        center_stream = [] if emit_center_stream else None
+        linebuffer_rows = [] if emit_linebuffer_rows else None
+        patch_stream = [] if emit_patch_stream else None
 
-        return dout
+        for j in range(h):
+            for i in range(w):
+                grad_h, grad_v, _, win_size, center_win = self._grad_triplet_win_size(src, i, j)
+                stage2 = self._stage2_directional_avg(center_win, win_size)
+                grads = self._stage3_neighbors(src, i, j)
+                blend0_grad, blend1_grad = self._stage3_fusion(stage2["avg0"], stage2["avg1"], grads)
+                stage4 = self._stage4_window_blend(
+                    center_win,
+                    win_size,
+                    blend0_grad,
+                    blend1_grad,
+                    stage2["avg0"]["u"],
+                    stage2["avg1"]["u"],
+                    grad_h,
+                    grad_v,
+                )
+                patch = stage4["final_patch"]
+                if center_stream is not None:
+                    center_stream.append(self._s11_to_u10(int(patch[2, 2])))
+                if patch_stream is not None:
+                    patch_stream.append({
+                        "center_x": i,
+                        "center_y": j,
+                        "patch_u10": np.vectorize(self._s11_to_u10)(patch).astype(np.int32),
+                    })
+                for dy in range(-2, 3):
+                    for dx in range(-2, 3):
+                        x = self._clip(i + dx, 0, w - 1)
+                        y = self._clip(j + dy, 0, h - 1)
+                        src[y, x] = self._s11_to_u10(int(patch[dy + 2, dx + 2]))
+
+            if linebuffer_rows is not None:
+                row_indices = np.array([self._clip(j + dy, 0, h - 1) for dy in range(-2, 3)], dtype=np.int32)
+                linebuffer_rows.append({
+                    "after_row": j,
+                    "row_indices": row_indices,
+                    "rows": src[row_indices, :].copy(),
+                })
+
+        final_image = src.astype(np.int32)
+        if center_stream is None and linebuffer_rows is None and patch_stream is None:
+            return final_image
+        if center_stream is not None and linebuffer_rows is None and patch_stream is None:
+            return final_image, np.array(center_stream, dtype=np.int32)
+        if center_stream is None and linebuffer_rows is not None and patch_stream is None:
+            return final_image, linebuffer_rows
+        if center_stream is None and linebuffer_rows is None and patch_stream is not None:
+            return final_image, patch_stream
+        if center_stream is not None and linebuffer_rows is None and patch_stream is not None:
+            return final_image, np.array(center_stream, dtype=np.int32), patch_stream
+        if center_stream is None and linebuffer_rows is not None and patch_stream is not None:
+            return final_image, linebuffer_rows, patch_stream
+        return final_image, np.array(center_stream, dtype=np.int32), linebuffer_rows, patch_stream
 
     def process(self, input_image: np.ndarray) -> np.ndarray:
-        """
-        处理输入图像 (匹配 RTL 架构)
+        return self._process_feedback_raster(input_image, emit_center_stream=False)
 
-        RTL 数据流:
-        1. Line buffer 需要 2 行 + 2 列延迟才能输出有效窗口
-        2. Stage 3 有额外的 1 行延迟用于梯度访问
-        3. 边界处理: 复制边界像素
+    def process_center_stream(self, input_image: np.ndarray) -> np.ndarray:
+        _, center_stream = self._process_feedback_raster(input_image, emit_center_stream=True)
+        return center_stream
 
-        Args:
-            input_image: 输入图像 (height x width), 值范围 [0, 1023]
+    def export_linebuffer_row_snapshots(self, input_image: np.ndarray):
+        _, linebuffer_rows = self._process_feedback_raster(
+            input_image,
+            emit_center_stream=False,
+            emit_linebuffer_rows=True,
+        )
+        return linebuffer_rows
 
-        Returns:
-            output_image: 输出图像 (与输入同尺寸)
-        """
-        h, w = input_image.shape
-        output = np.zeros((h, w), dtype=np.int32)
-
-        # IIR 反馈存储 (匹配 RTL line buffer 写回)
-        self.src_uv = input_image.astype(np.int32).copy()
-
-        # 行缓存 (用于 Stage 3/4 的 IIR 反馈)
-        # Stage 3 需要上一行的 avg_u (用于 Stage 4 IIR)
-        avg0_u_prev_row = np.zeros(w, dtype=np.int32)  # s11
-        avg1_u_prev_row = np.zeros(w, dtype=np.int32)  # s11
-
-        # Stage 3 的梯度行缓存 (匹配 RTL grad_line_buf)
-        grad_prev_row = np.zeros(w, dtype=np.int32)  # u14, 上一行梯度
-        grad_curr_row = np.zeros(w, dtype=np.int32)  # u14, 当前行梯度
-
-        # Stage 2 输出行缓存 (用于 Stage 3 的 1-row delay)
-        avg0_c_delay = np.zeros(w, dtype=np.int32)
-        avg0_u_delay = np.zeros(w, dtype=np.int32)
-        avg0_d_delay = np.zeros(w, dtype=np.int32)
-        avg0_l_delay = np.zeros(w, dtype=np.int32)
-        avg0_r_delay = np.zeros(w, dtype=np.int32)
-        avg1_c_delay = np.zeros(w, dtype=np.int32)
-        avg1_u_delay = np.zeros(w, dtype=np.int32)
-        avg1_d_delay = np.zeros(w, dtype=np.int32)
-        avg1_l_delay = np.zeros(w, dtype=np.int32)
-        avg1_r_delay = np.zeros(w, dtype=np.int32)
-        center_delay = np.zeros(w, dtype=np.int32)
-        win_size_delay = np.zeros(w, dtype=np.int32)
-
-        # 逐行处理
-        for j in range(h):
-            # 当前行数据
-            curr_grad = np.zeros(w, dtype=np.int32)
-            curr_avg0_c = np.zeros(w, dtype=np.int32)
-            curr_avg0_u = np.zeros(w, dtype=np.int32)
-            curr_avg0_d = np.zeros(w, dtype=np.int32)
-            curr_avg0_l = np.zeros(w, dtype=np.int32)
-            curr_avg0_r = np.zeros(w, dtype=np.int32)
-            curr_avg1_c = np.zeros(w, dtype=np.int32)
-            curr_avg1_u = np.zeros(w, dtype=np.int32)
-            curr_avg1_d = np.zeros(w, dtype=np.int32)
-            curr_avg1_l = np.zeros(w, dtype=np.int32)
-            curr_avg1_r = np.zeros(w, dtype=np.int32)
-            curr_center = np.zeros(w, dtype=np.int32)
-            curr_win_size = np.zeros(w, dtype=np.int32)
-
-            # Stage 1 和 Stage 2: 处理当前行
-            for i in range(w):
-                win = self._get_window(self.src_uv, i, j)
-                center = int(self.src_uv[j, i])
-
-                # Stage 1: 梯度计算
-                _, _, grad, win_size = self._stage1_gradient(win)
-
-                # Stage 2: 方向平均
-                (avg0_c, avg0_u, avg0_d, avg0_l, avg0_r,
-                 avg1_c, avg1_u, avg1_d, avg1_l, avg1_r) = self._stage2_directional_avg(win)
-
-                # 保存当前行数据
-                curr_grad[i] = grad
-                curr_avg0_c[i] = avg0_c
-                curr_avg0_u[i] = avg0_u
-                curr_avg0_d[i] = avg0_d
-                curr_avg0_l[i] = avg0_l
-                curr_avg0_r[i] = avg0_r
-                curr_avg1_c[i] = avg1_c
-                curr_avg1_u[i] = avg1_u
-                curr_avg1_d[i] = avg1_d
-                curr_avg1_l[i] = avg1_l
-                curr_avg1_r[i] = avg1_r
-                curr_center[i] = center
-                curr_win_size[i] = win_size
-
-            # Stage 3 和 Stage 4: 处理上一行 (1-row delay)
-            # RTL: Stage 3 在 row >= 1 时开始输出
-            if j >= 1:
-                for i in range(w):
-                    # 从行缓存读取上一行的 Stage 2 输出
-                    avg0_c = avg0_c_delay[i]
-                    avg0_u = avg0_u_delay[i]
-                    avg0_d = avg0_d_delay[i]
-                    avg0_l = avg0_l_delay[i]
-                    avg0_r = avg0_r_delay[i]
-                    avg1_c = avg1_c_delay[i]
-                    avg1_u = avg1_u_delay[i]
-                    avg1_d = avg1_d_delay[i]
-                    avg1_l = avg1_l_delay[i]
-                    avg1_r = avg1_r_delay[i]
-                    center = center_delay[i]
-                    win_size = win_size_delay[i]
-
-                    # 梯度访问 (匹配 RTL Stage 3)
-                    # grad_u: 上上行梯度 (row j-2)
-                    # grad_c: 上一行梯度 (row j-1)
-                    # grad_d: 当前行梯度 (row j) - 这是 Stage 3 的 "next row"
-                    grad_u = grad_prev_row[i] if j >= 2 else grad_curr_row[i]
-                    grad_c = grad_curr_row[i]
-                    grad_d = curr_grad[i]
-
-                    # grad_l: 左邻居 (匹配 RTL grad_shift_l)
-                    grad_l = grad_c if i == 0 else grad_curr_row[i - 1]
-                    # grad_r: 右邻居 (RTL 简化为 grad_c)
-                    grad_r = grad_c
-
-                    # Stage 3: 梯度融合
-                    blend0, blend1 = self._stage3_fusion(
-                        (avg0_c, avg0_u, avg0_d, avg0_l, avg0_r),
-                        (avg1_c, avg1_u, avg1_d, avg1_l, avg1_r),
-                        grad_c, grad_u, grad_d, grad_l, grad_r
-                    )
-
-                    # Stage 4: IIR 混合
-                    # avg0_u_prev_row[i] 是上一行的上一行的 avg_u (用于 IIR)
-                    dout = self._stage4_iir_blend(
-                        blend0, blend1,
-                        avg0_u_prev_row[i], avg1_u_prev_row[i],
-                        win_size, center
-                    )
-
-                    # 输出到上一行的位置 (因为 Stage 3 有 1-row delay)
-                    output[j - 1, i] = dout
-
-                    # IIR 反馈: 写回 line buffer
-                    self._iir_feedback(i, j - 1, dout, h, w)
-
-            # 更新行缓存
-            avg0_c_delay = curr_avg0_c.copy()
-            avg0_u_delay = curr_avg0_u.copy()
-            avg0_d_delay = curr_avg0_d.copy()
-            avg0_l_delay = curr_avg0_l.copy()
-            avg0_r_delay = curr_avg0_r.copy()
-            avg1_c_delay = curr_avg1_c.copy()
-            avg1_u_delay = curr_avg1_u.copy()
-            avg1_d_delay = curr_avg1_d.copy()
-            avg1_l_delay = curr_avg1_l.copy()
-            avg1_r_delay = curr_avg1_r.copy()
-            center_delay = curr_center.copy()
-            win_size_delay = curr_win_size.copy()
-
-            # 更新 IIR 行缓存
-            avg0_u_prev_row = avg0_u_delay.copy()
-            avg1_u_prev_row = avg1_u_delay.copy()
-
-            # 更新梯度行缓存
-            grad_prev_row = grad_curr_row.copy()
-            grad_curr_row = curr_grad.copy()
-
-        # 处理最后一行 (Stage 3 的最后一个输出)
-        # RTL 在 frame 结束后会输出最后一行
-        j = h - 1
-        for i in range(w):
-            avg0_c = avg0_c_delay[i]
-            avg0_u = avg0_u_delay[i]
-            avg0_d = avg0_d_delay[i]
-            avg0_l = avg0_l_delay[i]
-            avg0_r = avg0_r_delay[i]
-            avg1_c = avg1_c_delay[i]
-            avg1_u = avg1_u_delay[i]
-            avg1_d = avg1_d_delay[i]
-            avg1_l = avg1_l_delay[i]
-            avg1_r = avg1_r_delay[i]
-            center = center_delay[i]
-            win_size = win_size_delay[i]
-
-            # 最后一行没有 next row, 使用当前行
-            grad_u = grad_prev_row[i]
-            grad_c = grad_curr_row[i]
-            grad_d = grad_c  # 边界处理
-
-            grad_l = grad_c if i == 0 else grad_curr_row[i - 1]
-            grad_r = grad_c
-
-            blend0, blend1 = self._stage3_fusion(
-                (avg0_c, avg0_u, avg0_d, avg0_l, avg0_r),
-                (avg1_c, avg1_u, avg1_d, avg1_l, avg1_r),
-                grad_c, grad_u, grad_d, grad_l, grad_r
-            )
-
-            dout = self._stage4_iir_blend(
-                blend0, blend1,
-                avg0_u_prev_row[i], avg1_u_prev_row[i],
-                win_size, center
-            )
-
-            output[j, i] = dout
-
-        return output
-
-    def _iir_feedback(self, i: int, j: int, value: int, h: int, w: int):
-        """IIR 反馈写回 line buffer"""
-        # 匹配 RTL: 写回当前列的上下 2 行
-        for dy in range(-2, 3):
-            y = j + dy
-            if 0 <= y < h:
-                self.src_uv[y, i] = value
+    def export_patch_stream(self, input_image: np.ndarray):
+        _, patch_stream = self._process_feedback_raster(
+            input_image,
+            emit_center_stream=False,
+            emit_patch_stream=True,
+        )
+        return patch_stream
 
 
 def test_fixed_model():
-    """测试定点模型"""
-    config = FixedPointConfig(IMG_WIDTH=64, IMG_HEIGHT=64)
+    config = FixedPointConfig(IMG_WIDTH=32, IMG_HEIGHT=32)
     model = ISPCSIIRFixedModel(config)
-
-    # 创建测试图像
     np.random.seed(42)
-    input_img = np.random.randint(0, 1024, (64, 64), dtype=np.int32)
-
-    # 处理
+    input_img = np.random.randint(0, 1024, (32, 32), dtype=np.int32)
     output = model.process(input_img)
-
     print(f"输入范围: [{input_img.min()}, {input_img.max()}]")
     print(f"输出范围: [{output.min()}, {output.max()}]")
-    print(f"输出均值: {output.mean():.2f}")
-
-    # 验证输出范围
-    assert output.min() >= 0, "Output below 0"
-    assert output.max() <= 1023, "Output above 1023"
-
+    assert output.min() >= 0
+    assert output.max() <= 1023
     print("定点模型测试通过!")
     return output
 

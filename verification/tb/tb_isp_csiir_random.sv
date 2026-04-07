@@ -53,6 +53,8 @@ module tb_isp_csiir_random;
     integer                     cfg_thresh0, cfg_thresh1, cfg_thresh2, cfg_thresh3;
     integer                     cfg_ratio0, cfg_ratio1, cfg_ratio2, cfg_ratio3;
     integer                     cfg_clip0, cfg_clip1, cfg_clip2, cfg_clip3;
+    integer                     cfg_clip_sft0, cfg_clip_sft1, cfg_clip_sft2, cfg_clip_sft3;
+    integer                     cfg_mot_protect;
 
     // Stimulus memory
     reg [DATA_WIDTH-1:0]        stimulus_mem [0:MAX_WIDTH*MAX_HEIGHT-1];
@@ -186,13 +188,20 @@ module tb_isp_csiir_random;
             $fscanf(fd, "%d", cfg_clip1);
             $fscanf(fd, "%d", cfg_clip2);
             $fscanf(fd, "%d", cfg_clip3);
+            $fscanf(fd, "%d", cfg_clip_sft0);
+            $fscanf(fd, "%d", cfg_clip_sft1);
+            $fscanf(fd, "%d", cfg_clip_sft2);
+            $fscanf(fd, "%d", cfg_clip_sft3);
+            $fscanf(fd, "%d", cfg_mot_protect);
             $fclose(fd);
 
-            $display("Config: %0dx%0d, Thresh=[%0d,%0d,%0d,%0d], Ratio=[%0d,%0d,%0d,%0d], Clip=[%0d,%0d,%0d,%0d]",
+            $display("Config: %0dx%0d, Thresh=[%0d,%0d,%0d,%0d], Ratio=[%0d,%0d,%0d,%0d], Clip=[%0d,%0d,%0d,%0d], ClipSft=[%0d,%0d,%0d,%0d], MotProtect=%0d",
                      cfg_width, cfg_height,
                      cfg_thresh0, cfg_thresh1, cfg_thresh2, cfg_thresh3,
                      cfg_ratio0, cfg_ratio1, cfg_ratio2, cfg_ratio3,
-                     cfg_clip0, cfg_clip1, cfg_clip2, cfg_clip3);
+                     cfg_clip0, cfg_clip1, cfg_clip2, cfg_clip3,
+                     cfg_clip_sft0, cfg_clip_sft1, cfg_clip_sft2, cfg_clip_sft3,
+                     cfg_mot_protect);
         end
     endtask
 
@@ -298,6 +307,8 @@ module tb_isp_csiir_random;
         apb_write(8'h18, cfg_thresh3);
         apb_write(8'h1C, {cfg_ratio3[7:0], cfg_ratio2[7:0], cfg_ratio1[7:0], cfg_ratio0[7:0]});
         apb_write(8'h20, {6'd0, cfg_clip1[9:0], 6'd0, cfg_clip0[9:0]});
+        apb_write(8'h24, {cfg_clip_sft3[7:0], cfg_clip_sft2[7:0], cfg_clip_sft1[7:0], cfg_clip_sft0[7:0]});
+        apb_write(8'h28, cfg_mot_protect);
         apb_write(8'h2C, {6'd0, cfg_clip3[9:0], 6'd0, cfg_clip2[9:0]});
         $display("[%0t] Configuration complete", $time);
 
@@ -534,9 +545,9 @@ module tb_isp_csiir_random;
     always @(posedge clk) begin
         if (dut.s4_dout_valid && s4_out_cnt < 20) begin
             s4_out_cnt = s4_out_cnt + 1;
-            $display("[S4 OUT %0d] dout=%0d blend0_iir=%0d blend0_out=%0d center=%0d ratio=%0d",
+            $display("[S4 OUT %0d] dout=%0d blend0_iir=%0d center=%0d ratio=%0d",
                 s4_out_cnt, dut.s4_dout,
-                $signed(dut.u_stage4.blend0_iir_sat), $signed(dut.u_stage4.blend0_out_sat),
+                $signed(dut.u_stage4.blend0_iir_sat),
                 dut.u_stage4.center_s2, dut.u_stage4.ratio_s1);
         end
     end
@@ -547,9 +558,9 @@ module tb_isp_csiir_random;
     always @(posedge clk) begin
         if (dut.u_stage4.valid_s3 && s4_win_cnt < 10) begin
             s4_win_cnt = s4_win_cnt + 1;
-            $display("[S4 WIN %0d] blend0_iir=%0d center=%0d factor=%0d blend0_out=%0d",
-                s4_win_cnt, $signed(dut.u_stage4.blend0_iir_s2), $signed(dut.u_stage4.center_s11),
-                dut.u_stage4.factor_s2, $signed(dut.u_stage4.blend0_out_sat));
+            $display("[S4 WIN %0d] blend0_iir=%0d center=%0d factor=%0d bucket=%0d",
+                s4_win_cnt, $signed(dut.u_stage4.blend0_iir_s2), dut.u_stage4.center_s2,
+                dut.u_stage4.factor_s2, dut.u_stage4.patch_bucket_s2);
         end
     end
 
@@ -559,9 +570,9 @@ module tb_isp_csiir_random;
     always @(posedge clk) begin
         if (dut.u_stage4.valid_s1 && s4_iir_cnt < 10) begin
             s4_iir_cnt = s4_iir_cnt + 1;
-            $display("[S4 IIR %0d] blend0_s1=%0d avg0_u_s1=%0d ratio_s1=%0d iir_comb=%0d iir_sat=%0d",
+            $display("[S4 IIR %0d] blend0_s1=%0d avg0_u_s1=%0d ratio_s1=%0d iir_numer=%0d iir_sat=%0d",
                 s4_iir_cnt, $signed(dut.u_stage4.blend0_s1), $signed(dut.u_stage4.avg0_u_s1),
-                dut.u_stage4.ratio_s1, $signed(dut.u_stage4.blend0_iir_comb),
+                dut.u_stage4.ratio_s1, $signed(dut.u_stage4.blend0_iir_numer),
                 $signed(dut.u_stage4.blend0_iir_sat));
         end
     end

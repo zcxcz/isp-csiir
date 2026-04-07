@@ -92,9 +92,9 @@ module stage3_gradient_fusion #(
     localparam PRODUCT_SHIFT = 26;  // For LUT divider
 
     //=========================================================================
-    // Ready Signal (Simple Pipeline - Always Ready)
+    // Ready Signal
     //=========================================================================
-    assign stage2_ready = 1'b1;
+    assign stage2_ready = stage3_ready;
 
     //=========================================================================
     // Row Delay Control
@@ -113,8 +113,6 @@ module stage3_gradient_fusion #(
     reg                       stage2_valid_d2;  // Double delayed for timing
     reg                       avg_buf_sel_d;    // Delayed buffer selection to match rd_col_d
 
-    wire is_first_row = (row_counter == 0) || !row_valid;
-    wire is_last_row = (row_counter >= img_height - 1) || flush_active;
     wire is_last_row_written = (row_counter >= img_height - 1);
     // Only trigger flush when Stage 2 stops AND all rows are written
     // row_counter >= img_height means we've wrapped after the last row
@@ -339,13 +337,21 @@ module stage3_gradient_fusion #(
     wire [GRAD_WIDTH-1:0] grad_c = grad_buf_sel ? grad_line_buf_0[rd_addr] : grad_line_buf_1[rd_addr];
     wire [GRAD_WIDTH-1:0] grad_u = grad_buf_sel ? grad_line_buf_1[rd_addr] : grad_line_buf_0[rd_addr];
     wire [GRAD_WIDTH-1:0] grad_d = grad_next_row;
-    wire [LINE_ADDR_WIDTH-1:0] grad_l_addr = (rd_addr > 0) ? rd_addr - 1'b1 : {LINE_ADDR_WIDTH{1'b0}};
+    wire [LINE_ADDR_WIDTH-1:0] grad_l_addr = (rd_addr > 1) ? rd_addr - 2'd2 : {LINE_ADDR_WIDTH{1'b0}};
     wire [GRAD_WIDTH-1:0] grad_l_raw = grad_buf_sel ? grad_line_buf_0[grad_l_addr] : grad_line_buf_1[grad_l_addr];
-    wire [GRAD_WIDTH-1:0] grad_l = (rd_addr == 0) ? grad_c : grad_l_raw;
-    wire [GRAD_WIDTH-1:0] grad_r = grad_c;
+    wire [GRAD_WIDTH-1:0] grad_l = (rd_addr < 2) ? grad_c : grad_l_raw;
+    wire                  grad_r_edge = (rd_addr + 2'd2 >= img_width);
+    wire [LINE_ADDR_WIDTH-1:0] grad_r_addr = grad_r_edge ? rd_addr : (rd_addr + 2'd2);
+    wire [GRAD_WIDTH-1:0] grad_r_raw = grad_buf_sel ? grad_line_buf_0[grad_r_addr] : grad_line_buf_1[grad_r_addr];
+    wire [GRAD_WIDTH-1:0] grad_r = grad_r_edge ? grad_c : grad_r_raw;
 
-    wire [GRAD_WIDTH-1:0] grad_u_bound = is_first_row ? grad_c : grad_u;
-    wire [GRAD_WIDTH-1:0] grad_d_bound = is_last_row ? grad_c : grad_d;
+    // Boundary duplication must follow the delayed row being processed, not
+    // the write-side row_counter. Stage 3 processes row N after Stage 2 has
+    // already advanced to row N+1, so top/bottom checks must use pixel_y_rd.
+    wire read_is_first_row = (pixel_y_rd == {ROW_CNT_WIDTH{1'b0}});
+    wire read_is_last_row = (pixel_y_rd >= img_height - 1'b1);
+    wire [GRAD_WIDTH-1:0] grad_u_bound = read_is_first_row ? grad_c : grad_u;
+    wire [GRAD_WIDTH-1:0] grad_d_bound = (flush_active || read_is_last_row) ? grad_c : grad_d;
 
     // Valid signal for Cycle 0
     // CRITICAL: Delay valid generation to match buffer write timing
@@ -493,38 +499,100 @@ module stage3_gradient_fusion #(
     wire signed [SIGNED_WIDTH-1:0] avg1_u_s1 = avg1_s1[1];
 
     //=========================================================================
-    // Cycle 2: Complete Sorting (Full 5-input descending sort)
+    // Cycle 2: Stable rank remap with direction binding preserved
     //=========================================================================
-    function [5*GRAD_WIDTH-1:0] sort_5_desc;
-        input [GRAD_WIDTH-1:0] in0, in1, in2, in3, in4;
-        reg [GRAD_WIDTH-1:0] a, b, c, d, e;
-        reg [GRAD_WIDTH-1:0] tmp;
+    localparam DIR_C = 3'd0;
+    localparam DIR_U = 3'd1;
+    localparam DIR_D = 3'd2;
+    localparam DIR_L = 3'd3;
+    localparam DIR_R = 3'd4;
+    localparam SORT_ITEM_WIDTH = GRAD_WIDTH + 3;
+
+    function [5*SORT_ITEM_WIDTH-1:0] sort_5_items_desc;
+        input [SORT_ITEM_WIDTH-1:0] in0, in1, in2, in3, in4;
+        reg [SORT_ITEM_WIDTH-1:0] a, b, c, d, e;
+        reg [SORT_ITEM_WIDTH-1:0] tmp;
         begin
             a = in0; b = in1; c = in2; d = in3; e = in4;
-            if (b > a) begin tmp = a; a = b; b = tmp; end
-            if (c > b) begin tmp = b; b = c; c = tmp; end
-            if (d > c) begin tmp = c; c = d; d = tmp; end
-            if (e > d) begin tmp = d; d = e; e = tmp; end
-            if (b > a) begin tmp = a; a = b; b = tmp; end
-            if (c > b) begin tmp = b; b = c; c = tmp; end
-            if (d > c) begin tmp = c; c = d; d = tmp; end
-            if (b > a) begin tmp = a; a = b; b = tmp; end
-            if (c > b) begin tmp = b; b = c; c = tmp; end
-            if (b > a) begin tmp = a; a = b; b = tmp; end
-            sort_5_desc = {e, d, c, b, a};
+            if (b[SORT_ITEM_WIDTH-1:3] > a[SORT_ITEM_WIDTH-1:3]) begin tmp = a; a = b; b = tmp; end
+            if (c[SORT_ITEM_WIDTH-1:3] > b[SORT_ITEM_WIDTH-1:3]) begin tmp = b; b = c; c = tmp; end
+            if (d[SORT_ITEM_WIDTH-1:3] > c[SORT_ITEM_WIDTH-1:3]) begin tmp = c; c = d; d = tmp; end
+            if (e[SORT_ITEM_WIDTH-1:3] > d[SORT_ITEM_WIDTH-1:3]) begin tmp = d; d = e; e = tmp; end
+            if (b[SORT_ITEM_WIDTH-1:3] > a[SORT_ITEM_WIDTH-1:3]) begin tmp = a; a = b; b = tmp; end
+            if (c[SORT_ITEM_WIDTH-1:3] > b[SORT_ITEM_WIDTH-1:3]) begin tmp = b; b = c; c = tmp; end
+            if (d[SORT_ITEM_WIDTH-1:3] > c[SORT_ITEM_WIDTH-1:3]) begin tmp = c; c = d; d = tmp; end
+            if (b[SORT_ITEM_WIDTH-1:3] > a[SORT_ITEM_WIDTH-1:3]) begin tmp = a; a = b; b = tmp; end
+            if (c[SORT_ITEM_WIDTH-1:3] > b[SORT_ITEM_WIDTH-1:3]) begin tmp = b; b = c; c = tmp; end
+            if (b[SORT_ITEM_WIDTH-1:3] > a[SORT_ITEM_WIDTH-1:3]) begin tmp = a; a = b; b = tmp; end
+            sort_5_items_desc = {a, b, c, d, e};
         end
     endfunction
 
-    wire [5*GRAD_WIDTH-1:0] sorted_pack = sort_5_desc(g_s1[0], g_s1[1], g_s1[2], g_s1[3], g_s1[4]);
-    wire [GRAD_WIDTH-1:0] g_sorted [0:4];
-    assign {g_sorted[4], g_sorted[3], g_sorted[2], g_sorted[1], g_sorted[0]} = sorted_pack;
+    wire [SORT_ITEM_WIDTH-1:0] sort_item_u = {g_s1[1], DIR_U};
+    wire [SORT_ITEM_WIDTH-1:0] sort_item_d = {g_s1[2], DIR_D};
+    wire [SORT_ITEM_WIDTH-1:0] sort_item_l = {g_s1[3], DIR_L};
+    wire [SORT_ITEM_WIDTH-1:0] sort_item_r = {g_s1[4], DIR_R};
+    wire [SORT_ITEM_WIDTH-1:0] sort_item_c = {g_s1[0], DIR_C};
+
+    wire [5*SORT_ITEM_WIDTH-1:0] sorted_items_pack = sort_5_items_desc(sort_item_u, sort_item_d, sort_item_l, sort_item_r, sort_item_c);
+
+    wire [SORT_ITEM_WIDTH-1:0] sort_rank0 = sorted_items_pack[5*SORT_ITEM_WIDTH-1 -: SORT_ITEM_WIDTH];
+    wire [SORT_ITEM_WIDTH-1:0] sort_rank1 = sorted_items_pack[4*SORT_ITEM_WIDTH-1 -: SORT_ITEM_WIDTH];
+    wire [SORT_ITEM_WIDTH-1:0] sort_rank2 = sorted_items_pack[3*SORT_ITEM_WIDTH-1 -: SORT_ITEM_WIDTH];
+    wire [SORT_ITEM_WIDTH-1:0] sort_rank3 = sorted_items_pack[2*SORT_ITEM_WIDTH-1 -: SORT_ITEM_WIDTH];
+    wire [SORT_ITEM_WIDTH-1:0] sort_rank4 = sorted_items_pack[1*SORT_ITEM_WIDTH-1 -: SORT_ITEM_WIDTH];
+
+    wire [GRAD_WIDTH-1:0] grad_rank0 = sort_rank0[SORT_ITEM_WIDTH-1:3];
+    wire [GRAD_WIDTH-1:0] grad_rank1 = sort_rank1[SORT_ITEM_WIDTH-1:3];
+    wire [GRAD_WIDTH-1:0] grad_rank2 = sort_rank2[SORT_ITEM_WIDTH-1:3];
+    wire [GRAD_WIDTH-1:0] grad_rank3 = sort_rank3[SORT_ITEM_WIDTH-1:3];
+    wire [GRAD_WIDTH-1:0] grad_rank4 = sort_rank4[SORT_ITEM_WIDTH-1:3];
+
+    wire [2:0] dir_rank0 = sort_rank0[2:0];
+    wire [2:0] dir_rank1 = sort_rank1[2:0];
+    wire [2:0] dir_rank2 = sort_rank2[2:0];
+    wire [2:0] dir_rank3 = sort_rank3[2:0];
+    wire [2:0] dir_rank4 = sort_rank4[2:0];
+
+    wire [GRAD_WIDTH-1:0] g_inv_c = (dir_rank0 == DIR_C) ? grad_rank4 :
+                                    (dir_rank1 == DIR_C) ? grad_rank3 :
+                                    (dir_rank2 == DIR_C) ? grad_rank2 :
+                                    (dir_rank3 == DIR_C) ? grad_rank1 :
+                                                           grad_rank0;
+    wire [GRAD_WIDTH-1:0] g_inv_u = (dir_rank0 == DIR_U) ? grad_rank4 :
+                                    (dir_rank1 == DIR_U) ? grad_rank3 :
+                                    (dir_rank2 == DIR_U) ? grad_rank2 :
+                                    (dir_rank3 == DIR_U) ? grad_rank1 :
+                                                           grad_rank0;
+    wire [GRAD_WIDTH-1:0] g_inv_d = (dir_rank0 == DIR_D) ? grad_rank4 :
+                                    (dir_rank1 == DIR_D) ? grad_rank3 :
+                                    (dir_rank2 == DIR_D) ? grad_rank2 :
+                                    (dir_rank3 == DIR_D) ? grad_rank1 :
+                                                           grad_rank0;
+    wire [GRAD_WIDTH-1:0] g_inv_l = (dir_rank0 == DIR_L) ? grad_rank4 :
+                                    (dir_rank1 == DIR_L) ? grad_rank3 :
+                                    (dir_rank2 == DIR_L) ? grad_rank2 :
+                                    (dir_rank3 == DIR_L) ? grad_rank1 :
+                                                           grad_rank0;
+    wire [GRAD_WIDTH-1:0] g_inv_r = (dir_rank0 == DIR_R) ? grad_rank4 :
+                                    (dir_rank1 == DIR_R) ? grad_rank3 :
+                                    (dir_rank2 == DIR_R) ? grad_rank2 :
+                                    (dir_rank3 == DIR_R) ? grad_rank1 :
+                                                           grad_rank0;
+
+    wire [GRAD_WIDTH-1:0] g_inv_s1 [0:4];
+    assign g_inv_s1[0] = g_inv_c;
+    assign g_inv_s1[1] = g_inv_u;
+    assign g_inv_s1[2] = g_inv_d;
+    assign g_inv_s1[3] = g_inv_l;
+    assign g_inv_s1[4] = g_inv_r;
 
     //=========================================================================
     // Cycle 2 Pipeline Registers
     //=========================================================================
     localparam PIPE_S2_WIDTH = 5 * GRAD_WIDTH + 10 * SIGNED_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
 
-    wire [PIPE_S2_WIDTH-1:0] pipe_s2_din = {g_sorted[0], g_sorted[1], g_sorted[2], g_sorted[3], g_sorted[4],
+    wire [PIPE_S2_WIDTH-1:0] pipe_s2_din = {g_inv_s1[0], g_inv_s1[1], g_inv_s1[2], g_inv_s1[3], g_inv_s1[4],
                                             avg0_s1[0], avg0_s1[1], avg0_s1[2], avg0_s1[3], avg0_s1[4],
                                             avg1_s1[0], avg1_s1[1], avg1_s1[2], avg1_s1[3], avg1_s1[4],
                                             win_size_s1, pixel_x_s1, pixel_y_s1, center_s1, valid_s1};
@@ -575,18 +643,29 @@ module stage3_gradient_fusion #(
     //=========================================================================
     // Compute simple average for grad_sum=0 fallback (at Stage 2)
     //=========================================================================
-    // This is computed here and passed through the pipeline to Stage 4
-    // Sum of 5 x 11-bit values needs 14 bits to avoid overflow
+    // This is computed here and passed through the pipeline to Stage 4.
+    // The Python reference uses symmetric round_div(sum, 5), so keep the
+    // fallback divide-by-5 exact instead of the Stage 1 reciprocal approximation.
+    function signed [SIGNED_WIDTH-1:0] round_div5_s11;
+        input signed [13:0] value;
+        reg [13:0] abs_value;
+        reg [13:0] abs_quot;
+        begin
+            if (value >= 0)
+                round_div5_s11 = (value + 14'sd2) / 14'sd5;
+            else begin
+                abs_value = -value;
+                abs_quot = (abs_value + 14'd2) / 14'd5;
+                round_div5_s11 = -$signed(abs_quot);
+            end
+        end
+    endfunction
+
+    // Sum of 5 x 11-bit values needs 14 bits to avoid overflow.
     wire signed [13:0] avg0_sum_s2 = avg0_s2[0] + avg0_s2[1] + avg0_s2[2] + avg0_s2[3] + avg0_s2[4];
     wire signed [13:0] avg1_sum_s2 = avg1_s2[0] + avg1_s2[1] + avg1_s2[2] + avg1_s2[3] + avg1_s2[4];
-
-    // Divide by 5: x/5 ≈ x*205 >> 10 (since 205/1024 ≈ 0.200)
-    // 14-bit * 10-bit = 24-bit result
-    wire signed [23:0] avg0_avg_full = avg0_sum_s2 * $signed(10'd205);
-    wire signed [23:0] avg1_avg_full = avg1_sum_s2 * $signed(10'd205);
-    // Use arithmetic right shift (>>>) for signed division
-    wire signed [SIGNED_WIDTH-1:0] avg0_avg_s2 = avg0_avg_full >>> 10;
-    wire signed [SIGNED_WIDTH-1:0] avg1_avg_s2 = avg1_avg_full >>> 10;
+    wire signed [SIGNED_WIDTH-1:0] avg0_avg_s2 = round_div5_s11(avg0_sum_s2);
+    wire signed [SIGNED_WIDTH-1:0] avg1_avg_s2 = round_div5_s11(avg1_sum_s2);
 
     //=========================================================================
     // Cycle 3: Weighted Multiplication (Signed)
@@ -648,9 +727,10 @@ module stage3_gradient_fusion #(
     endgenerate
 
     wire [GRAD_WIDTH-1:0]   g_s3 [0:4];
+    localparam S3_LOW_FIELD_WIDTH = WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
     generate
         for (gi = 0; gi < 5; gi = gi + 1) begin : gen_g_s3
-            assign g_s3[gi] = pipe_s3_dout[4*SIGNED_WIDTH + 10*MUL_WIDTH + (4-gi)*GRAD_WIDTH +: GRAD_WIDTH];
+            assign g_s3[gi] = pipe_s3_dout[S3_LOW_FIELD_WIDTH + (4-gi)*GRAD_WIDTH +: GRAD_WIDTH];
         end
     endgenerate
 

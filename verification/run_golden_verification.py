@@ -9,7 +9,6 @@ Date: 2026-03-26
 Version: v1.0
 """
 
-import os
 import sys
 import argparse
 import subprocess
@@ -21,7 +20,7 @@ from datetime import datetime
 SCRIPT_DIR = Path(__file__).parent.absolute()
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from isp_csiir_fixed_model import ISPCSIIRFixedModel, FixedPointConfig
+from isp_csiir_fixed_model import FixedPointConfig, ISPCSIIRFixedModel
 
 
 def generate_test_pattern(pattern: str, width: int, height: int, seed: int) -> np.ndarray:
@@ -91,34 +90,94 @@ def load_hex_file(filepath: Path, skip_header: bool = False) -> np.ndarray:
     return np.array(values, dtype=np.int32)
 
 
-def run_golden_model(stimulus: np.ndarray, config: FixedPointConfig) -> np.ndarray:
-    """Run Python golden model"""
+def delayed_streaming_center_expected(image: np.ndarray, config: FixedPointConfig) -> np.ndarray:
+    """Generate streaming center outputs directly from the fixed-point model."""
     model = ISPCSIIRFixedModel(config)
-    input_2d = stimulus.reshape(config.IMG_HEIGHT, config.IMG_WIDTH)
-    output_2d = model.process(input_2d)
-    return output_2d.flatten()
+    return model.process_center_stream(image.astype(np.int32))
+
+
+def run_golden_model(stimulus: np.ndarray, config: FixedPointConfig) -> np.ndarray:
+    """Run Python golden model."""
+    input_2d = stimulus.reshape(config.IMG_HEIGHT, config.IMG_WIDTH).astype(np.int32)
+    return delayed_streaming_center_expected(input_2d, config)
+
+
+def build_default_config(width: int, height: int) -> FixedPointConfig:
+    """Build default golden-model and testbench configuration."""
+    return FixedPointConfig(
+        IMG_WIDTH=width,
+        IMG_HEIGHT=height,
+        win_size_thresh=[16, 24, 32, 40],
+        win_size_clip_y=[15, 23, 31, 39],
+        win_size_clip_sft=[2, 2, 2, 2],
+        blending_ratio=[32, 32, 32, 32],
+        reg_edge_protect=32,
+    )
+
+
+def write_testbench_config(filepath: Path, config: FixedPointConfig):
+    """Write testbench config.txt from FixedPointConfig."""
+    lines = [
+        str(config.IMG_WIDTH),
+        str(config.IMG_HEIGHT),
+        *[str(value) for value in config.win_size_thresh],
+        *[str(value) for value in config.blending_ratio],
+        *[str(value) for value in config.win_size_clip_y],
+        *[str(value) for value in config.win_size_clip_sft],
+        str(config.reg_edge_protect),
+    ]
+    with open(filepath, 'w') as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def save_linebuffer_row_snapshots(snapshots, output_dir: Path, data_width: int = 10):
+    """Save per-row five-line snapshots for line-buffer debug."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    hex_digits = max(1, (data_width + 3) // 4)
+
+    manifest_lines = [
+        "# after_row row_file row_indices(slot0..slot4)",
+    ]
+
+    for snapshot in snapshots:
+        after_row = int(snapshot["after_row"])
+        row_indices = [int(v) for v in snapshot["row_indices"]]
+        rows = snapshot["rows"]
+        row_path = output_dir / f"row_{after_row:04d}.hex"
+
+        with open(row_path, 'w') as f:
+            f.write(f"# after_row={after_row}\n")
+            f.write("# slot_to_src_y=" + " ".join(str(v) for v in row_indices) + "\n")
+            for slot_idx, src_y in enumerate(row_indices):
+                values = " ".join(f"{int(value) & ((1 << data_width) - 1):0{hex_digits}x}" for value in rows[slot_idx])
+                f.write(f"slot{slot_idx}_srcy{src_y}: {values}\n")
+
+        manifest_lines.append(
+            f"{after_row:04d} {row_path.name} " + " ".join(str(v) for v in row_indices)
+        )
+
+    with open(output_dir / "manifest.txt", 'w') as f:
+        f.write("\n".join(manifest_lines) + "\n")
 
 
 def run_rtl_simulation(test_dir: Path, rtl_dir: Path, tb_dir: Path) -> bool:
     """Run RTL simulation using Icarus Verilog"""
-    # Collect RTL files
-    rtl_files = list(rtl_dir.glob("*.v"))
-    rtl_files.extend(rtl_dir.glob("common/*.v"))
-    rtl_files = [str(f) for f in rtl_files]
-
+    repo_root = SCRIPT_DIR.parent
+    filelist = SCRIPT_DIR / "iverilog_csiir.f"
     tb_file = tb_dir / "tb_isp_csiir_random.sv"
+    sim_path = (test_dir / "isp_csiir_sim").resolve()
 
     # Compile
     cmd = [
         "iverilog", "-g2012",
-        "-o", "isp_csiir_sim",
+        "-o", str(sim_path),
         "-I", str(rtl_dir),
-        *rtl_files,
+        "-f", str(filelist),
         str(tb_file)
     ]
 
     print("  Compiling RTL...")
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=test_dir)
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=repo_root)
 
     if result.returncode != 0:
         print(f"  Compilation failed:\n{result.stderr}")
@@ -127,7 +186,7 @@ def run_rtl_simulation(test_dir: Path, rtl_dir: Path, tb_dir: Path) -> bool:
     # Run simulation
     print("  Running simulation...")
     sim_result = subprocess.run(
-        ["vvp", "isp_csiir_sim"],
+        [str(sim_path)],
         capture_output=True, text=True, cwd=test_dir
     )
 
@@ -175,6 +234,8 @@ def main():
                         help='Tolerance for comparison')
     parser.add_argument('--keep', '-k', action='store_true',
                         help='Keep test directory')
+    parser.add_argument('--export-linebuffer-rows', action='store_true',
+                        help='Export fixed-model linebuffer five-row snapshots after each processed row')
     args = parser.parse_args()
 
     print("=" * 60)
@@ -203,72 +264,32 @@ def main():
 
     # Step 2: Run Golden Model
     print("\n[Step 2] Running Python Golden Model...")
-    config = FixedPointConfig(
-        IMG_WIDTH=args.width,
-        IMG_HEIGHT=args.height,
-        win_size_thresh=[16, 24, 32, 40],
-        win_size_clip_y=[400, 650, 900, 1023],
-        blending_ratio=[32, 32, 32, 32]
-    )
-
+    config = build_default_config(args.width, args.height)
     expected = run_golden_model(stimulus, config)
     save_hex_file(expected, test_dir / "expected.hex")
     print(f"  Generated {len(expected)} expected outputs")
+    if args.export_linebuffer_rows:
+        snapshots = ISPCSIIRFixedModel(config).export_linebuffer_row_snapshots(
+            stimulus.reshape(config.IMG_HEIGHT, config.IMG_WIDTH).astype(np.int32)
+        )
+        save_linebuffer_row_snapshots(snapshots, test_dir / "linebuffer_rows", data_width=config.DATA_WIDTH)
+        print(f"  Exported {len(snapshots)} linebuffer row snapshots")
 
     # Step 3: Generate config file for testbench
     print("\n[Step 3] Generating config file...")
-    with open(test_dir / "config.txt", 'w') as f:
-        f.write(f"{args.width}\n")
-        f.write(f"{args.height}\n")
-        f.write("16\n24\n32\n40\n")  # thresh
-        f.write("32\n32\n32\n32\n")  # ratio
-        f.write("400\n650\n900\n1023\n")  # clip_y
+    write_testbench_config(test_dir / "config.txt", config)
     print("  Config written to config.txt")
-
-    # Copy files to current directory for testbench
-    import shutil
-    shutil.copy(test_dir / "config.txt", SCRIPT_DIR / "config.txt")
-    shutil.copy(test_dir / "stimulus.hex", SCRIPT_DIR / "stimulus.hex")
 
     # Step 4: Run RTL simulation
     print("\n[Step 4] Running RTL simulation...")
-
-    # Compile and run with tb_isp_csiir_random.sv
-    rtl_files = list(rtl_dir.glob("*.v"))
-    rtl_files.extend(rtl_dir.glob("common/*.v"))
-    rtl_file_strs = [str(f) for f in rtl_files]
-    tb_file = tb_dir / "tb_isp_csiir_random.sv"
-
-    # Compile
-    sim_path = SCRIPT_DIR / "isp_csiir_golden_sim"
-    cmd = [
-        "iverilog", "-g2012",
-        "-o", str(sim_path),
-        "-I", str(rtl_dir),
-        *rtl_file_strs,
-        str(tb_file)
-    ]
-
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=SCRIPT_DIR)
-    if result.returncode != 0:
-        print(f"  Compilation failed:\n{result.stderr}")
-        return 1
-
-    # Run
-    sim_result = subprocess.run(
-        [str(sim_path)],
-        capture_output=True, text=True, cwd=SCRIPT_DIR
-    )
-    print(sim_result.stdout)
-
-    if sim_result.returncode != 0:
-        print(f"  Simulation failed")
+    if not run_rtl_simulation(test_dir, rtl_dir, tb_dir):
+        print("  Simulation failed")
         return 1
 
     # Step 5: Compare results
     print("\n[Step 5] Comparing results...")
 
-    actual_path = SCRIPT_DIR / "actual.hex"
+    actual_path = test_dir / "actual.hex"
     if not actual_path.exists():
         print("  ERROR: actual.hex not found - RTL did not produce output")
         return 1
@@ -300,16 +321,14 @@ def main():
         print(f"FAIL: {result['mismatched']} pixels mismatch")
         status = 1
 
-    # Copy results to test directory
-    shutil.copy(SCRIPT_DIR / "actual.hex", test_dir / "actual.hex")
     if args.keep:
         print(f"\nResults saved to: {test_dir}")
     else:
         # Clean up
+        sim_path = test_dir / "isp_csiir_sim"
         if sim_path.exists():
             sim_path.unlink()
-        for f in [SCRIPT_DIR / "config.txt", SCRIPT_DIR / "stimulus.hex",
-                  SCRIPT_DIR / "actual.hex", SCRIPT_DIR / "tb_isp_csiir_random.vcd"]:
+        for f in [test_dir / "actual.hex", test_dir / "tb_isp_csiir_random.vcd"]:
             if f.exists():
                 f.unlink()
 

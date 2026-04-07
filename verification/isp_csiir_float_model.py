@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from typing import Tuple, List, Optional
 import copy
 
+HORIZONTAL_TAP_STEP = 2
+
 
 @dataclass
 class ISPConfig:
@@ -244,7 +246,7 @@ class ISPCSIIRFloatModel:
             for w in range(-2, 3):
                 # 边界复制
                 y = self._clip(j + h, 0, height - 1)
-                x = self._clip(i + w, 0, width - 1)
+                x = self._clip(i + w * HORIZONTAL_TAP_STEP, 0, width - 1)
                 window[h + 2, w + 2] = img[int(y), int(x)]
 
         return window
@@ -279,9 +281,9 @@ class ISPCSIIRFloatModel:
         for j in range(height):
             for i in range(width):
                 # 获取左右梯度
-                grad_left = grad[j, self._clip(i - 1, 0, width - 1)]
+                grad_left = grad[j, self._clip(i - HORIZONTAL_TAP_STEP, 0, width - 1)]
                 grad_center = grad[j, i]
-                grad_right = grad[j, self._clip(i + 1, 0, width - 1)]
+                grad_right = grad[j, self._clip(i + HORIZONTAL_TAP_STEP, 0, width - 1)]
 
                 max_grad = max(grad_left, grad_center, grad_right)
 
@@ -301,14 +303,28 @@ class ISPCSIIRFloatModel:
         """
         clip_y = self.config.win_size_clip_y
         clip_sft = self.config.win_size_clip_sft
+        x_nodes = []
+        acc = 0.0
+        for shift in clip_sft:
+            acc += float(1 << int(shift))
+            x_nodes.append(acc)
 
-        # 计算裁剪后的梯度索引
-        for idx in range(len(clip_y)):
-            if max_grad < clip_y[idx]:
-                return (idx + 2) * 8  # 返回 16, 24, 32, 40
+        if max_grad <= x_nodes[0]:
+            win_size = float(clip_y[0])
+        elif max_grad >= x_nodes[-1]:
+            win_size = float(clip_y[-1])
+        else:
+            win_size = float(clip_y[-1])
+            for idx in range(len(x_nodes) - 1):
+                x0 = x_nodes[idx]
+                x1 = x_nodes[idx + 1]
+                if x0 <= max_grad <= x1:
+                    y0 = float(clip_y[idx])
+                    y1 = float(clip_y[idx + 1])
+                    win_size = y0 + (max_grad - x0) * (y1 - y0) / (x1 - x0)
+                    break
 
-        # 默认返回最大窗口
-        return 40
+        return self._clip(win_size, 16, 40)
 
     def _stage2_directional_avg(self, src_uv: np.ndarray,
                                  win_size_clip: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -360,11 +376,11 @@ class ISPCSIIRFloatModel:
         if win_size < t0:
             return np.zeros((5, 5)), self.avg_factor_c_2x2.copy()
         elif win_size < t1:
-            return self.avg_factor_c_2x2.copy(), self.avg_factor_c_3x3.copy()
+            return self.avg_factor_c_3x3.copy(), self.avg_factor_c_2x2.copy()
         elif win_size < t2:
-            return self.avg_factor_c_3x3.copy(), self.avg_factor_c_4x4.copy()
+            return self.avg_factor_c_4x4.copy(), self.avg_factor_c_3x3.copy()
         elif win_size < t3:
-            return self.avg_factor_c_4x4.copy(), self.avg_factor_c_5x5.copy()
+            return self.avg_factor_c_5x5.copy(), self.avg_factor_c_4x4.copy()
         else:
             return self.avg_factor_c_5x5.copy(), np.zeros((5, 5))
 
@@ -396,8 +412,8 @@ class ISPCSIIRFloatModel:
                 grad_c = grad[j, i]
                 grad_u = grad[self._clip(j - 1, 0, height - 1), i] if j > 0 else grad_c
                 grad_d = grad[self._clip(j + 1, 0, height - 1), i] if j < height - 1 else grad_c
-                grad_l = grad[j, self._clip(i - 1, 0, width - 1)] if i > 0 else grad_c
-                grad_r = grad[j, self._clip(i + 1, 0, width - 1)] if i < width - 1 else grad_c
+                grad_l = grad[j, self._clip(i - HORIZONTAL_TAP_STEP, 0, width - 1)] if i >= HORIZONTAL_TAP_STEP else grad_c
+                grad_r = grad[j, self._clip(i + HORIZONTAL_TAP_STEP, 0, width - 1)] if i + HORIZONTAL_TAP_STEP < width else grad_c
 
                 # 逆序排序
                 grads = [grad_u, grad_d, grad_l, grad_r, grad_c]

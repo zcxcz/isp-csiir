@@ -241,10 +241,12 @@ module tb_isp_csiir_top;
             apb_write(8'h14, 32'd32);  // THRESH2
             apb_write(8'h18, 32'd40);  // THRESH3
             // Blending ratios
-            apb_write(8'h1C, 32'd32);  // BLEND_RATIO
+            apb_write(8'h1C, {8'd32, 8'd32, 8'd32, 8'd32});  // BLEND_RATIO
             // Clip thresholds
-            apb_write(8'h20, 32'd400); // CLIP_Y
-            apb_write(8'h24, 32'd2);   // CLIP_SFT
+            apb_write(8'h20, {6'd0, 10'd23, 6'd0, 10'd15}); // CLIP_Y[1:0]
+            apb_write(8'h24, {8'd2, 8'd2, 8'd2, 8'd2}); // CLIP_SFT
+            apb_write(8'h28, 32'd32);  // MOT_PROTECT
+            apb_write(8'h2C, {6'd0, 10'd39, 6'd0, 10'd31}); // CLIP_Y[3:2]
             $display("[%0t] Configuration complete", $time);
         end
     endtask

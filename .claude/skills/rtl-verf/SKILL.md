@@ -10,6 +10,47 @@ description: |
 
 本 skill 指导验证工程师使用 SystemVerilog testbench（非UVM）完成 RTL 设计验证的完整工作流程，包括黄金模型比对、测试计划创建、回归测试和覆盖率收集。
 
+## 强制流程约束
+
+当任务属于以下任一情况时，不能只按通用验证套路推进，必须先读取并遵循共享 `rtl-debug-flow` 文档：
+- 关键子模块重验证
+- valid/ready / backpressure / metadata / patch / sideband 相关模块验证
+- 集成失败后的边界定位、子模块 replay、残余 mismatch 收敛
+- 需要按 DUT 最大 pipeline 深度生成 stall / random backpressure 覆盖
+
+必读文件：
+- `/home/sheldon/agent-skills/rtl-debug-flow/RTL_DEBUG_FLOW_SHORT.md`
+- `/home/sheldon/agent-skills/rtl-debug-flow/RTL_TRACE_SPEC.md`
+- `/home/sheldon/agent-skills/rtl-debug-flow/RTL_SUBMODULE_VERIFICATION_STANDARD.md`
+- `/home/sheldon/agent-skills/rtl-debug-flow/RTL_TB_HEADER_TEMPLATE.md`
+- `/home/sheldon/agent-skills/rtl-debug-flow/RTL_DEBUG_CLOSURE_STANDARD.md`
+
+完整 SOP：
+- `/home/sheldon/agent-skills/rtl-debug-flow/RTL_DEBUG_FLOW.md`
+
+最低执行要求：
+- 先冻结 compare object contract，再扩展验证
+- 关键模块至少补齐 `0..pipeline_depth` stall 覆盖
+- fixed-seed random backpressure 数量和上限按共享标准执行
+- 若已有系统级失败，优先按 first failing boundary → trace/replay → 分类 这条 flow 收敛
+- 未满足 closure gate，不要宣称“验证完成”
+
+## 子模块验证 / 集成验证默认原则
+
+以下原则默认适用于本 repo 的验证设计与文档沉淀：
+- 子模块验证与集成验证默认解耦；先把子模块 contract、采样语义、stall 行为独立冻结，再进入集成 compare。
+- 不为每个模块间接口预防性复制 pairwise 边界 case；默认不把“每条边界都补一套专项 case”当成完成标准。
+- 集成 compare 默认按 `valid && ready` 成功采样点对齐；若存在原子提交，必须明确写成完整 fire 条件。
+- 每个 TB 顶部必须显式写清：`compare object`、`sample_edge`、`in/out valid-ready contract`、`metadata_scope`、`pass/fail predicate`。
+- 若存在重排、重编码、坐标/patch 重组，优先在集成 reference / compare 路径表达，不默认回流成额外边界专项测试。
+- 边界专项验证默认只作为集成失配后的定位工具，用于 first failing boundary、trace 导出和 replay 复现。
+- 子模块 TB 仍必须保留：contract freeze、`0..pipeline_depth` stall/backpressure、fixed-seed random、trace/replay。
+
+执行约束：
+- 设计 TB 时先判断本轮目标是“子模块 contract 验证”还是“集成 reference compare”，不要混成同一个 closure 目标。
+- 若集成失败但子模块 TB 已绿，优先冻结集成 compare object / sampling rule / reorder path，而不是立刻给所有相邻边界补 case。
+- 若需要新增边界专项 case，必须在记录中写明触发它的具体集成失配和定位目的。
+
 ## 工作流程概览
 
 ```
