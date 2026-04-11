@@ -15,52 +15,99 @@ module ip_template #(
     output wire                  din_ready,
     input  wire                  din_valid,
     input  wire [DATA_WIDTH-1:0] dina,
-    input  wire [DATA_WIDTH-1:0] dinb,
+    input  wire [DATA_WIDTH-1:0] din,
     input  wire                  dout_ready,
     output wire                  dout_valid,
     output wire [DATA_WIDTH:0]   dout
 );
 
+
+////// localparam and parameter define.
 localparam DOUT_WIDTH = DATA_WIDTH + 1;
 localparam PIPE_S0_WIDTH = DOUT_WIDTH;
 localparam PIPE_S1_WIDTH = DOUT_WIDTH;
 
-// declaration part.
 
+////// declaration part.
 // using /*autowire*/ identify and generate wire signal in this module.
 // using /*autoreg*/ identify and generate reg signal in this module.
 // manual declaration for the following example of the pipeline design.
-wire                  din_shake;
-wire [DATA_WIDTH-1:0] dina_mask;
-wire [DATA_WIDTH-1:0] dinb_mask;
-wire [DOUT_WIDTH-1:0] add_result_comb;
-wire [PIPE_S0_WIDTH-1:0] pipe_s0_din;
-wire [PIPE_S0_WIDTH-1:0] pipe_s0_dout;
-wire                     valid_s0;
-wire                     stage1_ready;
-wire [DOUT_WIDTH-1:0]    sum_s0;
-wire [DOUT_WIDTH-1:0]    dout_s1_comb;
-wire [PIPE_S1_WIDTH-1:0] pipe_s1_din;
-wire [PIPE_S1_WIDTH-1:0] pipe_s1_dout;
-wire                     valid_s1;
+wire [DATA_WIDTH-1:0] din_mask;
+wire [DATA_WIDTH:0] pipe_s0_comb_add_0;
+wire [DATA_WIDTH:0] pipe_s0_comb_sub_0;
+wire [DATA_WIDTH:0] pipe_s1_comb_mult_0;
+wire [2*DATA_WIDTH:0] pipe_s1_comb_mau_0;
 
-// logic part, including pipeline design and integration of some function module
-// instances.
 
-// The following mask logic is an optional power optimization example.
-// If ready-path timing is critical, consider removing this masking and feeding
-// the combinational result directly into the pipe slice.
-assign din_shake = din_valid & din_ready;
-assign dina_mask = din_shake ? dina : {DATA_WIDTH{1'b0}};
-assign dinb_mask = din_shake ? dinb : {DATA_WIDTH{1'b0}};
-assign add_result_comb = dina_mask + dinb_mask;
+////// din mask logic
+// The following mask logic is an optional power optimization choice,
+// which means to prevent the combinational logic input without din_valid.
+`ifdef DIN_MASK
+    assign din_mask = din_valid ? din : {DATA_WIDTH{1'b0}};
+`else
+    assign din_mask = din;
+`endif
 
-// Cycle 0 pipeline stage packing example:
-//   - Pack all stage-local data path signals into pipe_sX_din
-//   - Sideband signals such as pixel_x/pixel_y/win_size/mode can be appended
-//     here when the real algorithm IP needs them
-assign pipe_s0_din = {add_result_comb};
 
+////// pipe stage 0
+// pipe stage 0 unpack data
+assign pipe_s0_din_var_0 = din[DATA_WIDTH+:0]; // the part of the variable name: var can be named as data type.
+assign pipe_s0_din_var_1 = din[DATA_WIDTH+:DATA_WIDTH];
+// pipe stage 0 combinational logic.
+assign pipe_s0_din_logic_0 = pipe_s0_din_var_0 + pipe_s0_din_var_1;
+assign pipe_s0_din_logic_1 = pipe_s0_din_var_0 - pipe_s0_din_var_1; // the part of the variable name: logic can be named as add/sub/mult/div or something else according to the real function.
+// pipe stage 0 input data valid.
+assign pipe_s0_din_valid = din_valid && din_ready;
+// pipe stage 0 input data package.
+assign pipe_s0_din = {
+    pipe_s0_din_logic_0,
+    pipe_s0_din_logic_1
+};
+
+
+////// pipe stage 1
+// pipe stage 1 unpack data
+assign pipe_s1_din_var_0 = pipe_s0_dout_pack[DATA_WIDTH+:0];
+assign pipe_s1_din_var_1 = pipe_s0_dout_pack[DATA_WIDTH+:DATA_WIDTH];
+// pipe stage 1 combinational logic.
+assign pipe_s1_din_logic_0 = pipe_s0_din_var_0_delay1 * pipe_s0_din_var_1_delay1;
+assign pipe_s1_din_logic_1 = pipe_s1_din_var_0 + pipe_s1_din_var_1;
+// pipe stage 1 input data valid.
+assign pipe_s1_din_valid = pipe_s0_dout_valid && pipe_s0_dout_ready;
+// pipe stage 1 input data package.
+assign pipe_s1_din = {
+    pipe_s1_din_logic_0,
+    pipe_s1_din_logic_1
+};
+// pipe stage 1 unpack output data
+assign pipe_s1_dout_logic_0 = pipe_s1_dout_pack[DATA_WIDTH+:0];
+assign pipe_s1_dout_logic_1 = pipe_s1_dout_pack[(DATA_WIDTH*2-1):DATA_WIDTH];
+
+// pipe stage 0 input data valid.
+assign pipe_s0_din_valid = din_valid && din_ready;
+// pipe stage 1 input data package.
+assign pipe_s1_din_pack = {
+    pipe_s1_comb_add_0,
+    pipe_s1_comb_logic_0
+};
+
+// unpack pipe0 output data
+assign pipe_s2_din_valid = pipe_s0_dout_valid;
+assign pipe_s2_comb_add_0 = pipe_s0_dout_pack;
+assign pipe_s2_comb_logic_0 = pipe_s1_comb_add_0 & {DOUT_WIDTH{1'b1}}; 
+
+assign pipe_s1_din_pack = {
+    pipe_s1_comb_add_0,
+    pipe_s1_comb_logic_0
+};
+
+
+
+// Unpack final stage outputs.
+assign dout       = pipe_s2_dout[DOUT_WIDTH-1:0];
+assign dout_valid = valid_s2;
+
+// pipeline instance.
 // using auto_template to template module if emacs-verilog-mode is available.
 // using /*autoinst*/ to instance module if emacs-verilog-mode is available.
 /* common_pipe_slice auto_template "\(u_pipe_s0\)" (
@@ -70,11 +117,11 @@ assign pipe_s0_din = {add_result_comb};
     .clk        (clk          ),
     .rst_n      (rst_n        ),
     .din        (pipe_s0_din  ),
-    .valid_in   (din_shake    ),
-    .ready_out  (din_ready    ),
+    .din_valid   (din_shake    ),
+    .din_ready  (din_ready    ),
     .dout       (pipe_s0_dout ),
-    .valid_out  (valid_s0     ),
-    .ready_in   (stage1_ready )
+    .dout_valid  (valid_s0     ),
+    .dout_ready   (stage1_ready )
 ); */
 common_pipe_slice #(
     .DATA_WIDTH (PIPE_S0_WIDTH),
@@ -84,11 +131,11 @@ common_pipe_slice #(
     .clk       (clk),
     .rst_n     (rst_n),
     .din       (pipe_s0_din),
-    .valid_in  (din_shake),
-    .ready_out (din_ready),
+    .din_valid  (din_shake),
+    .din_ready (din_ready),
     .dout      (pipe_s0_dout),
-    .valid_out (valid_s0),
-    .ready_in  (stage1_ready)
+    .dout_valid (valid_s0),
+    .dout_ready  (stage1_ready)
 );
 
 // Unpack stage outputs.
@@ -100,18 +147,38 @@ assign sum_s0 = pipe_s0_dout[DOUT_WIDTH-1:0];
 assign dout_s1_comb = sum_s0;
 assign pipe_s1_din  = {dout_s1_comb};
 
-/* common_pipe_slice auto_template "\(u_pipe_s1\)" (
+////// pipeline instance.
+/* common_pipe_slice auto_template "u_\(pipe_s[0-9]+\)" (
     .DATA_WIDTH (PIPE_S1_WIDTH),
     .RESET_VAL  (0            ),
     .PIPE_TYPE  (0            ),
     .clk        (clk          ),
     .rst_n      (rst_n        ),
-    .din        (pipe_s1_din  ),
-    .valid_in   (valid_s0     ),
-    .ready_out  (stage1_ready ),
-    .dout       (pipe_s1_dout ),
-    .valid_out  (valid_s1     ),
-    .ready_in   (dout_ready   )
+    .\(din.*\)  (@_\1[]),
+    .\(dout.*\) (@_\1[]),
+); */
+common_pipe_slice #(
+    .DATA_WIDTH (PIPE_S1_WIDTH),
+    .RESET_VAL  (0),
+    .PIPE_TYPE  (0)
+) u_pipe_s0 (
+    .clk       (clk),
+    .rst_n     (rst_n),
+    .din       (pipe_s1_din),
+    .din_valid  (valid_s0),
+    .din_ready (stage1_ready),
+    .dout      (pipe_s1_dout),
+    .dout_valid (valid_s1),
+    .dout_ready  (dout_ready)
+);
+/* common_pipe_slice auto_template "u_\(pipe_s[0-9]+\)" (
+    .DATA_WIDTH (PIPE_S1_WIDTH),
+    .RESET_VAL  (0            ),
+    .PIPE_TYPE  (0            ),
+    .clk        (clk          ),
+    .rst_n      (rst_n        ),
+    .\(din.*\)  (@_\1[]),
+    .\(dout.*\) (@_\1[]),
 ); */
 common_pipe_slice #(
     .DATA_WIDTH (PIPE_S1_WIDTH),
@@ -121,15 +188,60 @@ common_pipe_slice #(
     .clk       (clk),
     .rst_n     (rst_n),
     .din       (pipe_s1_din),
-    .valid_in  (valid_s0),
-    .ready_out (stage1_ready),
+    .din_valid  (valid_s0),
+    .din_ready (stage1_ready),
     .dout      (pipe_s1_dout),
-    .valid_out (valid_s1),
-    .ready_in  (dout_ready)
+    .dout_valid (valid_s1),
+    .dout_ready  (dout_ready)
+);
+/* common_pipe_slice auto_template "u_\(pipe_s[0-9]+\)" (
+    .DATA_WIDTH (PIPE_S1_WIDTH),
+    .RESET_VAL  (0            ),
+    .PIPE_TYPE  (0            ),
+    .clk        (clk          ),
+    .rst_n      (rst_n        ),
+    .\(din.*\)  (@_\1[]),
+    .\(dout.*\) (@_\1[]),
+); */
+common_pipe_slice #(
+    .DATA_WIDTH (PIPE_S1_WIDTH),
+    .RESET_VAL  (0),
+    .PIPE_TYPE  (0)
+) u_pipe_s2 (
+    .clk       (clk),
+    .rst_n     (rst_n),
+    .din       (pipe_s1_din),
+    .din_valid  (valid_s0),
+    .din_ready (stage1_ready),
+    .dout      (pipe_s1_dout),
+    .dout_valid (valid_s1),
+    .dout_ready  (dout_ready)
 );
 
-// Unpack final stage outputs.
-assign dout       = pipe_s1_dout[DOUT_WIDTH-1:0];
-assign dout_valid = valid_s1;
+////// bypass instance.
+/* common_pipe_slice auto_template "u_\(pipe_s[0-9]+\)" (
+    .DATA_WIDTH (PIPE_S1_WIDTH),
+    .RESET_VAL  (0            ),
+    .PIPE_TYPE  (0            ),
+    .clk        (clk          ),
+    .rst_n      (rst_n        ),
+    .\(din.*\)  (@_\1[]),
+    .\(dout.*\) (@_\1[]),
+); */
+common_pipe_slice #(
+    .DATA_WIDTH (PIPE_S1_WIDTH),
+    .RESET_VAL  (0),
+    .PIPE_TYPE  (0)
+) u_pipe_s0_din_var_0_delay_1 (
+    .clk       (clk),
+    .rst_n     (rst_n),
+    .din       (pipe_s1_din),
+    .din_valid  (valid_s0),
+    .din_ready (stage1_ready),
+    .dout      (pipe_s1_dout),
+    .dout_valid (valid_s1),
+    .dout_ready  (dout_ready)
+);
+
 
 endmodule
