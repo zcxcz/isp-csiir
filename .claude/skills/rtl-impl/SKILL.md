@@ -618,3 +618,149 @@ end
 延迟：2时钟周期
 资源估算：XX LUT, XX FF
 ```
+
+## 流水线设计规范（基于 ip_template.v）
+
+### 信号命名规范
+
+**统一前缀格式：** 所有流水线相关信号使用 `pipe_<stage>_<type>_<name>` 格式
+
+| 信号类型 | 命名格式 | 示例 |
+|----------|----------|------|
+| 流水线输入数据 | `pipe_<N>_din_<var>` | `pipe_s0_din_var_0`, `pipe_s1_din_data` |
+| 流水线输出数据 | `pipe_<N>_dout_<var>` | `pipe_s0_dout`, `pipe_s1_dout` |
+| 输入有效信号 | `pipe_<N>_din_valid` | `pipe_s0_din_valid` |
+| 输入就绪信号 | `pipe_<N>_din_ready` | `pipe_s0_din_ready` |
+| 输出有效信号 | `pipe_<N>_dout_valid` | `pipe_s0_dout_valid` |
+| 输出就绪信号 | `pipe_<N>_dout_ready` | `pipe_s0_dout_ready` |
+| 组合逻辑输出 | `pipe_<N>_comb_<op>` | `pipe_s0_comb_add_0`, `pipe_s1_comb_mult_0` |
+| 延迟链输出 | `<source>_delay_<N>` | `pipe_s0_din_var_0_delay_1` |
+
+**禁止使用的命名：**
+- `valid_s0`, `stage1_ready` 等无统一前缀的信号
+- `data_valid` 而非 `pipe_s0_din_valid`
+
+### 握手协议规范
+
+**四信号握手接口：**
+```verilog
+input  wire din_valid;   // 输入数据有效
+output wire din_ready;   // 输入可以接收数据
+output wire dout_valid;  // 输出数据有效
+input  wire dout_ready;  // 下游可以接收数据
+```
+
+**反向压力（backpressure）传播：**
+```
+dout_ready → pipe_s2_din_ready → pipe_s1_dout_ready → pipe_s1_din_ready → pipe_s0_dout_ready → pipe_s0_din_ready → din_ready
+```
+
+**正向有效传播：**
+```
+din_valid → pipe_s0_din_valid → pipe_s0_dout_valid → pipe_s1_din_valid → pipe_s1_dout_valid → pipe_s2_din_valid → pipe_s2_dout_valid → dout_valid
+```
+
+### 流水线模块结构
+
+**标准结构顺序：**
+1. `localparam` 参数定义区
+2. `wire` 信号声明区（按流水线级分组）
+3. 组合逻辑赋值区（`assign` 语句）
+4. 流水线实例区（例化 `common_pipe_slice` 等模块）
+
+**正确示例：**
+```verilog
+////// localparam and parameter define.
+localparam OP_WIDTH     = DATA_WIDTH + 1;
+localparam PIPE_S0_WIDTH = 2 * OP_WIDTH;
+
+////// declaration part.
+wire [PIPE_S0_WIDTH-1:0]  pipe_s0_din;
+wire [PIPE_S0_WIDTH-1:0]  pipe_s0_dout;
+wire                      pipe_s0_din_valid;
+wire                      pipe_s0_din_ready;
+wire                      pipe_s0_dout_valid;
+wire                      pipe_s0_dout_ready;
+
+////// pipe stage 0
+assign pipe_s0_din_valid = din_valid;
+assign pipe_s0_din_ready = pipe_s1_din_ready;
+assign pipe_s0_din = {pipe_s0_comb_add_0, pipe_s0_comb_sub_0};
+assign pipe_s0_dout_ready = pipe_s1_din_ready;
+
+////// pipeline instances
+common_pipe_slice #(
+    .DATA_WIDTH (PIPE_S0_WIDTH),
+    .RESET_VAL  (0),
+    .PIPE_TYPE  (0)
+) u_pipe_s0 (
+    .clk        (clk),
+    .rst_n      (rst_n),
+    .din        (pipe_s0_din),
+    .din_valid  (pipe_s0_din_valid),
+    .din_ready  (pipe_s0_din_ready),
+    .dout       (pipe_s0_dout),
+    .dout_valid (pipe_s0_dout_valid),
+    .dout_ready (pipe_s0_dout_ready)
+);
+```
+
+### 延迟链设计规范
+
+**命名格式：** `u_<source>_delay_<N>`
+- `<source>`: 源信号名称（去掉 `_delay_<N>` 后缀）
+- `<N>`: 延迟周期数
+
+**示例：**
+```verilog
+// 对 pipe_s0_din_var_0 延迟1拍
+// 命名：u_pipe_s0_din_var_0_delay_1
+// 输出：pipe_s0_din_var_0_delay_1
+common_pipe_slice #(
+    .DATA_WIDTH (OP_WIDTH),
+    .RESET_VAL  (0),
+    .PIPE_TYPE  (0)
+) u_pipe_s0_din_var_0_delay_1 (
+    .clk        (clk),
+    .rst_n      (rst_n),
+    .din        (pipe_s0_din_var_0),
+    .din_valid  (pipe_s0_din_valid),
+    .din_ready  (pipe_s0_din_ready),
+    .dout       (pipe_s0_din_var_0_delay_1),
+    .dout_valid (),
+    .dout_ready (1'b1)
+);
+```
+
+**延迟链连接规则：**
+- `din_valid` 应连接到源流水线级的 `din_valid` 或 `dout_valid`
+- `din_ready` 应连接到源流水线级的 `din_ready`（不是 `dout_ready`）
+- `dout_ready` 固定为 `1'b1`（单向延迟链不处理反压）
+
+### 例化区域规范
+
+**原则：** 例化区域只例化模块，不写赋值逻辑
+
+**禁止在例化区域出现的语句：**
+```verilog
+// 错误：例化区域不应有 assign 语句
+assign stage1_ready = pipe_s1_dout_ready;  // 应该在 logic 块中
+```
+
+**正确做法：**
+```verilog
+////// logic 块（组合逻辑赋值）
+assign pipe_s1_din_ready = pipe_s1_dout_ready;
+
+////// 例化区域
+common_pipe_slice ... u_pipe_s1 (...);
+```
+
+### 常见错误对照表
+
+| 错误类型 | 错误示例 | 正确示例 |
+|----------|----------|----------|
+| 信号命名无统一前缀 | `valid_s0`, `stage1_ready` | `pipe_s0_dout_valid`, `pipe_s1_dout_ready` |
+| 例化区域含assign | `assign stage1_ready = ...` 在例化区 | 将assign移到logic块 |
+| 延迟链信号名不匹配 | `pipe_s1_din_var_0_delay_1` 但输入是 `pipe_s0_din_var_0` | `u_pipe_s0_din_var_0_delay_1` 输入 `pipe_s0_din_var_0` |
+| 握手信号连接错误 | `pipe_s0_din_ready = stage1_ready` | `pipe_s0_din_ready = pipe_s1_din_ready` |
