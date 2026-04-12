@@ -3,7 +3,7 @@
 // Purpose: Gradient calculation and window size determination
 // Author: rtl-impl
 // Date: 2026-03-24
-// Version: v3.0 - Refactored with common_pipe and valid/ready handshake
+// Version: v4.0 - Refactored with common_pipe_slice and unified naming
 //-----------------------------------------------------------------------------
 // Description:
 //   Implements Stage 1 of ISP-CSIIR pipeline:
@@ -20,9 +20,8 @@
 //   Cycle 4: Window size LUT
 //
 // Handshake Protocol:
-//   - valid_in/valid_out: Data valid indicators
-//   - ready_in: Downstream back-pressure signal
-//   - ready_out: Always 1 (simple pipeline without skid buffer)
+//   - din_valid/din_ready: Input handshake
+//   - dout_valid/dout_ready: Output handshake
 //-----------------------------------------------------------------------------
 
 module stage1_gradient #(
@@ -60,8 +59,8 @@ module stage1_gradient #(
     output wire [GRAD_WIDTH-1:0]       grad_v,
     output wire [GRAD_WIDTH-1:0]       grad,
     output wire [WIN_SIZE_WIDTH-1:0]   win_size_clip,
-    output wire                        stage1_valid,
-    input  wire                        stage1_ready,
+    output wire                        stage1_dout_valid,
+    input  wire                        stage1_din_ready,
 
     // Position info (passed through)
     input  wire [LINE_ADDR_WIDTH-1:0]  pixel_x,
@@ -114,9 +113,40 @@ module stage1_gradient #(
     endfunction
 
     //=========================================================================
-    // Ready Signal
+    // Internal Signal Declaration
     //=========================================================================
-    assign window_ready = stage1_ready;
+    // Pipeline stage valid signals
+    wire                      pipe_s0_din_valid;
+    wire                      pipe_s0_din_ready;
+    wire                      pipe_s0_dout_valid;
+    wire                      pipe_s0_dout_ready;
+
+    wire                      pipe_s1_din_valid;
+    wire                      pipe_s1_din_ready;
+    wire                      pipe_s1_dout_valid;
+    wire                      pipe_s1_dout_ready;
+
+    wire                      pipe_s2_din_valid;
+    wire                      pipe_s2_din_ready;
+    wire                      pipe_s2_dout_valid;
+    wire                      pipe_s2_dout_ready;
+
+    wire                      pipe_s3_din_valid;
+    wire                      pipe_s3_din_ready;
+    wire                      pipe_s3_dout_valid;
+    wire                      pipe_s3_dout_ready;
+
+    // Output stage signals (forward declared for backpressure chain)
+    wire                      pipe_out_din_valid;
+    wire                      pipe_out_din_ready;
+    wire                      pipe_out_dout_valid;
+    wire                      pipe_out_dout_ready;
+
+    //=========================================================================
+    // Backpressure Propagation (from output to input)
+    //=========================================================================
+    // window_ready: from pipe_s0 input (backpressure starts here)
+    assign window_ready = pipe_s0_din_ready;
 
     //=========================================================================
     // Window Delay Line (5 cycles to match pipeline latency)
@@ -147,7 +177,7 @@ module stage1_gradient #(
                 end
                 win_valid_dly[wi] <= 1'b0;
             end
-        end else if (enable && stage1_ready) begin
+        end else if (enable && stage1_din_ready) begin
             // Shift delay chain
             for (wi = 4; wi > 0; wi = wi - 1) begin
                 for (wr = 0; wr < 5; wr = wr + 1) begin
@@ -189,28 +219,36 @@ module stage1_gradient #(
     wire [ROW_SUM_WIDTH-1:0] col4_sum_comb = window_0_4 + window_1_4 + window_2_4 + window_3_4 + window_4_4;
 
     //=========================================================================
-    // Cycle 0 Pipeline Registers
+    // Cycle 0: Pack and Pipeline
     //=========================================================================
-    // Pack signals for common_pipe
+    // din_valid: from window_valid
+    assign pipe_s0_din_valid = window_valid;
+    // din_ready: from pipe_s1 (backpressure propagation)
+    assign pipe_s0_din_ready = pipe_s1_din_ready;
+    // din_shake: handshake indicator
+    wire pipe_s0_din_shake = pipe_s0_din_valid & pipe_s0_din_ready;
+
+    // Pack signals for pipeline
     wire [PIPE_S0_WIDTH-1:0] pipe_s0_din = {row0_sum_comb, row4_sum_comb, col0_sum_comb, col4_sum_comb,
                                             pixel_x, pixel_y, window_2_2, window_valid};
-
     wire [PIPE_S0_WIDTH-1:0] pipe_s0_dout;
-    wire                     valid_s0;
 
-    common_pipe #(
+    // dout_ready: from pipe_s1
+    assign pipe_s0_dout_ready = pipe_s1_din_ready;
+
+    common_pipe_slice #(
         .DATA_WIDTH (PIPE_S0_WIDTH),
-        .STAGES     (1),
-        .RESET_VAL  (0)
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
     ) u_pipe_s0 (
-        .clk       (clk),
-        .rst_n     (rst_n),
-        .din       (pipe_s0_din),
-        .valid_in  (window_valid),
-        .ready_out (),
-        .dout      (pipe_s0_dout),
-        .valid_out (valid_s0),
-        .ready_in  (stage1_ready)
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_s0_din),
+        .din_valid  (pipe_s0_din_valid),
+        .din_ready  (pipe_s0_din_ready),
+        .dout       (pipe_s0_dout),
+        .dout_valid (pipe_s0_dout_valid),
+        .dout_ready (pipe_s0_dout_ready)
     );
 
     // Unpack signals
@@ -225,25 +263,34 @@ module stage1_gradient #(
     //=========================================================================
     // Cycle 1: Pipeline Delay for Row/Column Sums
     //=========================================================================
+    // din_valid: from pipe_s0 output valid
+    assign pipe_s1_din_valid = pipe_s0_dout_valid;
+    // din_ready: from pipe_s2 (backpressure propagation)
+    assign pipe_s1_din_ready = pipe_s2_din_ready;
+    // din_shake: handshake indicator
+    wire pipe_s1_din_shake = pipe_s1_din_valid & pipe_s1_din_ready;
+
+    // Pack signals for pipeline
     wire [PIPE_S1_WIDTH-1:0] pipe_s1_din = {row0_sum_s0, row4_sum_s0, col0_sum_s0, col4_sum_s0,
-                                            pixel_x_s0, pixel_y_s0, center_s0, valid_s0};
-
+                                            pixel_x_s0, pixel_y_s0, center_s0, pipe_s0_dout_valid};
     wire [PIPE_S1_WIDTH-1:0] pipe_s1_dout;
-    wire                     valid_s1;
 
-    common_pipe #(
+    // dout_ready: from pipe_s2
+    assign pipe_s1_dout_ready = pipe_s2_din_ready;
+
+    common_pipe_slice #(
         .DATA_WIDTH (PIPE_S1_WIDTH),
-        .STAGES     (1),
-        .RESET_VAL  (0)
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
     ) u_pipe_s1 (
-        .clk       (clk),
-        .rst_n     (rst_n),
-        .din       (pipe_s1_din),
-        .valid_in  (valid_s0),
-        .ready_out (),
-        .dout      (pipe_s1_dout),
-        .valid_out (valid_s1),
-        .ready_in  (stage1_ready)
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_s1_din),
+        .din_valid  (pipe_s1_din_valid),
+        .din_ready  (pipe_s1_din_ready),
+        .dout       (pipe_s1_dout),
+        .dout_valid (pipe_s1_dout_valid),
+        .dout_ready (pipe_s1_dout_ready)
     );
 
     // Unpack signals
@@ -266,18 +313,16 @@ module stage1_gradient #(
     wire [GRAD_WIDTH-1:0] grad_v_abs_comb = (grad_v_raw_comb[GRAD_WIDTH-1]) ?
                                             ~grad_v_raw_comb + 1'b1 : grad_v_raw_comb;
 
-    // Gradient sum using multiply approximation for /5
-    // grad = (grad_h + grad_v) * 205 >> 10 (approximates /5)
-    wire [GRAD_WIDTH:0] grad_sum_raw = grad_h_abs_comb + grad_v_abs_comb;
-    wire [GRAD_WIDTH+9:0] grad_full = grad_sum_raw * 9'd205;
-
-    // Right shift by 10 with rounding
-    wire [GRAD_WIDTH-1:0] grad_shifted = grad_full[GRAD_WIDTH+9:10];
-    wire                  round_carry = grad_full[9];
-    wire [GRAD_WIDTH:0]   grad_rounded_full = grad_shifted + round_carry;
-    wire                  overflow = grad_rounded_full[GRAD_WIDTH];
-    wire [GRAD_WIDTH-1:0] grad_sum_comb = overflow ?
-                                          {GRAD_WIDTH{1'b1}} : grad_rounded_full[GRAD_WIDTH-1:0];
+    // Ref semantics:
+    //   grad = round(|grad_h| / 5) + round(|grad_v| / 5)
+    // Do not collapse into round((|grad_h| + |grad_v|) / 5); that changes
+    // the fixed-point behavior and produces observable 1-LSB differences.
+    wire [GRAD_WIDTH-1:0] grad_h_div5_comb = (grad_h_abs_comb + 3'd2) / 3'd5;
+    wire [GRAD_WIDTH-1:0] grad_v_div5_comb = (grad_v_abs_comb + 3'd2) / 3'd5;
+    wire [GRAD_WIDTH:0]   grad_sum_full = grad_h_div5_comb + grad_v_div5_comb;
+    wire                  grad_sum_overflow = grad_sum_full[GRAD_WIDTH];
+    wire [GRAD_WIDTH-1:0] grad_sum_comb = grad_sum_overflow ?
+                                          {GRAD_WIDTH{1'b1}} : grad_sum_full[GRAD_WIDTH-1:0];
 
     // Neighbor gradients shift register (need to maintain across cycles)
     reg [GRAD_WIDTH-1:0] grad_l_reg, grad_r_reg;
@@ -286,34 +331,43 @@ module stage1_gradient #(
         if (!rst_n) begin
             grad_l_reg <= {GRAD_WIDTH{1'b0}};
             grad_r_reg <= {GRAD_WIDTH{1'b0}};
-        end else if (enable && stage1_ready) begin
+        end else if (enable && stage1_din_ready) begin
             grad_r_reg <= grad_l_reg;
             grad_l_reg <= grad_sum_comb;
         end
     end
 
     //=========================================================================
-    // Cycle 2 Pipeline Registers
+    // Cycle 2: Pack and Pipeline
     //=========================================================================
+    // din_valid: from pipe_s1 output valid
+    assign pipe_s2_din_valid = pipe_s1_dout_valid;
+    // din_ready: from pipe_s3 (backpressure propagation)
+    assign pipe_s2_din_ready = pipe_s3_din_ready;
+    // din_shake: handshake indicator
+    wire pipe_s2_din_shake = pipe_s2_din_valid & pipe_s2_din_ready;
+
+    // Pack signals for pipeline
     wire [PIPE_S2_WIDTH-1:0] pipe_s2_din = {grad_h_abs_comb, grad_v_abs_comb, grad_sum_comb,
-                                            pixel_x_s1, pixel_y_s1, center_s1, valid_s1};
-
+                                            pixel_x_s1, pixel_y_s1, center_s1, pipe_s1_dout_valid};
     wire [PIPE_S2_WIDTH-1:0] pipe_s2_dout;
-    wire                     valid_s2;
 
-    common_pipe #(
+    // dout_ready: from pipe_s3
+    assign pipe_s2_dout_ready = pipe_s3_din_ready;
+
+    common_pipe_slice #(
         .DATA_WIDTH (PIPE_S2_WIDTH),
-        .STAGES     (1),
-        .RESET_VAL  (0)
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
     ) u_pipe_s2 (
-        .clk       (clk),
-        .rst_n     (rst_n),
-        .din       (pipe_s2_din),
-        .valid_in  (valid_s1),
-        .ready_out (),
-        .dout      (pipe_s2_dout),
-        .valid_out (valid_s2),
-        .ready_in  (stage1_ready)
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_s2_din),
+        .din_valid  (pipe_s2_din_valid),
+        .din_ready  (pipe_s2_din_ready),
+        .dout       (pipe_s2_dout),
+        .dout_valid (pipe_s2_dout_valid),
+        .dout_ready (pipe_s2_dout_ready)
     );
 
     // Unpack signals
@@ -331,27 +385,36 @@ module stage1_gradient #(
     wire [GRAD_WIDTH-1:0] grad_max_comb = (max_0_1 >= grad_r_reg) ? max_0_1 : grad_r_reg;
 
     //=========================================================================
-    // Cycle 3 Pipeline Registers
+    // Cycle 3: Pack and Pipeline
     //=========================================================================
+    // din_valid: from pipe_s2 output valid
+    assign pipe_s3_din_valid = pipe_s2_dout_valid;
+    // din_ready: from pipe_out (backpressure propagation)
+    assign pipe_s3_din_ready = pipe_out_din_ready;
+    // din_shake: handshake indicator
+    wire pipe_s3_din_shake = pipe_s3_din_valid & pipe_s3_din_ready;
+
+    // Pack signals for pipeline
     wire [PIPE_S3_WIDTH-1:0] pipe_s3_din = {grad_max_comb, grad_sum_s2, grad_h_abs_s2, grad_v_abs_s2,
-                                            pixel_x_s2, pixel_y_s2, center_s2, valid_s2};
-
+                                            pixel_x_s2, pixel_y_s2, center_s2, pipe_s2_dout_valid};
     wire [PIPE_S3_WIDTH-1:0] pipe_s3_dout;
-    wire                     valid_s3;
 
-    common_pipe #(
+    // dout_ready: from pipe_out
+    assign pipe_s3_dout_ready = pipe_out_din_ready;
+
+    common_pipe_slice #(
         .DATA_WIDTH (PIPE_S3_WIDTH),
-        .STAGES     (1),
-        .RESET_VAL  (0)
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
     ) u_pipe_s3 (
-        .clk       (clk),
-        .rst_n     (rst_n),
-        .din       (pipe_s3_din),
-        .valid_in  (valid_s2),
-        .ready_out (),
-        .dout      (pipe_s3_dout),
-        .valid_out (valid_s3),
-        .ready_in  (stage1_ready)
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_s3_din),
+        .din_valid  (pipe_s3_din_valid),
+        .din_ready  (pipe_s3_din_ready),
+        .dout       (pipe_s3_dout),
+        .dout_valid (pipe_s3_dout_valid),
+        .dout_ready (pipe_s3_dout_ready)
     );
 
     // Unpack signals
@@ -385,28 +448,35 @@ module stage1_gradient #(
                                     win_size_grad_comb[WIN_SIZE_WIDTH-1:0];
 
     //=========================================================================
-    // Output Registers (Cycle 4)
+    // Output Stage: Pack and Pipeline (Cycle 4)
     //=========================================================================
+    // din_valid: from pipe_s3 output valid
+    assign pipe_out_din_valid = pipe_s3_dout_valid;
+    // din_ready: from stage1_din_ready (backpressure propagation)
+    assign pipe_out_din_ready = stage1_din_ready;
+    // din_shake: handshake indicator
+    wire pipe_out_din_shake = pipe_out_din_valid & pipe_out_din_ready;
+
     // Pack output signals
     localparam PIPE_OUT_WIDTH = 3 * GRAD_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
     wire [PIPE_OUT_WIDTH-1:0] pipe_out_din = {grad_h_abs_s3, grad_v_abs_s3, grad_sum_s3, win_size_comb,
-                                              pixel_x_s3, pixel_y_s3, center_s3, valid_s3};
+                                              pixel_x_s3, pixel_y_s3, center_s3, pipe_out_din_valid};
 
     wire [PIPE_OUT_WIDTH-1:0] pipe_out_dout;
 
-    common_pipe #(
+    common_pipe_slice #(
         .DATA_WIDTH (PIPE_OUT_WIDTH),
-        .STAGES     (1),
-        .RESET_VAL  (0)
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
     ) u_pipe_out (
-        .clk       (clk),
-        .rst_n     (rst_n),
-        .din       (pipe_out_din),
-        .valid_in  (valid_s3),
-        .ready_out (),
-        .dout      (pipe_out_dout),
-        .valid_out (stage1_valid),
-        .ready_in  (stage1_ready)
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_out_din),
+        .din_valid  (pipe_out_din_valid),
+        .din_ready  (pipe_out_din_ready),
+        .dout       (pipe_out_dout),
+        .dout_valid (stage1_dout_valid),
+        .dout_ready (pipe_out_din_ready)
     );
 
     // Unpack output signals
