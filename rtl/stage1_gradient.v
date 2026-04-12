@@ -208,18 +208,18 @@ module stage1_gradient #(
     end
 
     //=========================================================================
-    // Cycle 0: Sobel Row/Column Sum (Combinational)
+    ////// pipe stage 0: Sobel row/column sum
     //=========================================================================
-    // Row sums (5 pixels each)
+    // comb: Sobel row sums
     wire [ROW_SUM_WIDTH-1:0] row0_sum_comb = window_0_0 + window_0_1 + window_0_2 + window_0_3 + window_0_4;
     wire [ROW_SUM_WIDTH-1:0] row4_sum_comb = window_4_0 + window_4_1 + window_4_2 + window_4_3 + window_4_4;
 
-    // Column sums (5 pixels each)
+    // comb: Sobel column sums
     wire [ROW_SUM_WIDTH-1:0] col0_sum_comb = window_0_0 + window_1_0 + window_2_0 + window_3_0 + window_4_0;
     wire [ROW_SUM_WIDTH-1:0] col4_sum_comb = window_0_4 + window_1_4 + window_2_4 + window_3_4 + window_4_4;
 
     //=========================================================================
-    // Cycle 0: Pack and Pipeline
+    ////// pipe stage 0: pack and pipeline
     //=========================================================================
     // din_valid: from window_valid
     assign pipe_s0_din_valid = window_valid;
@@ -227,12 +227,10 @@ module stage1_gradient #(
     assign pipe_s0_din_ready = pipe_s1_din_ready;
     // din_shake: handshake indicator
     wire pipe_s0_din_shake = pipe_s0_din_valid & pipe_s0_din_ready;
-
-    // Pack signals for pipeline
+    // data pack for pipeline register input
     wire [PIPE_S0_WIDTH-1:0] pipe_s0_din = {row0_sum_comb, row4_sum_comb, col0_sum_comb, col4_sum_comb,
-                                            pixel_x, pixel_y, window_2_2, window_valid};
+                                            pixel_x, pixel_y, window_2_2, pipe_s0_din_valid};
     wire [PIPE_S0_WIDTH-1:0] pipe_s0_dout;
-
     // dout_ready: from pipe_s1
     assign pipe_s0_dout_ready = pipe_s1_din_ready;
 
@@ -251,7 +249,7 @@ module stage1_gradient #(
         .dout_ready (pipe_s0_dout_ready)
     );
 
-    // Unpack signals
+    // data unpack from pipe_s0 output
     wire [ROW_SUM_WIDTH-1:0]   row0_sum_s0 = pipe_s0_dout[PIPE_S0_WIDTH-1 -: ROW_SUM_WIDTH];
     wire [ROW_SUM_WIDTH-1:0]   row4_sum_s0 = pipe_s0_dout[PIPE_S0_WIDTH-1-ROW_SUM_WIDTH -: ROW_SUM_WIDTH];
     wire [ROW_SUM_WIDTH-1:0]   col0_sum_s0 = pipe_s0_dout[PIPE_S0_WIDTH-1-2*ROW_SUM_WIDTH -: ROW_SUM_WIDTH];
@@ -261,7 +259,7 @@ module stage1_gradient #(
     wire [DATA_WIDTH-1:0]      center_s0   = pipe_s0_dout[1 +: DATA_WIDTH];
 
     //=========================================================================
-    // Cycle 1: Pipeline Delay for Row/Column Sums
+    ////// pipe stage 1: row/column sum delay
     //=========================================================================
     // din_valid: from pipe_s0 output valid
     assign pipe_s1_din_valid = pipe_s0_dout_valid;
@@ -269,12 +267,10 @@ module stage1_gradient #(
     assign pipe_s1_din_ready = pipe_s2_din_ready;
     // din_shake: handshake indicator
     wire pipe_s1_din_shake = pipe_s1_din_valid & pipe_s1_din_ready;
-
-    // Pack signals for pipeline
+    // data pack for pipeline register input
     wire [PIPE_S1_WIDTH-1:0] pipe_s1_din = {row0_sum_s0, row4_sum_s0, col0_sum_s0, col4_sum_s0,
-                                            pixel_x_s0, pixel_y_s0, center_s0, pipe_s0_dout_valid};
+                                            pixel_x_s0, pixel_y_s0, center_s0, pipe_s1_din_valid};
     wire [PIPE_S1_WIDTH-1:0] pipe_s1_dout;
-
     // dout_ready: from pipe_s2
     assign pipe_s1_dout_ready = pipe_s2_din_ready;
 
@@ -293,7 +289,7 @@ module stage1_gradient #(
         .dout_ready (pipe_s1_dout_ready)
     );
 
-    // Unpack signals
+    // data unpack from pipe_s1 output
     wire [ROW_SUM_WIDTH-1:0]   row0_sum_s1 = pipe_s1_dout[PIPE_S1_WIDTH-1 -: ROW_SUM_WIDTH];
     wire [ROW_SUM_WIDTH-1:0]   row4_sum_s1 = pipe_s1_dout[PIPE_S1_WIDTH-1-ROW_SUM_WIDTH -: ROW_SUM_WIDTH];
     wire [ROW_SUM_WIDTH-1:0]   col0_sum_s1 = pipe_s1_dout[PIPE_S1_WIDTH-1-2*ROW_SUM_WIDTH -: ROW_SUM_WIDTH];
@@ -303,20 +299,19 @@ module stage1_gradient #(
     wire [DATA_WIDTH-1:0]      center_s1   = pipe_s1_dout[1 +: DATA_WIDTH];
 
     //=========================================================================
-    // Cycle 2: Gradient Difference and Absolute Value (Combinational)
+    ////// pipe stage 2: gradient diff/abs and neighbor tracking
     //=========================================================================
+    // comb: Sobel gradient difference
     wire signed [GRAD_WIDTH-1:0] grad_h_raw_comb = $signed({1'b0, row0_sum_s1}) - $signed({1'b0, row4_sum_s1});
     wire signed [GRAD_WIDTH-1:0] grad_v_raw_comb = $signed({1'b0, col0_sum_s1}) - $signed({1'b0, col4_sum_s1});
 
+    // comb: absolute value
     wire [GRAD_WIDTH-1:0] grad_h_abs_comb = (grad_h_raw_comb[GRAD_WIDTH-1]) ?
                                             ~grad_h_raw_comb + 1'b1 : grad_h_raw_comb;
     wire [GRAD_WIDTH-1:0] grad_v_abs_comb = (grad_v_raw_comb[GRAD_WIDTH-1]) ?
                                             ~grad_v_raw_comb + 1'b1 : grad_v_raw_comb;
 
-    // Ref semantics:
-    //   grad = round(|grad_h| / 5) + round(|grad_v| / 5)
-    // Do not collapse into round((|grad_h| + |grad_v|) / 5); that changes
-    // the fixed-point behavior and produces observable 1-LSB differences.
+    // comb: gradient magnitude (ref semantics: round(|grad_h|/5) + round(|grad_v|/5))
     wire [GRAD_WIDTH-1:0] grad_h_div5_comb = (grad_h_abs_comb + 3'd2) / 3'd5;
     wire [GRAD_WIDTH-1:0] grad_v_div5_comb = (grad_v_abs_comb + 3'd2) / 3'd5;
     wire [GRAD_WIDTH:0]   grad_sum_full = grad_h_div5_comb + grad_v_div5_comb;
@@ -324,21 +319,21 @@ module stage1_gradient #(
     wire [GRAD_WIDTH-1:0] grad_sum_comb = grad_sum_overflow ?
                                           {GRAD_WIDTH{1'b1}} : grad_sum_full[GRAD_WIDTH-1:0];
 
-    // Neighbor gradients shift register (need to maintain across cycles)
+    // comb: neighbor gradients shift register (for max finding)
     reg [GRAD_WIDTH-1:0] grad_l_reg, grad_r_reg;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             grad_l_reg <= {GRAD_WIDTH{1'b0}};
             grad_r_reg <= {GRAD_WIDTH{1'b0}};
-        end else if (enable && stage1_din_ready) begin
+        end else if (enable && pipe_out_din_ready) begin
             grad_r_reg <= grad_l_reg;
             grad_l_reg <= grad_sum_comb;
         end
     end
 
     //=========================================================================
-    // Cycle 2: Pack and Pipeline
+    ////// pipe stage 2: pack and pipeline
     //=========================================================================
     // din_valid: from pipe_s1 output valid
     assign pipe_s2_din_valid = pipe_s1_dout_valid;
@@ -346,12 +341,10 @@ module stage1_gradient #(
     assign pipe_s2_din_ready = pipe_s3_din_ready;
     // din_shake: handshake indicator
     wire pipe_s2_din_shake = pipe_s2_din_valid & pipe_s2_din_ready;
-
-    // Pack signals for pipeline
+    // data pack for pipeline register input
     wire [PIPE_S2_WIDTH-1:0] pipe_s2_din = {grad_h_abs_comb, grad_v_abs_comb, grad_sum_comb,
-                                            pixel_x_s1, pixel_y_s1, center_s1, pipe_s1_dout_valid};
+                                            pixel_x_s1, pixel_y_s1, center_s1, pipe_s2_din_valid};
     wire [PIPE_S2_WIDTH-1:0] pipe_s2_dout;
-
     // dout_ready: from pipe_s3
     assign pipe_s2_dout_ready = pipe_s3_din_ready;
 
@@ -370,7 +363,7 @@ module stage1_gradient #(
         .dout_ready (pipe_s2_dout_ready)
     );
 
-    // Unpack signals
+    // data unpack from pipe_s2 output
     wire [GRAD_WIDTH-1:0]       grad_h_abs_s2 = pipe_s2_dout[PIPE_S2_WIDTH-1 -: GRAD_WIDTH];
     wire [GRAD_WIDTH-1:0]       grad_v_abs_s2 = pipe_s2_dout[PIPE_S2_WIDTH-1-GRAD_WIDTH -: GRAD_WIDTH];
     wire [GRAD_WIDTH-1:0]       grad_sum_s2   = pipe_s2_dout[PIPE_S2_WIDTH-1-2*GRAD_WIDTH -: GRAD_WIDTH];
@@ -379,13 +372,14 @@ module stage1_gradient #(
     wire [DATA_WIDTH-1:0]       center_s2     = pipe_s2_dout[1 +: DATA_WIDTH];
 
     //=========================================================================
-    // Cycle 3: Gradient Maximum (Combinational)
+    ////// pipe stage 3: gradient max finding
     //=========================================================================
+    // comb: gradient maximum (neighbor tracking)
     wire [GRAD_WIDTH-1:0] max_0_1 = (grad_l_reg >= grad_sum_s2) ? grad_l_reg : grad_sum_s2;
     wire [GRAD_WIDTH-1:0] grad_max_comb = (max_0_1 >= grad_r_reg) ? max_0_1 : grad_r_reg;
 
     //=========================================================================
-    // Cycle 3: Pack and Pipeline
+    ////// pipe stage 3: pack and pipeline
     //=========================================================================
     // din_valid: from pipe_s2 output valid
     assign pipe_s3_din_valid = pipe_s2_dout_valid;
@@ -393,12 +387,10 @@ module stage1_gradient #(
     assign pipe_s3_din_ready = pipe_out_din_ready;
     // din_shake: handshake indicator
     wire pipe_s3_din_shake = pipe_s3_din_valid & pipe_s3_din_ready;
-
-    // Pack signals for pipeline
+    // data pack for pipeline register input
     wire [PIPE_S3_WIDTH-1:0] pipe_s3_din = {grad_max_comb, grad_sum_s2, grad_h_abs_s2, grad_v_abs_s2,
-                                            pixel_x_s2, pixel_y_s2, center_s2, pipe_s2_dout_valid};
+                                            pixel_x_s2, pixel_y_s2, center_s2, pipe_s3_din_valid};
     wire [PIPE_S3_WIDTH-1:0] pipe_s3_dout;
-
     // dout_ready: from pipe_out
     assign pipe_s3_dout_ready = pipe_out_din_ready;
 
@@ -417,7 +409,7 @@ module stage1_gradient #(
         .dout_ready (pipe_s3_dout_ready)
     );
 
-    // Unpack signals
+    // data unpack from pipe_s3 output
     wire [GRAD_WIDTH-1:0]       grad_max_s3   = pipe_s3_dout[PIPE_S3_WIDTH-1 -: GRAD_WIDTH];
     wire [GRAD_WIDTH-1:0]       grad_sum_s3   = pipe_s3_dout[PIPE_S3_WIDTH-1-GRAD_WIDTH -: GRAD_WIDTH];
     wire [GRAD_WIDTH-1:0]       grad_h_abs_s3 = pipe_s3_dout[PIPE_S3_WIDTH-1-2*GRAD_WIDTH -: GRAD_WIDTH];
@@ -427,14 +419,16 @@ module stage1_gradient #(
     wire [DATA_WIDTH-1:0]       center_s3     = pipe_s3_dout[1 +: DATA_WIDTH];
 
     //=========================================================================
-    // Cycle 4: Window Size LUT (Combinational)
+    ////// pipe stage out: window size LUT
     //=========================================================================
+    // comb: gradient max extension for LUT
     wire [LUT_X_WIDTH-1:0] grad_max_ext = {1'b0, grad_max_s3};
     wire [LUT_X_WIDTH-1:0] lut_x0 = {{GRAD_WIDTH{1'b0}}, 1'b1} << win_size_clip_sft_0;
     wire [LUT_X_WIDTH-1:0] lut_x1 = lut_x0 + ({{GRAD_WIDTH{1'b0}}, 1'b1} << win_size_clip_sft_1);
     wire [LUT_X_WIDTH-1:0] lut_x2 = lut_x1 + ({{GRAD_WIDTH{1'b0}}, 1'b1} << win_size_clip_sft_2);
     wire [LUT_X_WIDTH-1:0] lut_x3 = lut_x2 + ({{GRAD_WIDTH{1'b0}}, 1'b1} << win_size_clip_sft_3);
 
+    // comb: window size interpolation
     wire [LUT_Y_WIDTH-1:0] win_size_grad_comb =
         (grad_max_ext <= lut_x0) ? {1'b0, win_size_clip_y_0} :
         (grad_max_ext >= lut_x3) ? {1'b0, win_size_clip_y_3} :
@@ -442,13 +436,14 @@ module stage1_gradient #(
         (grad_max_ext <= lut_x2) ? lut_interp_round(grad_max_ext, lut_x1, lut_x2, win_size_clip_y_1, win_size_clip_y_2) :
                                    lut_interp_round(grad_max_ext, lut_x2, lut_x3, win_size_clip_y_2, win_size_clip_y_3);
 
+    // comb: window size clipping
     wire [WIN_SIZE_WIDTH-1:0] win_size_comb =
         (win_size_grad_comb < 16) ? 6'd16 :
         (win_size_grad_comb > 40) ? 6'd40 :
                                     win_size_grad_comb[WIN_SIZE_WIDTH-1:0];
 
     //=========================================================================
-    // Output Stage: Pack and Pipeline (Cycle 4)
+    ////// pipe stage out: pack and pipeline
     //=========================================================================
     // din_valid: from pipe_s3 output valid
     assign pipe_out_din_valid = pipe_s3_dout_valid;
@@ -456,13 +451,13 @@ module stage1_gradient #(
     assign pipe_out_din_ready = stage1_din_ready;
     // din_shake: handshake indicator
     wire pipe_out_din_shake = pipe_out_din_valid & pipe_out_din_ready;
-
-    // Pack output signals
+    // data pack for pipeline register input
     localparam PIPE_OUT_WIDTH = 3 * GRAD_WIDTH + WIN_SIZE_WIDTH + LINE_ADDR_WIDTH + ROW_CNT_WIDTH + DATA_WIDTH + 1;
     wire [PIPE_OUT_WIDTH-1:0] pipe_out_din = {grad_h_abs_s3, grad_v_abs_s3, grad_sum_s3, win_size_comb,
                                               pixel_x_s3, pixel_y_s3, center_s3, pipe_out_din_valid};
-
     wire [PIPE_OUT_WIDTH-1:0] pipe_out_dout;
+    // dout_ready: to downstream
+    assign pipe_out_dout_ready = stage1_din_ready;
 
     common_pipe_slice #(
         .DATA_WIDTH (PIPE_OUT_WIDTH),
@@ -476,10 +471,13 @@ module stage1_gradient #(
         .din_ready  (pipe_out_din_ready),
         .dout       (pipe_out_dout),
         .dout_valid (stage1_dout_valid),
-        .dout_ready (pipe_out_din_ready)
+        .dout_ready (pipe_out_dout_ready)
     );
 
-    // Unpack output signals
+    //=========================================================================
+    ////// dout
+    //=========================================================================
+    // data unpack from pipe_out output
     assign grad_h        = pipe_out_dout[PIPE_OUT_WIDTH-1 -: GRAD_WIDTH];
     assign grad_v        = pipe_out_dout[PIPE_OUT_WIDTH-1-GRAD_WIDTH -: GRAD_WIDTH];
     assign grad          = pipe_out_dout[PIPE_OUT_WIDTH-1-2*GRAD_WIDTH -: GRAD_WIDTH];
@@ -488,7 +486,9 @@ module stage1_gradient #(
     assign pixel_y_out   = pipe_out_dout[DATA_WIDTH + 1 +: ROW_CNT_WIDTH];
     assign center_pixel  = pipe_out_dout[1 +: DATA_WIDTH];
 
-    // Output delayed window (5 cycles aligned with pipeline)
+    //=========================================================================
+    ////// window output (5 cycles delay aligned with pipeline)
+    //=========================================================================
     assign win_out_0_0 = win_dly[4][0][0]; assign win_out_0_1 = win_dly[4][0][1];
     assign win_out_0_2 = win_dly[4][0][2]; assign win_out_0_3 = win_dly[4][0][3];
     assign win_out_0_4 = win_dly[4][0][4];
