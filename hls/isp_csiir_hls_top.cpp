@@ -129,34 +129,6 @@ public:
     ISPCSIIR() {}
     ISPCSIIR(const Config& c) : cfg(c) {}
 
-    //-------------------------------------------------------------------------
-    // Process single pixel from window
-    //-------------------------------------------------------------------------
-    pixel_t process_pixel(const pixel_t window[PATCH_SIZE]) {
-        s11_t patch_s11[PATCH_SIZE];
-        #pragma HLS ARRAY_PARTITION variable=patch_s11 complete
-        for (int i = 0; i < PATCH_SIZE; i++) {
-            patch_s11[i] = u10_to_s11(window[i]);
-        }
-
-        grad_t grad_h, grad_v, grad;
-        sobel_gradient_5x5(window, grad_h, grad_v, grad);
-
-        int win_size = lut_win_size((int)grad);
-
-        DirAvgResult dir_avg = compute_directional_avg(patch_s11, win_size);
-
-        FusionResult fusion = compute_gradient_fusion(dir_avg, 0, 0, 0, (int)grad, (int)grad);
-
-        s11_t final_patch[PATCH_SIZE];
-        #pragma HLS ARRAY_PARTITION variable=final_patch complete
-        compute_iir_blend(patch_s11, win_size, fusion.blend0, fusion.blend1,
-                         dir_avg.avg0_u, dir_avg.avg1_u,
-                         (int)grad_h, (int)grad_v, final_patch);
-
-        return s11_to_u10(final_patch[12]);
-    }
-
 private:
     //-------------------------------------------------------------------------
     // Sobel Gradient (5x5)
