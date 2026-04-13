@@ -1,10 +1,10 @@
 //==============================================================================
-// ISP-CSIIR HLS Top Module - Class-based Clean Interface
+// ISP-CSIIR HLS Top Module - Stream-based Processing with ISPCSIIR Class
 //==============================================================================
 // Features:
 //   - ISPCSIIR class for clean instantiation in HLS tool
 //   - 1PSRAM (1-port) memory with doubled bit width for time-multiplexing
-//   - Supports AXI-Stream and Memory-Mapped interfaces
+//   - AXI-Stream interface for streaming pixel processing
 //==============================================================================
 
 #ifndef ISP_CSIIR_HLS_TOP_HPP
@@ -128,31 +128,6 @@ public:
 
     ISPCSIIR() {}
     ISPCSIIR(const Config& c) : cfg(c) {}
-
-    //-------------------------------------------------------------------------
-    // Process image from input array to output array (memory-mapped)
-    //-------------------------------------------------------------------------
-    void process_mem(pixel_t input[MAX_HEIGHT][MAX_WIDTH],
-                    pixel_t output[MAX_HEIGHT][MAX_WIDTH]) {
-        pixel_t window[PATCH_SIZE];
-
-        for (int row = 0; row < cfg.img_height; row++) {
-            for (int col = 0; col < cfg.img_width; col++) {
-                #pragma HLS PIPELINE II=1
-
-                // Build 5x5 window with boundary handling
-                for (int dy = -2; dy <= 2; dy++) {
-                    for (int dx = -2; dx <= 2; dx++) {
-                        int win_row = clip<int>(row + dy, 0, cfg.img_height - 1);
-                        int win_col = clip<int>(col + dx * 2, 0, cfg.img_width - 1);
-                        window[(dy + 2) * 5 + (dx + 2)] = input[win_row][win_col];
-                    }
-                }
-
-                output[row][col] = process_pixel(window);
-            }
-        }
-    }
 
     //-------------------------------------------------------------------------
     // Process single pixel from window
@@ -473,12 +448,8 @@ private:
 };
 
 //==============================================================================
-// HLS Top Functions - Instantiate ISPCSIIR Class
+// HLS Top Function - AXI-Stream Interface
 //==============================================================================
-
-//------------------------------------------------------------------------------
-// AXI-Stream Top Function
-//------------------------------------------------------------------------------
 void isp_csiir_top(
     hls::stream<axis_pixel_t> &din_stream,
     hls::stream<axis_pixel_t> &dout_stream,
@@ -551,6 +522,7 @@ void isp_csiir_top(
     #pragma HLS ARRAY_PARTITION variable=src_s11_5x5 complete
 
     grad_t current_grad = 0;
+    grad_t grad_u, grad_d, grad_l, grad_r;
 
     unsigned int total_pixels = (unsigned int)img_width * (unsigned int)img_height;
 
@@ -580,13 +552,14 @@ void isp_csiir_top(
         grad_next_row_delay[j] = 0;
     }
 
-    // Main processing loop
+    // Main processing loop - streaming pixel-by-pixel
     for (unsigned int pixel_idx = 0; pixel_idx < total_pixels; pixel_idx++) {
         #pragma HLS PIPELINE II=1 rewind
 
         unsigned int row_val = pixel_idx / (unsigned int)img_width;
         unsigned int col_val = pixel_idx % (unsigned int)img_width;
 
+        // Read input pixel from stream
         axis_pixel_t din = din_stream.read();
 
         // Shift and update line buffer (1PSRAM access)
@@ -682,62 +655,19 @@ void isp_csiir_top(
 
         pixel_t dout_pixel = s11_to_u10(final_patch[12]);
 
+        // Write output pixel to stream
         axis_pixel_t dout;
         dout.data = dout_pixel;
         dout.last = (row_val == (unsigned int)img_height - 1 && col_val == (unsigned int)img_width - 1) ? 1 : 0;
         dout.user = (row_val == 0 && col_val == 0) ? 1 : 0;
 
+        // Only output after 2 row delay to account for window
         if (row_val >= 2) {
             dout_stream.write(dout);
         }
 
         current_grad = grad;
     }
-}
-
-//------------------------------------------------------------------------------
-// Memory-Mapped Top Function
-//------------------------------------------------------------------------------
-void isp_csiir_process_image(
-    pixel_t input[MAX_HEIGHT][MAX_WIDTH],
-    pixel_t output[MAX_HEIGHT][MAX_WIDTH],
-    ap_uint<16> img_width,
-    ap_uint<16> img_height,
-    ap_uint<8> win_thresh0, ap_uint<8> win_thresh1,
-    ap_uint<8> win_thresh2, ap_uint<8> win_thresh3,
-    ap_uint<8> blend_ratio0, ap_uint<8> blend_ratio1,
-    ap_uint<8> blend_ratio2, ap_uint<8> blend_ratio3,
-    ap_uint<8> edge_protect
-) {
-    #pragma HLS INTERFACE m_axi port=input offset=slave bundle=gmem
-    #pragma HLS INTERFACE m_axi port=output offset=slave bundle=gmem
-    #pragma HLS INTERFACE s_axilite port=img_width bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=img_height bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=win_thresh0 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=win_thresh1 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=win_thresh2 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=win_thresh3 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=blend_ratio0 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=blend_ratio1 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=blend_ratio2 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=blend_ratio3 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=edge_protect bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=return bundle=CTRL
-
-    ISPCSIIR isp;
-    isp.cfg.img_width = (int)img_width;
-    isp.cfg.img_height = (int)img_height;
-    isp.cfg.win_size_thresh[0] = (int)win_thresh0;
-    isp.cfg.win_size_thresh[1] = (int)win_thresh1;
-    isp.cfg.win_size_thresh[2] = (int)win_thresh2;
-    isp.cfg.win_size_thresh[3] = (int)win_thresh3;
-    isp.cfg.blending_ratio[0] = (int)blend_ratio0;
-    isp.cfg.blending_ratio[1] = (int)blend_ratio1;
-    isp.cfg.blending_ratio[2] = (int)blend_ratio2;
-    isp.cfg.blending_ratio[3] = (int)blend_ratio3;
-    isp.cfg.reg_edge_protect = (int)edge_protect;
-
-    isp.process_mem(input, output);
 }
 
 #endif // ISP_CSIIR_HLS_TOP_HPP
