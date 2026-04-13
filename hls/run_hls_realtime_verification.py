@@ -71,42 +71,67 @@ class HLSModelRunner:
             return False
         return True
 
-    def run(self, pattern: str, stimulus: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+    def run(self, pattern: str, stimulus: Optional[np.ndarray] = None,
+            config: Optional['HLSTestConfig'] = None) -> Optional[np.ndarray]:
         """
-        Run HLS model with given pattern or stimulus.
+        Run HLS model with given pattern or stimulus and configuration.
 
-        The standalone tb has hardcoded 64x64 dimensions and generates
-        its own input based on pattern. We can optionally provide a
-        pre-generated input file.
+        Args:
+            pattern: Test pattern type ('random', 'zero', 'ramp', etc.)
+            stimulus: Input image array (if None, generated from pattern)
+            config: HLSTestConfig with image dimensions and parameters
 
         Returns:
-            Output image as numpy array (64x64), or None on failure
+            Output image as numpy array, or None on failure
         """
         if not self.compile_if_needed():
             return None
 
-        # Write stimulus to temp file if provided (must be 64x64)
+        # Use config or default
+        if config is None:
+            config = HLSTestConfig()
+
+        width = config.img_width
+        height = config.img_height
+
+        # Write stimulus to temp file
         stimulus_file = SCRIPT_DIR / "_hls_stimulus.hex"
         output_file = SCRIPT_DIR / "_hls_output.hex"
+        config_file = SCRIPT_DIR / "_hls_config.txt"
 
         if stimulus is not None:
-            if stimulus.shape != (64, 64):
-                print(f"  Warning: HLS model only supports 64x64, got {stimulus.shape}")
+            if stimulus.shape != (height, width):
+                print(f"  Warning: Stimulus shape {stimulus.shape} != config {width}x{height}")
                 return None
-            # Match C++ dump_image_hex format: one hex value per line
+            # Write input hex file
             with open(stimulus_file, 'w') as f:
                 for val in stimulus.flatten():
                     f.write(f"{val:03x}\n")
+
+        # Write config file
+        with open(config_file, 'w') as f:
+            f.write(f"win_size_thresh={','.join(map(str, config.win_size_thresh))}\n")
+            f.write(f"win_size_clip_y={','.join(map(str, config.win_size_clip_y))}\n")
+            f.write(f"win_size_clip_sft={','.join(map(str, config.win_size_clip_sft))}\n")
+            f.write(f"blending_ratio={','.join(map(str, config.blending_ratio))}\n")
+            f.write(f"edge_protect={config.reg_edge_protect}\n")
 
         # Clean up old output
         if output_file.exists():
             output_file.unlink()
 
-        # Build command
+        # Build command with config
+        cmd = [
+            str(self.tb_exe),
+            "--width", str(width),
+            "--height", str(height),
+            "--config", str(config_file),
+        ]
         if stimulus is not None:
-            cmd = [str(self.tb_exe), "-i", str(stimulus_file)]
-        else:
-            cmd = [str(self.tb_exe), pattern]
+            cmd.extend(["-i", str(stimulus_file)])
+
+        if stimulus is None:
+            cmd.append(pattern)
 
         try:
             result = subprocess.run(
@@ -141,11 +166,12 @@ class HLSModelRunner:
                     except ValueError:
                         pass
 
-        if len(output) != 64 * 64:
-            print(f"  HLS output size mismatch: expected {64*64}, got {len(output)}")
+        expected_size = width * height
+        if len(output) != expected_size:
+            print(f"  HLS output size mismatch: expected {expected_size}, got {len(output)}")
             return None
 
-        return np.array(output, dtype=np.int32).reshape((64, 64))
+        return np.array(output, dtype=np.int32).reshape((height, width))
 
 
 # ============================================================================
@@ -695,18 +721,26 @@ class HLSRealtimeVerification:
 
     def run_single_test(self, seed: int, pattern: str = 'random',
                         img_size: Tuple[int, int] = (64, 64)) -> TestResult:
-        """Run a single test"""
+        """Run a single test with random configuration"""
         print(f"\n{'='*60}")
         print(f"Test seed={seed}, pattern={pattern}")
         print(f"{'='*60}")
 
-        # Use default config (HLS standalone has hardcoded defaults)
-        config = HLSTestConfig()  # Uses default values
-        config.img_width = 64
-        config.img_height = 64
+        # Generate random configuration
+        gen = HLSConfigGenerator(seed)
+        config = gen.generate_random_config(
+            img_size_range=(max(16, img_size[0] - 16), min(128, img_size[0] + 16)),
+            thresh_range=(8, 48),
+            clip_y_range=(8, 48),
+            blend_range=(8, 56),
+            sft_range=(1, 4)
+        )
+        config.img_width = img_size[0]
+        config.img_height = img_size[1]
+
+        print(f"  Config: {config}")
 
         # Generate stimulus using same seed for reproducibility
-        gen = HLSConfigGenerator(seed)
         stimulus = gen.generate_stimulus(config, pattern)
         print(f"  Stimulus: {pattern}, shape={stimulus.shape}, range=[{stimulus.min()}, {stimulus.max()}]")
 
@@ -718,7 +752,7 @@ class HLSRealtimeVerification:
 
         # Run HLS model with the stimulus
         print("  Running HLS model...")
-        hls_output = self.hls_runner.run(pattern, stimulus)
+        hls_output = self.hls_runner.run(pattern, stimulus, config)
 
         if hls_output is None:
             print("  FAILED: HLS model run failed")
