@@ -764,3 +764,113 @@ common_pipe_slice ... u_pipe_s1 (...);
 | 例化区域含assign | `assign stage1_ready = ...` 在例化区 | 将assign移到logic块 |
 | 延迟链信号名不匹配 | `pipe_s1_din_var_0_delay_1` 但输入是 `pipe_s0_din_var_0` | `u_pipe_s0_din_var_0_delay_1` 输入 `pipe_s0_din_var_0` |
 | 握手信号连接错误 | `pipe_s0_din_ready = stage1_ready` | `pipe_s0_din_ready = pipe_s1_din_ready` |
+
+## ISP-CSIIR Pipeline 架构规范
+
+### 模块命名规范
+
+**原则：功能命名 + 流水线位置在Top实例化时标注**
+
+| 旧命名 | 新命名 | 说明 |
+|--------|--------|------|
+| `stage1_gradient` | `isp_csiir_gradient` | 功能名 + `isp_csiir_`前缀 |
+| `stage2_directional_avg` | `isp_csiir_directional_avg` | 同上 |
+| `stage3_gradient_fusion` | `isp_csiir_gradient_fusion` | 同上 |
+| `stage4_iir_blend` | `isp_csiir_iir_blend` | 同上 |
+
+**Top实例化时标注stage位置：**
+```verilog
+// 模块定义：isp_csiir_gradient (功能名)
+// Top实例化：u_stage1, u_stage2, u_stage3, u_stage4 (标注位置)
+isp_csiir_gradient u_stage1 (...);
+isp_csiir_directional_avg u_stage2 (...);
+```
+
+### Stage间数据传递规范
+
+**原则：Column数据传递，Patch组装在模块内部完成**
+
+**旧架构（不推荐）：**
+```
+line_buffer → [stage1: window输入/window输出] → [stage2: window输入] → ...
+```
+- 问题：模块耦合度高，难以复用
+- 每个stage直接传递5x5 window数据
+
+**新架构（推荐）：**
+```
+line_buffer → [stage1: column输入，内部组patch，column输出] → [stage2: column输入，内部组patch] → ...
+```
+- 优点：模块独立性强，可复用
+- 各模块根据需要自行组装patch
+
+### Column接口定义
+
+**标准Column接口（5x1垂直像素）：**
+```verilog
+// 输入
+input  wire [DATA_WIDTH-1:0]  col_0,    // 第1行像素
+input  wire [DATA_WIDTH-1:0]  col_1,    // 第2行像素
+input  wire [DATA_WIDTH-1:0]  col_2,    // 第3行像素（中心行）
+input  wire [DATA_WIDTH-1:0]  col_3,    // 第4行像素
+input  wire [DATA_WIDTH-1:0]  col_4,    // 第5行像素
+input  wire                    column_valid,
+output wire                    column_ready,
+input  wire [LINE_ADDR_WIDTH-1:0] center_x,
+input  wire [ROW_CNT_WIDTH-1:0]   center_y,
+
+// 输出
+output wire [DATA_WIDTH-1:0]  out_col_0,   // 延迟后的column
+output wire [DATA_WIDTH-1:0]  out_col_1,
+output wire [DATA_WIDTH-1:0]  out_col_2,
+output wire [DATA_WIDTH-1:0]  out_col_3,
+output wire [DATA_WIDTH-1:0]  out_col_4,
+output wire                    dout_valid,
+input  wire                    dout_ready
+```
+
+### Patch组装模块复用
+
+**已存在的Patch组装模块：**
+- `isp_csiir_patch_assembler_5x5`：将5x1 column组装为5x5 window
+
+**模块内部使用示例：**
+```verilog
+// 在需要patch的模块内部实例化patch assembler
+isp_csiir_patch_assembler_5x5 #(
+    .IMG_WIDTH       (IMG_WIDTH),
+    .DATA_WIDTH      (DATA_WIDTH),
+    .LINE_ADDR_WIDTH (LINE_ADDR_WIDTH)
+) u_patch_assembler (
+    .clk           (clk),
+    .rst_n         (rst_n),
+    .enable        (enable),
+    .img_width     (img_width),
+    .col_0         (col_0),
+    .col_1         (col_1),
+    .col_2         (col_2),
+    .col_3         (col_3),
+    .col_4         (col_4),
+    .column_valid  (column_valid),
+    .column_ready  (column_ready),
+    .center_x      (center_x),
+    .center_y      (center_y),
+    // 输出5x5 window供内部使用
+    .window_0_0    (patch_window_0_0),
+    .window_0_1    (patch_window_0_1),
+    // ... 其他window信号
+    .window_valid  (patch_valid),
+    .window_ready  (patch_ready)
+);
+```
+
+### 模块重构检查清单
+
+当进行ISP模块重构时，检查以下内容：
+
+- [ ] 模块命名使用 `isp_csiir_*` 格式
+- [ ] 接口使用 column 形式（非 window）
+- [ ] 需要patch的模块内部实例化 `isp_csiir_patch_assembler_5x5`
+- [ ] 输出使用 `out_col_*` 形式传递column给下游
+- [ ] Top中实例名标注stage位置（如 `u_stage1`）
+- [ ] 计算结果和位置信息通过标准握手信号传递

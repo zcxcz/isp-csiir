@@ -89,8 +89,18 @@ module isp_csiir_top #(
     wire [DATA_WIDTH-1:0]       window [0:4][0:4];
     wire                        window_valid;
     wire                        window_ready;
+    wire                        window_accept_ready;
+    wire                        window_row_issue_allow;
+    wire                        window_valid_stage1;
     wire [LINE_ADDR_WIDTH-1:0]  center_x;
     wire [ROW_CNT_WIDTH-1:0]    center_y;
+    // Column interface (for isp_csiir_gradient)
+    wire [DATA_WIDTH-1:0]       lb_col_0;
+    wire [DATA_WIDTH-1:0]       lb_col_1;
+    wire [DATA_WIDTH-1:0]       lb_col_2;
+    wire [DATA_WIDTH-1:0]       lb_col_3;
+    wire [DATA_WIDTH-1:0]       lb_col_4;
+    wire                        lb_column_valid;
 
     // Stage 1 interface
     wire [GRAD_WIDTH-1:0]       s1_grad_h, s1_grad_v, s1_grad;
@@ -160,6 +170,11 @@ module isp_csiir_top #(
     wire [LINE_ADDR_WIDTH-1:0]  s4_patch_center_x;
     wire [ROW_CNT_WIDTH-1:0]    s4_patch_center_y;
     wire [PATCH_WIDTH-1:0]      s4_patch_5x5;
+    reg  [ROW_CNT_WIDTH-1:0]    feedback_committed_row;
+    reg                         feedback_committed_valid;
+    wire                        patch_feedback_fire;
+    wire                        patch_row_commit_fire;
+    wire [ROW_CNT_WIDTH-1:0]    max_center_y_allow;
 
     // Video timing signals
     wire                        sof;
@@ -172,6 +187,33 @@ module isp_csiir_top #(
     // Bypass path
     reg [DATA_WIDTH-1:0]        dout_bypass;
     reg                         dout_valid_bypass;
+
+    assign patch_feedback_fire  = s4_patch_valid && s4_patch_ready;
+    assign patch_row_commit_fire = patch_feedback_fire && (s4_patch_center_x == cfg_img_width[LINE_ADDR_WIDTH-1:0] - 1'b1);
+    // Front-end row credit:
+    // - Only throttle new window issue at the top boundary.
+    // - Keep internal column/feedback draining unblocked.
+    // - Stage3 needs the next-row gradient, so the front-end must be allowed
+    //   to stay one extra row ahead of the latest fully committed feedback row.
+    //   Before any row commit lands, rows 0 and 1 are allowed to issue.
+    assign max_center_y_allow = feedback_committed_valid ? (feedback_committed_row + 2'd2)
+                                                         : {{(ROW_CNT_WIDTH-1){1'b0}}, 1'b1};
+    assign window_row_issue_allow = (center_y <= max_center_y_allow);
+    assign window_accept_ready = s1_ready && window_row_issue_allow;
+    assign window_valid_stage1 = window_valid && window_row_issue_allow;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            feedback_committed_row <= {{(ROW_CNT_WIDTH-1){1'b0}}, 1'b0};
+            feedback_committed_valid <= 1'b0;
+        end else if (sof) begin
+            feedback_committed_row <= {{(ROW_CNT_WIDTH-1){1'b0}}, 1'b0};
+            feedback_committed_valid <= 1'b0;
+        end else if (cfg_enable && !cfg_bypass && patch_row_commit_fire) begin
+            feedback_committed_row <= s4_patch_center_y;
+            feedback_committed_valid <= 1'b1;
+        end
+    end
 
     //=========================================================================
     // Register Block Instance
@@ -240,6 +282,7 @@ module isp_csiir_top #(
         .patch_center_x(s4_patch_center_x),
         .patch_center_y(s4_patch_center_y),
         .patch_5x5     (s4_patch_5x5),
+        .max_center_y_allow(max_center_y_allow),
         .window_0_0    (window[0][0]), .window_0_1 (window[0][1]),
         .window_0_2    (window[0][2]), .window_0_3 (window[0][3]),
         .window_0_4    (window[0][4]),
@@ -256,40 +299,50 @@ module isp_csiir_top #(
         .window_4_2    (window[4][2]), .window_4_3 (window[4][3]),
         .window_4_4    (window[4][4]),
         .window_valid  (window_valid),
-        .window_ready  (window_ready),
+        .window_ready  (window_accept_ready),
         .center_x      (center_x),
-        .center_y      (center_y)
+        .center_y      (center_y),
+        // Column output (for isp_csiir_gradient)
+        .lb_col_0      (lb_col_0),
+        .lb_col_1      (lb_col_1),
+        .lb_col_2      (lb_col_2),
+        .lb_col_3      (lb_col_3),
+        .lb_col_4      (lb_col_4),
+        .lb_column_valid (lb_column_valid),
+        .lb_column_ready (window_accept_ready)
     );
 
     //=========================================================================
-    // Stage 1: Gradient Calculation
+    // Stage 1: Gradient Calculation (isp_csiir_gradient - column interface)
     //=========================================================================
-    stage1_gradient #(
-        .DATA_WIDTH    (DATA_WIDTH),
-        .GRAD_WIDTH    (GRAD_WIDTH),
+    // Note: This stage uses column-based interface for modularity
+    // - Receives 5x1 column from line buffer
+    // - Builds 5x5 window internally
+    // - Outputs column (for downstream) + computed results
+    //=========================================================================
+    isp_csiir_gradient #(
+        .IMG_WIDTH       (IMG_WIDTH),
+        .DATA_WIDTH      (DATA_WIDTH),
+        .GRAD_WIDTH      (GRAD_WIDTH),
+        .WIN_SIZE_WIDTH  (6),
         .LINE_ADDR_WIDTH (LINE_ADDR_WIDTH),
-        .ROW_CNT_WIDTH (ROW_CNT_WIDTH)
+        .ROW_CNT_WIDTH   (ROW_CNT_WIDTH)
     ) u_stage1 (
         .clk           (clk),
         .rst_n         (rst_n),
         .enable        (cfg_enable && !cfg_bypass),
-        .window_0_0    (window[0][0]), .window_0_1 (window[0][1]),
-        .window_0_2    (window[0][2]), .window_0_3 (window[0][3]),
-        .window_0_4    (window[0][4]),
-        .window_1_0    (window[1][0]), .window_1_1 (window[1][1]),
-        .window_1_2    (window[1][2]), .window_1_3 (window[1][3]),
-        .window_1_4    (window[1][4]),
-        .window_2_0    (window[2][0]), .window_2_1 (window[2][1]),
-        .window_2_2    (window[2][2]), .window_2_3 (window[2][3]),
-        .window_2_4    (window[2][4]),
-        .window_3_0    (window[3][0]), .window_3_1 (window[3][1]),
-        .window_3_2    (window[3][2]), .window_3_3 (window[3][3]),
-        .window_3_4    (window[3][4]),
-        .window_4_0    (window[4][0]), .window_4_1 (window[4][1]),
-        .window_4_2    (window[4][2]), .window_4_3 (window[4][3]),
-        .window_4_4    (window[4][4]),
-        .window_valid  (window_valid),
-        .window_ready  (window_ready),
+        // Column input from line buffer
+        .col_0         (lb_col_0),
+        .col_1         (lb_col_1),
+        .col_2         (lb_col_2),
+        .col_3         (lb_col_3),
+        .col_4         (lb_col_4),
+        .column_valid   (lb_column_valid),
+        .column_ready   (window_ready),
+        .center_x       (center_x),
+        .center_y       (center_y),
+        .img_width      (cfg_img_width[LINE_ADDR_WIDTH-1:0]),
+        // Configuration
         .win_size_clip_y_0 (cfg_clip_y_0),
         .win_size_clip_y_1 (cfg_clip_y_1),
         .win_size_clip_y_2 (cfg_clip_y_2),
@@ -298,33 +351,24 @@ module isp_csiir_top #(
         .win_size_clip_sft_1 (cfg_clip_sft_1),
         .win_size_clip_sft_2 (cfg_clip_sft_2),
         .win_size_clip_sft_3 (cfg_clip_sft_3),
+        // Output (computed results)
         .grad_h        (s1_grad_h),
         .grad_v        (s1_grad_v),
         .grad          (s1_grad),
         .win_size_clip (s1_win_size_clip),
-        .stage1_valid  (s1_valid),
-        .stage1_ready  (s1_ready),
-        .pixel_x       (center_x),
-        .pixel_y       (center_y),
+        .center_pixel  (s1_center_pixel),
+        .dout_valid    (s1_valid),
+        .dout_ready    (s1_ready),
+        // Position info
         .pixel_x_out   (s1_pixel_x),
         .pixel_y_out   (s1_pixel_y),
-        .center_pixel  (s1_center_pixel),
-        // Window output (delayed to align with pipeline)
-        .win_out_0_0   (s1_win_0_0), .win_out_0_1 (s1_win_0_1),
-        .win_out_0_2   (s1_win_0_2), .win_out_0_3 (s1_win_0_3),
-        .win_out_0_4   (s1_win_0_4),
-        .win_out_1_0   (s1_win_1_0), .win_out_1_1 (s1_win_1_1),
-        .win_out_1_2   (s1_win_1_2), .win_out_1_3 (s1_win_1_3),
-        .win_out_1_4   (s1_win_1_4),
-        .win_out_2_0   (s1_win_2_0), .win_out_2_1 (s1_win_2_1),
-        .win_out_2_2   (s1_win_2_2), .win_out_2_3 (s1_win_2_3),
-        .win_out_2_4   (s1_win_2_4),
-        .win_out_3_0   (s1_win_3_0), .win_out_3_1 (s1_win_3_1),
-        .win_out_3_2   (s1_win_3_2), .win_out_3_3 (s1_win_3_3),
-        .win_out_3_4   (s1_win_3_4),
-        .win_out_4_0   (s1_win_4_0), .win_out_4_1 (s1_win_4_1),
-        .win_out_4_2   (s1_win_4_2), .win_out_4_3 (s1_win_4_3),
-        .win_out_4_4   (s1_win_4_4)
+        // Column output (for downstream stages - TEMPORARY: using window output for now)
+        // TODO: Update downstream stages to use column interface
+        .out_col_0     (s1_win_0_2),  // Temporary mapping
+        .out_col_1     (s1_win_1_2),  // These will be replaced
+        .out_col_2     (s1_win_2_2),  // when stage2 is migrated
+        .out_col_3     (s1_win_3_2),
+        .out_col_4     (s1_win_4_2)
     );
 
     assign s1_patch_5x5 = {
