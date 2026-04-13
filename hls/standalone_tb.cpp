@@ -1,7 +1,14 @@
 //==============================================================================
-// ISP-CSIIR Standalone C2C Testbench
-// Compares C++ HLS model against Python fixed-point reference
-// Compile: g++ -std=c++17 -O2 -Wall -o standalone_tb standalone_tb.cpp
+// ISP-CSIIR Standalone Testbench
+// Uses isp_csiir_hls_standalone.cpp for HLS verification
+//
+// Usage:
+//   ./standalone_tb                        # Random pattern, 64x64
+//   ./standalone_tb zero                  # Zero input
+//   ./standalone_tb ramp                  # Ramp pattern
+//   ./standalone_tb -i input.hex           # Load input from file
+//   ./standalone_tb -o output.hex         # Save output to file
+//   ./standalone_tb -c ref.hex            # Compare with reference
 //==============================================================================
 
 #include <cstdio>
@@ -18,6 +25,10 @@ static const int IMG_H = 64;
 
 // Test pattern types
 enum PatternType { PAT_RANDOM, PAT_ZERO, PAT_RAMP, PAT_CHECKER, PAT_MAX };
+
+//==============================================================================
+// Stimulus Generation
+//==============================================================================
 
 void generate_stimulus(pixel_t img[IMG_H][IMG_W], PatternType pat) {
     switch (pat) {
@@ -43,7 +54,6 @@ void generate_stimulus(pixel_t img[IMG_H][IMG_W], PatternType pat) {
             break;
         case PAT_RANDOM:
         default:
-            // Fixed seed for reproducibility
             srand(42);
             for (int j = 0; j < IMG_H; j++)
                 for (int i = 0; i < IMG_W; i++)
@@ -52,30 +62,88 @@ void generate_stimulus(pixel_t img[IMG_H][IMG_W], PatternType pat) {
     }
 }
 
-void dump_image_hex(FILE* f, pixel_t img[IMG_H][IMG_W], int w, int h) {
-    for (int j = 0; j < h; j++) {
-        for (int i = 0; i < w; i++) {
+//==============================================================================
+// File I/O
+//==============================================================================
+
+void load_input(const char* filename, pixel_t img[IMG_H][IMG_W]) {
+    FILE* fin = fopen(filename, "r");
+    if (!fin) {
+        fprintf(stderr, "Error: Cannot open input file %s\n", filename);
+        exit(1);
+    }
+    for (int j = 0; j < IMG_H; j++) {
+        for (int i = 0; i < IMG_W; i++) {
+            int val;
+            if (fscanf(fin, "%x", &val) == 1) {
+                img[j][i] = (pixel_t)(val & 0x3FF);
+            }
+        }
+    }
+    fclose(fin);
+}
+
+void save_output(const char* filename, pixel_t img[IMG_H][IMG_W]) {
+    FILE* f = fopen(filename, "w");
+    if (!f) {
+        fprintf(stderr, "Error: Cannot open output file %s\n", filename);
+        exit(1);
+    }
+    for (int j = 0; j < IMG_H; j++) {
+        for (int i = 0; i < IMG_W; i++) {
             fprintf(f, "%03x\n", img[j][i] & 0x3FF);
         }
     }
+    fclose(f);
 }
 
-void process_image_standalone(const Config& cfg,
-                              const pixel_t input[IMG_H][IMG_W],
-                              pixel_t output[IMG_H][IMG_W],
-                              int img_w, int img_h) {
-    // Process each pixel using the new process_pixel_at function
-    for (int j = 0; j < img_h; j++) {
-        for (int i = 0; i < img_w; i++) {
-            output[j][i] = process_pixel_at(cfg, &input[0][0], img_w, img_h, i, j);
+void compare_with_reference(const char* ref_file, pixel_t img[IMG_H][IMG_W]) {
+    FILE* fref = fopen(ref_file, "r");
+    if (!fref) {
+        fprintf(stderr, "Error: Cannot open reference file %s\n", ref_file);
+        exit(1);
+    }
+
+    int max_diff = 0;
+    int total_diff = 0;
+    int diff_count = 0;
+
+    for (int j = 0; j < IMG_H; j++) {
+        for (int i = 0; i < IMG_W; i++) {
+            int val;
+            if (fscanf(fref, "%x", &val) == 1) {
+                int ref_val = val & 0x3FF;
+                int diff = (int)img[j][i] - ref_val;
+                if (diff != 0) {
+                    diff_count++;
+                    total_diff += std::abs(diff);
+                    max_diff = std::max(max_diff, std::abs(diff));
+                }
+            }
         }
+    }
+    fclose(fref);
+
+    printf("\n=== C++ vs Reference Comparison ===\n");
+    printf("Total pixels: %d\n", IMG_W * IMG_H);
+    printf("Pixels with diff: %d\n", diff_count);
+    printf("Max abs diff: %d\n", max_diff);
+    printf("Mean abs diff: %.2f\n", diff_count > 0 ? (double)total_diff / diff_count : 0.0);
+    if (diff_count == 0) {
+        printf("PASS: All outputs match!\n");
+    } else {
+        printf("FAIL: %d pixels differ\n", diff_count);
     }
 }
 
+//==============================================================================
+// Main
+//==============================================================================
+
 int main(int argc, char* argv[]) {
     PatternType pat = PAT_RANDOM;
-    bool compare_with_file = false;
     const char* input_file = nullptr;
+    const char* output_file = nullptr;
     const char* compare_file = nullptr;
 
     for (int i = 1; i < argc; i++) {
@@ -84,55 +152,68 @@ int main(int argc, char* argv[]) {
         else if (strcmp(argv[i], "ramp") == 0) pat = PAT_RAMP;
         else if (strcmp(argv[i], "checker") == 0) pat = PAT_CHECKER;
         else if (strcmp(argv[i], "random") == 0) pat = PAT_RANDOM;
-        else if (strcmp(argv[i], "-i") == 0 && i+1 < argc) {
+        else if (strcmp(argv[i], "-i") == 0 && i + 1 < argc) {
             input_file = argv[++i];
         }
-        else if (strcmp(argv[i], "-c") == 0 && i+1 < argc) {
+        else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            output_file = argv[++i];
+        }
+        else if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
             compare_file = argv[++i];
-            compare_with_file = true;
         }
     }
 
     const char* pat_names[] = {"random", "zero", "max", "ramp", "checker"};
-    printf("ISP-CSIIR Standalone C2C Testbench\n");
+    printf("ISP-CSIIR Standalone Testbench\n");
     printf("Pattern: %s, Image: %dx%d\n", pat_names[pat], IMG_W, IMG_H);
 
+    // Setup configuration
     Config cfg;
     cfg.img_width = IMG_W;
     cfg.img_height = IMG_H;
 
-    // Load or generate input
+    // Generate or load input
     pixel_t input[IMG_H][IMG_W];
     if (input_file) {
-        FILE* fin = fopen(input_file, "r");
-        if (!fin) {
-            printf("Error: Cannot open input file %s\n", input_file);
-            return 1;
-        }
-        for (int j = 0; j < IMG_H; j++) {
-            for (int i = 0; i < IMG_W; i++) {
-                int val;
-                if (fscanf(fin, "%x", &val) == 1) {
-                    input[j][i] = (pixel_t)(val & 0x3FF);
-                }
-            }
-        }
-        fclose(fin);
+        load_input(input_file, input);
         printf("Loaded input from %s\n", input_file);
     } else {
         generate_stimulus(input, pat);
     }
 
-    // Process
-    pixel_t output[IMG_H][IMG_W];
-    process_image_standalone(cfg, input, output, IMG_W, IMG_H);
+    // Flatten input for process function
+    pixel_t input_flat[IMG_H * IMG_W];
+    for (int j = 0; j < IMG_H; j++) {
+        for (int i = 0; i < IMG_W; i++) {
+            input_flat[j * IMG_W + i] = input[j][i];
+        }
+    }
 
-    // Dump output as hex
-    FILE* f = fopen("cpp_output.hex", "w");
-    if (f) {
-        dump_image_hex(f, output, IMG_W, IMG_H);
-        fclose(f);
-        printf("Output written to cpp_output.hex\n");
+    // Process using namespace function
+    printf("Running ISP-CSIIR...\n");
+    pixel_t output_flat[IMG_H * IMG_W];
+    for (int j = 0; j < IMG_H; j++) {
+        for (int i = 0; i < IMG_W; i++) {
+            output_flat[j * IMG_W + i] = process_pixel_at(cfg, input_flat, IMG_W, IMG_H, i, j);
+        }
+    }
+
+    // Reshape output
+    pixel_t output[IMG_H][IMG_W];
+    for (int j = 0; j < IMG_H; j++) {
+        for (int i = 0; i < IMG_W; i++) {
+            output[j][i] = output_flat[j * IMG_W + i];
+        }
+    }
+
+    // Save output to cpp_output.hex (always, for verification script compatibility)
+    save_output("cpp_output.hex", output);
+    printf("Output written to cpp_output.hex\n");
+
+    // Also save to custom file if requested
+    if (output_file) {
+        save_output(output_file, output);
+        printf("Output written to %s\n", output_file);
     }
 
     // Print statistics
@@ -147,7 +228,7 @@ int main(int argc, char* argv[]) {
     }
     printf("Output stats: min=%d, max=%d, avg=%.2f\n", min_v, max_v, (double)sum / (IMG_W * IMG_H));
 
-    // Dump first few rows for quick check
+    // Print first 4x4 for quick check
     printf("\nFirst 4x4 of output:\n");
     for (int j = 0; j < 4; j++) {
         for (int i = 0; i < 4; i++) {
@@ -157,46 +238,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Compare with reference if requested
-    if (compare_with_file && compare_file) {
-        FILE* fref = fopen(compare_file, "r");
-        if (!fref) {
-            printf("Error: Cannot open compare file %s\n", compare_file);
-            return 1;
-        }
-        pixel_t ref[IMG_H][IMG_W];
-        for (int j = 0; j < IMG_H; j++) {
-            for (int i = 0; i < IMG_W; i++) {
-                int val;
-                if (fscanf(fref, "%x", &val) == 1) {
-                    ref[j][i] = (pixel_t)(val & 0x3FF);
-                }
-            }
-        }
-        fclose(fref);
-
-        int max_diff = 0;
-        int total_diff = 0;
-        int diff_count = 0;
-        for (int j = 0; j < IMG_H; j++) {
-            for (int i = 0; i < IMG_W; i++) {
-                int diff = (int)output[j][i] - (int)ref[j][i];
-                if (diff != 0) {
-                    diff_count++;
-                    total_diff += std::abs(diff);
-                    max_diff = std::max(max_diff, std::abs(diff));
-                }
-            }
-        }
-        printf("\n=== C++ vs Reference Comparison ===\n");
-        printf("Total pixels: %d\n", IMG_W * IMG_H);
-        printf("Pixels with diff: %d\n", diff_count);
-        printf("Max abs diff: %d\n", max_diff);
-        printf("Mean abs diff: %.2f\n", diff_count > 0 ? (double)total_diff / diff_count : 0.0);
-        if (diff_count == 0) {
-            printf("PASS: All outputs match!\n");
-        } else {
-            printf("FAIL: %d pixels differ\n", diff_count);
-        }
+    if (compare_file) {
+        compare_with_reference(compare_file, output);
     }
 
     return 0;
