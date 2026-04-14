@@ -1,0 +1,26 @@
+{
+  "skill_name": "rtl-algo",
+  "evals": [
+    {
+      "id": 1,
+      "name": "iir-filter-design",
+      "prompt": "我需要为图像处理设计一个 IIR 滤波器算法。输入是 8-bit 灰度图像像素，要求实现一阶 IIR 低通滤波，输出需要和输入保持相同的 8-bit 范围。请帮我开发定点化模型，分析各级位宽，并生成验证 pattern。",
+      "expected_output": "完整的定点化 IIR 滤波器模型，包括位宽分析和 pattern 输出",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "gradient-computation",
+      "prompt": "设计一个图像梯度计算算法用于边缘检测。输入是 8-bit 图像，需要计算 Sobel 梯度的幅值和方向。输出梯度幅值需要归一化到 8-bit。请分析硬件实现中除法运算的简化方案，并给出定点化模型。",
+      "expected_output": "梯度计算的定点化模型，包含除法简化方案和位宽分析",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "fixed-point-precision-debug",
+      "prompt": "我正在做一个 FIR 滤波器的定点化设计。RTL 仿真结果和我的定点化模型在第 1024 个采样点处出现了偏差：RTL 输出 0x7F3A，模型输出 0x7F3B。相差 1 LSB。请帮我分析可能的原因，并给出调试方法。",
+      "expected_output": "偏差分析和调试建议",
+      "files": []
+    }
+  ]
+}

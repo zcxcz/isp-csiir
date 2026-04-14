@@ -6,6 +6,7 @@ rtl/common/common_ff.v
 rtl/common/common_fifo.v
 rtl/common/common_lut_divider.v
 rtl/common/common_max_finder.v
+rtl/common/common_parallel_serializer.v
 rtl/common/common_pipe_slice.v
 rtl/common/common_pipe.v
 rtl/common/common_sram_model.v

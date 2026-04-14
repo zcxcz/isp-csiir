@@ -501,21 +501,21 @@ else:
                               blend1_win_5x5 * (8 - win_size_remain_8)
                           ) / 8
 
-# linebuffer 反馈更新规则：
+# linebuffer / stage 内部反馈更新规则：
 #   1. 模块按光栅顺序逐像素处理，即从左到右、从上到下；
-#   2. 对当前中心像素 (i, j)，先读取当前 linebuffer 中的 5x5 patch；
+#   2. 对当前中心像素 (i, j)，先读取当前可见 linebuffer 数据与 stage 内部暂存列，共同构成当前 5x5 patch；
 #   3. 基于该 patch 计算 blend_uv_5x5(i, j)；
-#   4. 然后将该 5x5 patch 的结果写回 linebuffer；
-#   5. 下一中心像素的计算，必须读取已经被上一中心像素更新后的 linebuffer 数据。
+#   4. 对于当前 patch 中，后续同一行中心像素仍会继续依赖的重叠列，不允许立刻写回 linebuffer，
+#      而应暂存在 stage 内部寄存器中；
+#   5. 仅当某一列已经成为“后续同一行 patch 不再依赖的安全列”时，才允许将该 5x1 列提交回 linebuffer；
+#   6. 到达右侧边界时，需要把 stage 内部尚未提交、且横向坐标仍在图像有效范围内的剩余列一次性释放到 linebuffer；
+#      因此在右侧边界附近，提交宽度会退化为：
+#        - 倒数第 2 个中心像素：释放剩余有效列，不允许 padding 列覆盖有效列；
+#        - 最后 1 个中心像素：释放最终剩余有效列，不允许 padding 列覆盖有效列。
 #
-# 因此，该算法是带反馈的迭代式 patch 更新，而不是彼此独立的卷积处理。
-
-for (h = -2; h <= 2; h++)
-    for (w = -4; w <= 4; w = w + 2)
-        src_uv_u10(
-            clip(i + w, 0, reg_pic_width_m1),
-            clip(j + h, 0, reg_pic_height_m1)
-        ) = clip(blend_uv_5x5(i, j)(w, h) + 512, 0, 1023)
+# 因此，算法语义上是“patch 计算 + 局部列暂存 + 安全列提交”的反馈过程，
+# linebuffer 只保存已经正式提交的历史结果；同一行 patch 的重叠部分由 stage 内部状态维护，
+# 不是把每个中心像素得到的整幅 5x5 patch 立刻回写到 linebuffer。
 ```
 
 ---
