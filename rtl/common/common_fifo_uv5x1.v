@@ -44,7 +44,8 @@ module common_fifo_uv5x1 #(
     input  wire [DATA_WIDTH*2-1:0] lb_row_2,
     input  wire [DATA_WIDTH*2-1:0] lb_row_3,
     input  wire [DATA_WIDTH*2-1:0] lb_row_4,  // row 4 (newest in linebuffer)
-    input  wire                  col_read_fire,  // pulse when column read completes
+    input  wire                  col_valid,   // column data valid
+    input  wire                  col_ready,    // column data consumed
 
     // UV5x1 output
     output wire [DATA_WIDTH*10-1:0] uv5x1_out,  // 5 pixels * 2 components
@@ -76,6 +77,9 @@ module common_fifo_uv5x1 #(
     wire fifo_full = (count >= FIFO_DEPTH);
 
     assign din_ready = !fifo_full;
+
+    // Column read fire when column data is consumed
+    wire col_read_fire = col_valid && col_ready;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -112,6 +116,13 @@ module common_fifo_uv5x1 #(
     // - Row 3: lb_row_3
     // - Row 4 (newest): din_from_fifo (current 2P)
     //
+    // UV5x1 bit layout (100 bits total):
+    // - bit [99:90] = u4, bit [89:80] = v4  (row 4, newest)
+    // - bit [79:70] = u3, bit [69:60] = v3  (row 3)
+    // - bit [59:50] = u2, bit [49:40] = v2  (row 2)
+    // - bit [39:30] = u1, bit [29:20] = v1  (row 1)
+    // - bit [19:10] = u0, bit [9:0] = v0    (row 0, oldest)
+    //
     // Each 2P = {v[9:0], u[9:0]}, so:
     // - upper 10 bits = v
     // - lower 10 bits = u
@@ -127,18 +138,23 @@ module common_fifo_uv5x1 #(
         end else if (enable) begin
             if (col_read_fire && !fifo_empty) begin
                 // Assemble UV5x1
-                // Each row: upper bits = v, lower bits = u
+                // Format: {u4, v4, u3, v3, u2, v2, u1, v1, u0, v0}
                 uv5x1_reg <= {
                     // Row 4 (newest): current 2P din
-                    din_from_fifo[DATA_WIDTH +: DATA_WIDTH], din_from_fifo[0 +: DATA_WIDTH],
+                    din_from_fifo[0 +: DATA_WIDTH],              // u4 = lower bits
+                    din_from_fifo[DATA_WIDTH +: DATA_WIDTH],     // v4 = upper bits
                     // Row 3: lb_row_4 (newest in LB)
-                    lb_row_4[DATA_WIDTH +: DATA_WIDTH], lb_row_4[0 +: DATA_WIDTH],
+                    lb_row_4[0 +: DATA_WIDTH],
+                    lb_row_4[DATA_WIDTH +: DATA_WIDTH],
                     // Row 2: lb_row_3
-                    lb_row_3[DATA_WIDTH +: DATA_WIDTH], lb_row_3[0 +: DATA_WIDTH],
+                    lb_row_3[0 +: DATA_WIDTH],
+                    lb_row_3[DATA_WIDTH +: DATA_WIDTH],
                     // Row 1: lb_row_2
-                    lb_row_2[DATA_WIDTH +: DATA_WIDTH], lb_row_2[0 +: DATA_WIDTH],
+                    lb_row_2[0 +: DATA_WIDTH],
+                    lb_row_2[DATA_WIDTH +: DATA_WIDTH],
                     // Row 0 (oldest): lb_row_1
-                    lb_row_1[DATA_WIDTH +: DATA_WIDTH], lb_row_1[0 +: DATA_WIDTH]
+                    lb_row_1[0 +: DATA_WIDTH],
+                    lb_row_1[DATA_WIDTH +: DATA_WIDTH]
                 };
                 uv5x1_valid_reg <= 1'b1;
             end else if (uv5x1_valid_reg && uv5x1_ready) begin

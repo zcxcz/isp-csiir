@@ -10,6 +10,7 @@ rtl/common/common_parallel_serializer.v
 rtl/common/common_s2p.v
 rtl/common/common_p2s.v
 rtl/common/common_fifo_uv5x1.v
+rtl/common/common_col_buffer.v
 rtl/common/common_pipe_slice.v
 rtl/common/common_pipe.v
 rtl/common/common_sram_model.v
