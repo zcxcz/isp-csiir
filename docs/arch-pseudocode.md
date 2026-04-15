@@ -14,24 +14,64 @@
 
 ## 1. 公共数据接口
 
-### 1.1 标准握手接口 (data_wi_fb_t)
+### 1.1 接口抽象约定
+
+接口是一组信号的集合，表现为结构体。可以是握手接口，也可以是一组数据。
+
+**命名后缀规则：**
+- `(in)` 后缀：输入端，发送方驱动
+- `(out)` 后缀：输出端，接收方驱动
+- 无后缀：默认为 `(in)`
+- 接口时，`_valid` 和数据由发送方驱动，`_ready` 由接收方驱动
+- 非接口数据（纯信号组）时，`(in)`/`(out)` 表示信号方向
+
+**示例：**
+```
+// 握手接口 (in) — 输入方驱动 valid+data，输出方驱动 ready
+data_wi_fb_t(in) {
+    din_valid,     // in: 发送方驱动
+    din,           // in: 发送方驱动
+    din_ready      // out: 接收方驱动
+}
+
+// 握手接口 (out) — 输出方驱动 valid+data，输入方驱动 ready
+data_wi_fb_t(out) {
+    dout_valid,    // out: 发送方驱动
+    dout,          // out: 发送方驱动
+    dout_ready     // in: 接收方驱动
+}
+
+// 非接口数据 (in) — 纯信号组输入
+coord_2d_t(in) {
+    px[PX_WIDTH-1:0],   // in: 坐标 x 输入
+    py[PY_WIDTH-1:0]    // in: 坐标 y 输入
+}
+
+// 非接口数据 (out) — 纯信号组输出
+image_size_2d_t(out) {
+    image_width[IW_WIDTH-1:0],  // out: 图像宽度输出
+    image_height[IH_WIDTH-1:0]  // out: 图像高度输出
+}
+```
+
+### 1.2 标准握手接口 (data_wi_fb_t)
 
 ```
-interface data_wi_fb_t {
-    output wire  data_valid,  // 发送方: 数据有效
-    input   wire  data_ready,  // 发送方: 接收方已就绪
-    output wire  data         // 数据载荷 (位宽自定义)
+interface data_wi_fb_t(in) {
+    din_valid,     // 发送方: 数据有效
+    din_ready,     // 接收方: 接收方已就绪
+    din            // 数据载荷 (位宽自定义)
 }
 ```
 
 约定：
-- `data_valid && data_ready` 在时钟上升沿同时为1时，数据传输成功
-- `data_valid` 只能由发送方驱动
-- `data_ready` 只能由接收方驱动
+- `din_valid && din_ready` 在时钟上升沿同时为1时，数据传输成功
+- `din_valid` 和 `din` 只能由发送方驱动
+- `din_ready` 只能由接收方驱动
 - 握手信号均为高有效
-- 多bit数据 `data` 的位宽在接口名后标注，如 `data_10b_t`
+- 多bit数据 `din` 的位宽在接口名后标注，如 `data_10b_t`
 
-### 1.2 UV5x1 矩阵格式
+### 1.3 UV5x1 矩阵格式
 
 ```
 uv5x1: 5行×2分量×DATA_WIDTH bits
@@ -49,7 +89,7 @@ uv5x1: 5行×2分量×DATA_WIDTH bits
 每行2P格式: {v[9:0], u[9:0]} (20 bits)
 ```
 
-### 1.3 列格式 (column)
+### 1.4 列格式 (column)
 
 ```
 column: 5像素并行, col_0=最老行, col_4=最新行
@@ -60,12 +100,12 @@ column: 5像素并行, col_0=最老行, col_4=最新行
   col_4: row=4 (newest)
 ```
 
-### 1.4 元数据接口 (meta_t)
+### 1.5 元数据接口 (meta_t)
 
 ```
-interface meta_t {
-    data_14b_t  center_x,  // 当前列的x坐标 (PIXEL addr, 非2P addr)
-    data_13b_t  center_y   // 当前列的y坐标 (PIXEL addr)
+interface meta_t(in) {
+    center_x[LINE_ADDR_WIDTH-1:0],  // 当前列的x坐标 (PIXEL addr)
+    center_y[ROW_CNT_WIDTH-1:0]     // 当前列的y坐标 (PIXEL addr)
 }
 ```
 
@@ -215,39 +255,51 @@ u_lb(isp_csiir_linebuffer_5row)   [Patch写回]
 
 ```
 参数: DATA_WIDTH=20 (2P), DEPTH=N
-输入: u_2p_wi_fb_t {din_valid, din_ready, din[DATA_WIDTH*2-1:0]}
-输出: u_2p_wi_fb_t {dout_valid, dout_ready, dout[DATA_WIDTH*2-1:0]}
-
-握手: wr侧 ← s2p.dout
-      rd侧 → distributor.din
+输入: data_wi_fb_t(in) {
+        din_valid, din_ready,      // wr侧握手
+        din[DATA_WIDTH*2-1:0]       // 2P数据
+      }
+输出: data_wi_fb_t(out) {
+        dout_valid, dout_ready,    // rd侧握手
+        dout[DATA_WIDTH*2-1:0]      // 2P数据
+      }
 ```
 
 ### 4.3 common_distributor
 
 ```
-根据 center_y 将2P数据路由到 linebuffer 的对应行
+根据 px/py 将2P数据路由到 linebuffer 的对应行
 
-输入: u_dist_wi_fb_t {
-        din_valid, din_ready,
-        din[DATA_WIDTH*2-1:0],     // 2P数据
-        center_x[LINE_ADDR_WIDTH-1:0],  // 当前像素x (2P addr, 需×2得PIXEL addr)
-        center_y[ROW_CNT_WIDTH-1:0]     // 当前像素y (PIXEL addr)
+输入: data_wi_fb_t(in) {
+        din_valid,              // in: 2P数据有效
+        din,                    // in: 2P数据 [DATA_WIDTH*2-1:0]
+        din_ready               // out: 接收方已就绪
+      }
+      coord_2d_t(in) {
+        px[LINE_ADDR_WIDTH-1:0],  // in: 当前像素x (PIXEL addr)
+        py[ROW_CNT_WIDTH-1:0]     // in: 当前像素y (PIXEL addr)
+      }
+      image_size_2d_t(in) {
+        img_width_cfg[IMG_W_WIDTH-1:0],
+        img_height_cfg[IMG_H_WIDTH-1:0]
       }
 
-输出: 5路写端口 (每路对应一行)
-      wr_row_0: {wr_en, wr_addr, wr_data}
-      wr_row_1: {wr_en, wr_addr, wr_data}
-      wr_row_2: {wr_en, wr_addr, wr_data}
-      wr_row_3: {wr_en, wr_addr, wr_data}
-      wr_row_4: {wr_en, wr_addr, wr_data}
+输出: 1psram_t(out) — 5路独立写端口 (每路对应一行)
+      wr_row_N_en:     wr_row_N的写使能
+      wr_row_N_even:   wr_row_N的偶像素数据 (对应px)
+      wr_row_N_odd:    wr_row_N的奇像素数据 (对应px+1)
+
+      N ∈ {0, 1, 2, 3, 4}
 
 逻辑:
-  wr_addr = center_x * 2         // 2P addr → PIXEL addr
-  wr_data = din                  // {v[9:0], u[9:0]}
-  wr_row_y = 1                   // center_y对应的行
-  wr_row_other = 0              // 其他行不写
+  wr_row_sel = py % NUM_ROWS    // 循环buffer选行
+  wr_data = din                  // 2P: {odd, even}
+  wr_row_sel对应的行 = 1          // 其他行 = 0
+  每周期最多写一行, py%NUM_ROWS决定写哪行
 
-  每周期最多写一行, center_y决定写哪行
+内部: wr_row_sel = py[log2(NUM_ROWS)-1:0]
+      din_even = din[0 +: DATA_WIDTH]   // px对应像素
+      din_odd  = din[DATA_WIDTH +: DATA_WIDTH] // px+1对应像素
 ```
 
 ### 4.4 isp_csiir_linebuffer_5row
@@ -259,16 +311,18 @@ u_lb(isp_csiir_linebuffer_5row)   [Patch写回]
   NUM_ROWS = 5
   IMG_WIDTH, DATA_WIDTH, LINE_ADDR_WIDTH
 
-写端口 (来自distributor):
-  输入: wr_wi_fb_t {
-          wr_row_sel[2:0],   // 写哪一行 (0~4)
-          wr_addr,            // PIXEL addr
-          wr_data[DATA_WIDTH*2-1:0]  // 2P
-        }
+写端口 (来自distributor, 1psram_t(in)):
+  输入: wr_row_N_en
+        wr_row_N_even    // px对应像素
+        wr_row_N_odd     // px+1对应像素
 
-读端口A (主线1: 4行老数据):
+  N ∈ {0, 1, 2, 3, 4}
+  每周期最多一行写使能=1
+  内部: wr_data = {odd, even}, 按行独立写入
+
+读端口A (主线1: 4行老数据 + din2P):
   输入: rd_req_wi_fb_t {rd_req, rd_addr}
-        rd_addr: PIXEL addr (不是2P addr)
+        rd_addr: PIXEL addr
   输出: 4路读数据 (lb_row_0~lb_row_3)
 
 读端口B (主线2: 5行完整窗口):
@@ -278,9 +332,9 @@ u_lb(isp_csiir_linebuffer_5row)   [Patch写回]
 
 Patch写回端口 (主线2→主线1):
   输入: patch_wi_fb_t {
-          patch_valid, patch_ready,
-          patch_center_x,
-          patch_center_y,
+          patch_valid, patch_ready,    // handshake
+          patch_center_x,              // PIXEL addr
+          patch_center_y,              // PIXEL addr
           patch_5x5[DATA_WIDTH*25-1:0]
         }
 
