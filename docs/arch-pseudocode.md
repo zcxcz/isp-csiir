@@ -120,30 +120,31 @@ din (YUV422, UV交替, 1P/cycle)
   │
   ▼
 u_s2p(common_s2p)           -- 1p_wi_fb_t -->
-u_fifo(common_fifo)          -- 2p_wi_fb_t -->
-u_dist(common_distributor)   -- 2p_wi_fb_t -->
+u_fifo(common_fifo)          -- 2p_wi_fb_t --> [反压链]
   │
-  │ wr_row = center_y (当前像素所在行)
-  │ wr_addr = center_x * 2 (PIXEL addr)
-  │ wr_data = 2P
+  │ wr_2p = 2P数据
+  │ wr_row_ptr = EOL时递增 (0→1→2→3→4→0), 循环选行
+  │ wr_col_ptr = 每像素递增, 控制waddr
+  │ fifo_valid_row_cnt = 有效数据行计数 (EOL时+1)
   ▼
-u_lb(linebuffer)             [纯SRAM存储, 无逻辑]
+u_lb(linebuffer)             [5×SRAM, 含内部distribution逻辑]
   │
-  ├─→ [读端口A: 4行 + din] ──────────────────────────────┐
-  │     rd_row = center_y - 4, -3, -2, -1 (4行老数据)    │ 4r_din_wi_fb_t
-  │     rd_addr = center_x                               │ 4行SRAM读出
-  │     din (最新2P)                                    │
-  │                                                       ▼
-  │                                              u_asmb_g(common_assembler_5x1)
-  │                                                   -- col5x1_wi_fb_t -->
-  │                                              u_grad(gradient) -- grad_wi_fb_t
-  │                                                       │
-  └───────────────────────────────────────────────────────┘
+  ├─→ [读端口G: grad_col5x1] ───────────────────────────────┐
+  │     grad_row_rd_ptr: 当前读取的行指针 (circular)          │ grad_col5x1_wi_fb_t
+  │     grad_col_rd_ptr: 列指针 (读地址)                      │ 4行老数据SRAM读出
+  │     输出 col_0~col_3 (4行) + din (最新2P→拆分为col_4)    │ + 当前din拼为第5列
+  │     有效条件: fifo_valid_row_cnt >= 4                    │
+  │                                                             ▼
+  │                                                      u_asmb_g(common_assembler_5x1)
+  │                                                           -- col5x1_wi_fb_t -->
+  │                                                      u_grad(gradient) -- grad_wi_fb_t
+  │                                                               │
+  └───────────────────────────────────────────────────────────────┘
 
 主线1输出: grad_h, grad_v, grad_max, win_size
 ```
 
-**就绪条件**: row>=4 后，4行+din可凑成5×5窗口，开始梯度计算。
+**就绪条件**: `fifo_valid_row_cnt >= 4` 后，4行+din可凑成5×5窗口，开始梯度计算。
 
 ### 主线2: Linebuffer + 梯度值 → Filter (滤波输出 + Patch写回)
 
@@ -178,26 +179,26 @@ din (YUV422, 1P/cycle)
   ▼
 u_s2p(common_s2p)           -- 2p_wi_fb_t -->
 u_fifo(common_fifo)          -- 2p_wi_fb_t --> [反压链]
-u_dist(common_distributor)   -- 2p_wi_fb_t -->
   │
-  │ wr_1p_t {wr_en, wr_addr, wr_data, wr_row_sel}
+  │ wr_2p: FIFO输出2P
+  │ EOL: 行结束信号 (驱动wr_row_ptr递增和valid_row_cnt更新)
   ▼
-u_lb(linebuffer)             [5×1P SRAM, 纯存储]
+u_lb(linebuffer)             [5×SRAM, 含内部distribution逻辑]
   │
-  ├─→ 4r_din_wi_fb_t ─→ u_asmb_g(common_assembler_5x1)
-  │                       -- col5x1_wi_fb_t -->
-  │                   u_grad(gradient)
-  │                       -- grad_wi_fb_t  --> 方向2
+  ├─→ grad_col5x1_wi_fb_t ─→ u_asmb_g(common_assembler_5x1)
+  │                           -- col5x1_wi_fb_t -->
+  │                       u_grad(gradient)
+  │                           -- grad_wi_fb_t  --> 方向2
   │
-  └─→ 5r_wi_fb_t ─→ u_asmb_f(common_assembler_5x1)
-                          -- col5x1_wi_fb_t -->
-                      u_filt2(stage2)
-                          -- dir_avg_wi_fb_t -->
-                      u_filt3(stage3)
-                          -- grad_fuse_wi_fb_t -->
-                      u_filt4(stage4)
-                          ├─→ dout (1P/cycle)
-                          └─→ patch_wi_fb_t --> u_lb (Patch写回)
+  └─→ filt_col5x1_wi_fb_t ─→ u_asmb_f(common_assembler_5x1)
+                              -- col5x1_wi_fb_t -->
+                          u_filt2(stage2)
+                              -- dir_avg_wi_fb_t -->
+                          u_filt3(stage3)
+                              -- grad_fuse_wi_fb_t -->
+                          u_filt4(stage4)
+                              ├─→ dout (1P/cycle)
+                              └─→ patch_wi_fb_t --> u_lb (Patch写回)
 ```
 
 ---
@@ -265,82 +266,109 @@ u_lb(isp_csiir_linebuffer_5row)   [Patch写回]
       }
 ```
 
-### 4.3 common_distributor
+### 4.3 isp_csiir_linebuffer_core
 
 ```
-根据 px/py 将2P数据路由到 linebuffer 的对应行
-
-输入: data_wi_fb_t(in) {
-        din_valid,              // in: 2P数据有效
-        din,                    // in: 2P数据 [DATA_WIDTH*2-1:0]
-        din_ready               // out: 接收方已就绪
-      }
-      coord_2d_t(in) {
-        px[LINE_ADDR_WIDTH-1:0],  // in: 当前像素x (PIXEL addr)
-        py[ROW_CNT_WIDTH-1:0]     // in: 当前像素y (PIXEL addr)
-      }
-      image_size_2d_t(in) {
-        img_width_cfg[IMG_W_WIDTH-1:0],
-        img_height_cfg[IMG_H_WIDTH-1:0]
-      }
-
-输出: 1psram_t(out) — 5路独立写端口 (每路对应一行)
-      wr_row_N_en:     wr_row_N的写使能
-      wr_row_N_even:   wr_row_N的偶像素数据 (对应px)
-      wr_row_N_odd:    wr_row_N的奇像素数据 (对应px+1)
-
-      N ∈ {0, 1, 2, 3, 4}
-
-逻辑:
-  wr_row_sel = py % NUM_ROWS    // 循环buffer选行
-  wr_data = din                  // 2P: {odd, even}
-  wr_row_sel对应的行 = 1          // 其他行 = 0
-  每周期最多写一行, py%NUM_ROWS决定写哪行
-
-内部: wr_row_sel = py[log2(NUM_ROWS)-1:0]
-      din_even = din[0 +: DATA_WIDTH]   // px对应像素
-      din_odd  = din[DATA_WIDTH +: DATA_WIDTH] // px+1对应像素
-```
-
-### 4.4 isp_csiir_linebuffer_5row
-
-```
-纯SRAM存储, 仅暴露5条独立1P SRAM读写接口
+集成distribution逻辑的5行SRAM存储, 含两个独立读端口
 
 配置参数:
-  NUM_ROWS = 5
+  NUM_ROWS     = 5
   IMG_WIDTH, DATA_WIDTH, LINE_ADDR_WIDTH
+  SRAM_TYPE    = "2PORT"  // 双口SRAM支持两端同时读
 
-写端口 (来自distributor, 1psram_t(in)):
-  输入: wr_row_N_en
-        wr_row_N_even    // px对应像素
-        wr_row_N_odd     // px+1对应像素
+内部状态:
+  wr_row_ptr:     行写指针 (EOL时0→1→2→3→4→0循环)
+  wr_col_ptr:     列写指针 (每像素+1)
+  fifo_valid_row_cnt: 有效数据行计数 (0~5, EOL时+1)
+  // wr_row = wr_row_ptr, 内部自动路由
+  // wr_addr = wr_col_ptr, 内部自动递增
 
-  N ∈ {0, 1, 2, 3, 4}
-  每周期最多一行写使能=1
-  内部: wr_data = {odd, even}, 按行独立写入
+写端口 (来自FIFO, 2P):
+  输入: data_wi_fb_t(in) {
+          din_valid, din_ready,
+          din[DATA_WIDTH*2-1:0]    // 2P: {odd, even}
+        }
+        eol                      // in: 行结束信号 (驱动wr_row_ptr递增)
+        sof                      // in: 帧开始信号 (复位指针)
 
-读端口A (主线1: 4行老数据 + din2P):
-  输入: rd_req_wi_fb_t {rd_req, rd_addr}
-        rd_addr: PIXEL addr
-  输出: 4路读数据 (lb_row_0~lb_row_3)
+  逻辑:
+    - din_valid && din_ready 时写入 SRAM
+    - wr_row_ptr 控制片选 (wr_row = wr_row_ptr)
+    - wr_col_ptr 生成 SRAM 写地址
+    - EOL时 wr_row_ptr++, wr_col_ptr<=0, fifo_valid_row_cnt++
+    - din_to_bypass: 当fifo_valid_row_cnt == 5时, din绕过写入直通后级
 
-读端口B (主线2: 5行完整窗口):
-  输入: rd_req_wi_fb_t {rd_req, rd_addr}
-        rd_addr: PIXEL addr
-  输出: 5路读数据 (lb_row_0~lb_row_4)
+  SRAM内部:
+    - wr_data = {din_odd, din_even} (2P packing)
+    - 每行独立使能: wr_row_N_en = (wr_row_ptr == N)
+    - 双口: Port A (gradient读), Port B (filter读)
 
-Patch写回端口 (主线2→主线1):
-  输入: patch_wi_fb_t {
-          patch_valid, patch_ready,    // handshake
-          patch_center_x,              // PIXEL addr
-          patch_center_y,              // PIXEL addr
-          patch_5x5[DATA_WIDTH*25-1:0]
+读端口G (主线1: Gradient路径, 4行 + din):
+  输入: coord_2d_t(in) {
+          grad_row_rd_ptr[ROW_PTR_WIDTH-1:0],  // 行指针 (由外部管理)
+          grad_col_rd_ptr[LINE_ADDR_WIDTH-1:0]  // 列指针 (由外部管理)
+        }
+        grad_rd_req                       // in: 读请求
+  输出: data_wi_fb_t(out) {
+          grad_col_valid, grad_col_ready,  // 握手
+          grad_col_0~grad_col_3,           // 4行老数据 (1P)
+          grad_col_4,                      // 当前din (最新像素)
+          grad_center_x, grad_center_y    // 元数据
         }
 
-就绪条件:
-  read_ready = (valid_row_count >= 5)  // 5行都写满才可读
-  valid_row_count 由 distributor 写入的行号计算
+  逻辑:
+    - grad_rd_req 时: 从 SRAM Port A 读出 grad_row_rd_ptr 对应的4行
+    - grad_col_4 = 当前din (延迟对齐后)
+    - 有效条件: fifo_valid_row_cnt >= 4
+    - rd_row_N = row_sub(wr_row_ptr, 5-N)  // 循环取4行老数据
+
+读端口F (主线2: Filter路径, 5行):
+  输入: coord_2d_t(in) {
+          filt_row_rd_ptr[ROW_PTR_WIDTH-1:0],  // 行指针 (由外部管理)
+          filt_col_rd_ptr[LINE_ADDR_WIDTH-1:0]  // 列指针 (由外部管理)
+        }
+        filt_rd_req                       // in: 读请求
+  输出: data_wi_fb_t(out) {
+          filt_col_valid, filt_col_ready,  // 握手
+          filt_col_0~filt_col_4,          // 5行 (1P)
+          filt_center_x, filt_center_y   // 元数据
+        }
+
+  逻辑:
+    - filt_rd_req 时: 从 SRAM Port B 读出 filt_row_rd_ptr 对应的5行
+    - 有效条件: fifo_valid_row_cnt >= 5
+    - rd_row_N = row_sub(wr_row_ptr, 5-N)
+
+Patch写回端口 (主线2→主线1):
+  输入: patch_wi_fb_t(in) {
+          patch_valid, patch_ready,
+          patch_center_x, patch_center_y,
+          patch_5x5[DATA_WIDTH*25-1:0]
+        }
+  逻辑: 将 patch_5x5 的列提取后写回 SRAM (优先级 > din写)
+
+关键约束:
+  - 两读端口独立: grad_rd_ptr 和 filt_rd_ptr 可指向不同位置
+  - 外部管理读指针: linebuffer 只负责在指定地址读出指定行
+  - 双口SRAM: 两端口同时读无冲突
+```
+
+### 4.4 isp_csiir_linebuffer (wrapper)
+
+```
+isp_csiir_linebuffer_core 的外层封装
+
+封装内容:
+  - 1P→2P serializer (common_s2p)
+  - Patch写回FSM (将patch_5x5转换为列写)
+  - 元数据管理 (sof/eol传递)
+
+对外接口:
+  - 1P输入: din, din_valid, din_ready, sof, eol
+  - Gradient输出: grad_col_0~grad_col_4, grad_col_valid, grad_col_ready
+  - Filter输出: filt_col_0~filt_col_4, filt_col_valid, filt_col_ready
+  - Patch反馈输入: patch_valid, patch_ready, patch_5x5, center_x/y
+  - 配置: img_width, img_height
 ```
 
 ### 4.5 common_fifo_uv5x1
@@ -555,28 +583,29 @@ dout_ready (外部消费者)
   ← stage2.dout_ready
   ← gradient.dout_ready
   ← u_asmb_g.win_ready           // assembler(gradient路径)
+  ← u_lb.grad_col_ready          // linebuffer gradient读端口
+  ← (filter路径独立反压)
   ← fifo_uv5x1.uv5x1_ready
   ← fifo_uv5x1.din_2p_ready (← fifo.rd_ready)
-  ← fifo.dout_ready (← distributor.din_ready)
-  ← s2p.dout_ready
+  ← fifo.dout_ready (← s2p.dout_ready)
   ← s2p.din_ready (← din_ready, 外部输入)
 
-注意: distributor 不产生反压 — 它被动接受数据
-      linebuffer 写端也无反压 — distributor控制写入节奏
+注意: linebuffer 内部写侧无反压 — FIFO控制写入节奏
+      两读端口各自独立反压
       assembler 不产生独立反压 — backpressure通过win_ready传递
 ```
 
 ### 5.2 行级流控 (Row Credit)
 
 ```
-前端 (distributor) 写入行号 = center_y
-后端 (stage4 patch写回) 完成行号 = patch_center_y
+前端写入: wr_row_ptr (EOL时递增)
+后端完成: patch_center_y (patch写回完成行号)
 
-约束: 写行号领先于完成行号不超过 N 行 (N=4, 5行buffer减1行安全余量)
+约束: wr_row_ptr 领先于 patch写回行号不超过 N 行 (N=4)
       → 防止BRAM被覆盖
 
-实现: max_center_y_allow = feedback_committed_row + N
-      当 center_y > max_center_y_allow 时, 阻塞distributor写入
+实现: max_center_y_allow = patch_center_y + N
+      当 wr_row_ptr > max_center_y_allow 时, 阻塞FIFO→linebuffer写入
 ```
 
 ---
@@ -585,11 +614,13 @@ dout_ready (外部消费者)
 
 | 模块 | 类型 | 大小 (bit) | 说明 |
 |------|------|------------|------|
-| linebuffer | 5×SRAM 1P | 5×W×DATA_WIDTH | 纯SRAM, 2P packing |
-| fifo (2P缓冲) | sync FIFO | DEPTH×20 | 解耦s2p和distributor |
+| linebuffer | 5×SRAM 2PORT | 5×W×DATA_WIDTH×2 | 双口(Port A/B), 2P packing |
+| fifo (2P缓冲) | sync FIFO | DEPTH×20 | 解耦s2p和linebuffer |
 | common_fifo_uv5x1 | 4-entry FIFO | 4×20 | 缓冲din2P直到列读出 |
 | common_assembler (×2) | reg延迟线 | WIN_DELAY×5×DATA_WIDTH×2 | gradient+filter各1份 |
 | stage3 | 2×BRAM row | 2×W×(grad+avg) | 1行延迟 |
+
+**注**: linebuffer 升级为双口 SRAM (2PORT)，支持 gradient 和 filter 两读端口同时独立访问。
 
 ---
 
@@ -601,13 +632,29 @@ dout_ready (外部消费者)
 ### Q2: merge 模块?
 **A**: merge = common_s2p, 无需 half-write, 2P/1T
 
-### Q3: distributor 写入粒度?
-**A**: 2P/1T, linebuffer 数据宽度本来就是 2P, 不需要 half-write
+### Q3: distributor 去掉了，放在哪里?
+**A**: distributor 逻辑集成到 linebuffer 内部:
+- `row_wr_ptr`: EOL 时递增，控制 SRAM 片选
+- `col_wr_ptr`: 每像素递增，控制写地址
+- FIFO 直接接 linebuffer，无需中间模块
 
-### Q4: assembler 放在哪里?
+### Q4: 两主线读端口如何独立?
+**A**: 双口 SRAM (2PORT) 支持两端口同时读:
+- Port A (gradient): 读 4 行 + din → grad_col5x1
+- Port B (filter): 读 5 行 → filt_col5x1
+- 外部各自管理 `*_row_rd_ptr` 和 `*_col_rd_ptr`，可指向不同位置
+
+### Q5: assembler 放在哪里?
 **A**: 外部, 两份:
 - u_asmb_g: gradient路径
 - u_asmb_f: filter路径
 
-### Q5: 模块间传递什么?
+### Q6: 模块间传递什么?
 **A**: 仅传递 assembler 输出的 col5x1, 组装在各自模块内部完成
+
+### Q7: fifo_valid_row_cnt 怎么来?
+**A**: linebuffer 内部维护:
+- EOL 时 `fifo_valid_row_cnt++`
+- Gradient 读走一列时不变（或按需调整）
+- Gradient 有效: cnt >= 4
+- Filter 有效: cnt >= 5
