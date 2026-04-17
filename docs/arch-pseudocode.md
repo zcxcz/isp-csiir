@@ -113,7 +113,7 @@ interface meta_t(in) {
 
 ## 2. 两条主线
 
-### 主线1: din → Linebuffer → Gradient (可视域内梯度构建)
+### 主线1: din → 原图Linebuffer → Gradient (可视域内梯度构建)
 
 ```
 din (YUV422, UV交替, 1P/cycle)
@@ -122,18 +122,18 @@ din (YUV422, UV交替, 1P/cycle)
 u_s2p(common_s2p)           -- 1p_wi_fb_t -->
 u_fifo(common_fifo)          -- 2p_wi_fb_t --> [反压链]
   │
-  │ wr_2p = 2P数据
-  │ wr_row_ptr = EOL时递增 (0→1→2→3→4→0), 循环选行
+  │ wr_2p = 2P数据 (原图)
+  │ wr_row_ptr = EOL时递增 (0→1→2→3→0循环), 循环选行
   │ wr_col_ptr = 每像素递增, 控制waddr
-  │ fifo_valid_row_cnt = 有效数据行计数 (EOL时+1)
+  │ orig_valid_row_cnt = 有效数据行计数 (EOL时+1)
   ▼
-u_lb(linebuffer)             [5×SRAM, 含内部distribution逻辑]
+u_lb_src(原图linebuffer)    [4×SRAM, 含内部distribution逻辑]
   │
   ├─→ [读端口G: grad_col5x1] ───────────────────────────────┐
   │     grad_row_rd_ptr: 当前读取的行指针 (circular)          │ grad_col5x1_wi_fb_t
   │     grad_col_rd_ptr: 列指针 (读地址)                      │ 4行老数据SRAM读出
-  │     输出 col_0~col_3 (4行) + din (最新2P→拆分为col_4)    │ + 当前din拼为第5列
-  │     有效条件: fifo_valid_row_cnt >= 4                    │
+  │     输出 col_0~col_3 (4行) + din (最新2P→拆分为col_4)   │ + 当前din拼为第5列
+  │     有效条件: orig_valid_row_cnt >= 4                    │
   │                                                             ▼
   │                                                      u_asmb_g(common_assembler_5x1)
   │                                                           -- col5x1_wi_fb_t -->
@@ -142,31 +142,48 @@ u_lb(linebuffer)             [5×SRAM, 含内部distribution逻辑]
   └───────────────────────────────────────────────────────────────┘
 
 主线1输出: grad_h, grad_v, grad_max, win_size
+
+**重要**: gradient/stage2 使用的 `src_uv_5x5` 来自原图 linebuffer，
+          不是滤波 linebuffer —— 见 ref.md Section 2.3 和 3.4
 ```
 
-**就绪条件**: `fifo_valid_row_cnt >= 4` 后，4行+din可凑成5×5窗口，开始梯度计算。
+**就绪条件**: `orig_valid_row_cnt >= 4` 后，4行+din可凑成5×5窗口，开始梯度计算。
 
-### 主线2: Linebuffer + 梯度值 → Filter (滤波输出 + Patch写回)
+### 主线2: 原图Linebuffer + 梯度值 → 滤波Linebuffer → Filter (滤波输出 + Patch写回)
 
 ```
-u_lb(linebuffer)
+u_lb_src(原图linebuffer)
   │
-  ├─→ [读端口B: 5行] ────────────────────────────────┐
-  │     rd_row = center_y-4 ~ center_y (5行)          │ 5r_wi_fb_t
-  │     rd_addr = center_x                            │ 5行SRAM读出
-  │                                                       ▼
-  │                                              u_asmb_f(common_assembler_5x1)
-  │                                                   -- col5x1_wi_fb_t -->
-  │                                              u_filt2(stage2) -- dir_avg_wi_fb_t -->
-  │                                                           │
-  │                                              u_filt3(stage3) -- grad_fuse_wi_fb_t -->
-  │                                                           │
-  │                                              u_filt4(stage4) -- dout_wi_fb_t
-  │                                                           │
-  │                                                           ├─→ dout
-  │                                                           │
-  │                                                           │ patch_wi_fb_t
-  └──────────────────────────────────────────────────────────▼──→ u_lb (Patch写回)
+  │ 读端口F: 5行原图 ─────────────────────────────────────────┐
+  │ filt_row_rd_ptr: 读取行指针                               │ src_col5x1_wi_fb_t
+  │ filt_col_rd_ptr: 读取列指针                                │ 5行原图SRAM读出
+  │ 有效条件: orig_valid_row_cnt >= 5                        │
+  │                                                             ▼
+  │                                                    u_asmb_f(common_assembler_5x1)
+  │                                                         -- col5x1_wi_fb_t -->
+  │                                                    u_filt2(stage2) -- dir_avg_wi_fb_t -->
+  │                                                                │
+  │                                                    u_filt3(stage3) -- grad_fuse_wi_fb_t -->
+  │                                                                │
+  │                                                    u_filt4(stage4) -- dout_wi_fb_t
+  │                                                                │
+  │                                                                ├─→ dout
+  │                                                                │
+  │                                                                │ patch_wi_fb_t (滤波结果)
+  └──────────────────────────────────────────────────────────────▼──┬
+                                                                       │
+  ┌──────────────────────────────────────────────────────────────────┘
+  │
+  ▼
+u_lb_filt(滤波linebuffer)   [5×SRAM, 存滤波中间结果]
+  │
+  │ 读端口: 后续行读取 ──────────────────────────────────────────┐
+  │ filt_row_rd_ptr (读取)                                        │ filt_col5x1_wi_fb_t
+  │                                                                │ 后续行读出构成邻域
+  └────────────────────────────────────────────────────────────────┘
+
+**重要**: 滤波 linebuffer 存的是 stage4 输出的 blend_uv_5x5，
+          后续像素读取时，用原图linebuffer的当前行 + 滤波linebuffer的4行老数据共同构成邻域
 ```
 
 ---
@@ -180,25 +197,35 @@ din (YUV422, 1P/cycle)
 u_s2p(common_s2p)           -- 2p_wi_fb_t -->
 u_fifo(common_fifo)          -- 2p_wi_fb_t --> [反压链]
   │
-  │ wr_2p: FIFO输出2P
-  │ EOL: 行结束信号 (驱动wr_row_ptr递增和valid_row_cnt更新)
+  │ wr_2p: FIFO输出2P (原图)
+  │ EOL: 行结束信号 (驱动wr_row_ptr递增和orig_valid_row_cnt更新)
   ▼
-u_lb(linebuffer)             [5×SRAM, 含内部distribution逻辑]
+u_lb_src(原图linebuffer)     [4×SRAM, 存原始图像数据]
   │
   ├─→ grad_col5x1_wi_fb_t ─→ u_asmb_g(common_assembler_5x1)
   │                           -- col5x1_wi_fb_t -->
   │                       u_grad(gradient)
-  │                           -- grad_wi_fb_t  --> 方向2
+  │                           -- grad_wi_fb_t  --> u_filt2 (stage2)
   │
-  └─→ filt_col5x1_wi_fb_t ─→ u_asmb_f(common_assembler_5x1)
-                              -- col5x1_wi_fb_t -->
-                          u_filt2(stage2)
-                              -- dir_avg_wi_fb_t -->
-                          u_filt3(stage3)
-                              -- grad_fuse_wi_fb_t -->
-                          u_filt4(stage4)
-                              ├─→ dout (1P/cycle)
-                              └─→ patch_wi_fb_t --> u_lb (Patch写回)
+  ├─→ src_col5x1_wi_fb_t ──────────────────────────────────────────┐
+  │                                                                   │ 5行原图
+  │                                                   u_asmb_f(common_assembler_5x1)
+  │                                                        -- col5x1_wi_fb_t -->
+  │                                                    u_filt2(stage2)
+  │                                                        -- dir_avg_wi_fb_t -->
+  │                                                    u_filt3(stage3)
+  │                                                        -- grad_fuse_wi_fb_t -->
+  │                                                    u_filt4(stage4)
+  │                                                        ├─→ dout (1P/cycle)
+  │                                                        └─→ patch_wi_fb_t (滤波结果)
+  └───────────────────────────────────────────────────────────────┬
+                                                                      │
+  ┌──────────────────────────────────────────────────────────────────┘
+  │
+  ▼
+u_lb_filt(滤波linebuffer)     [5×SRAM, 存滤波中间结果]
+  │
+  └─→ filt_col5x1_wi_fb_t ──→ (后续行读取，构成滤波邻域)
 ```
 
 ---
@@ -614,13 +641,14 @@ dout_ready (外部消费者)
 
 | 模块 | 类型 | 大小 (bit) | 说明 |
 |------|------|------------|------|
-| linebuffer | 5×SRAM 2PORT | 5×W×DATA_WIDTH×2 | 双口(Port A/B), 2P packing |
-| fifo (2P缓冲) | sync FIFO | DEPTH×20 | 解耦s2p和linebuffer |
+| u_lb_src (原图) | 4×SRAM 2PORT | 4×W×DATA_WIDTH×2 | 存原始图像，gradient/stage2共读 |
+| u_lb_filt (滤波) | 5×SRAM 2PORT | 5×W×DATA_WIDTH×2 | 存滤波中间结果，stage4写回 |
+| fifo (2P缓冲) | sync FIFO | DEPTH×20 | 解耦s2p和原图linebuffer |
 | common_fifo_uv5x1 | 4-entry FIFO | 4×20 | 缓冲din2P直到列读出 |
 | common_assembler (×2) | reg延迟线 | WIN_DELAY×5×DATA_WIDTH×2 | gradient+filter各1份 |
 | stage3 | 2×BRAM row | 2×W×(grad+avg) | 1行延迟 |
 
-**注**: linebuffer 升级为双口 SRAM (2PORT)，支持 gradient 和 filter 两读端口同时独立访问。
+**注**: 两路 linebuffer 均升级为双口 SRAM (2PORT)，支持各两读端口同时独立访问。
 
 ---
 
@@ -638,23 +666,34 @@ dout_ready (外部消费者)
 - `col_wr_ptr`: 每像素递增，控制写地址
 - FIFO 直接接 linebuffer，无需中间模块
 
-### Q4: 两主线读端口如何独立?
+### Q4: 为什么需要两个 linebuffer?
+**A**: ref.md 明确要求（Section 2.3, 3.4）:
+- **gradient (S1)**: `grad_h = src_uv_u10_5x5 * sobel` → 用**原图**
+- **stage2 (S2)**: `avg_value = sum(src_uv_s11_5x5 * factor)` → 用**原图**
+- **stage4 (S4)**: `blend_uv_5x5` 写回 → 存的是**滤波结果**
+
+因此:
+- `u_lb_src`（4行）：存**原图**，gradient 和 stage2 都读原图
+- `u_lb_filt`（5行）：存**滤波结果**，stage4 写滤波 patch，后续行读取构成邻域
+
+### Q5: 两路 linebuffer 的读端口如何独立?
 **A**: 双口 SRAM (2PORT) 支持两端口同时读:
-- Port A (gradient): 读 4 行 + din → grad_col5x1
-- Port B (filter): 读 5 行 → filt_col5x1
+- 原图 linebuffer (Port A): gradient 读 4 行 + din
+- 原图 linebuffer (Port B): filter 读 5 行原图
+- 滤波 linebuffer (Port A): 后续行读取滤波邻域
+- 滤波 linebuffer (Port B): stage4 patch 写回
 - 外部各自管理 `*_row_rd_ptr` 和 `*_col_rd_ptr`，可指向不同位置
 
-### Q5: assembler 放在哪里?
+### Q6: assembler 放在哪里?
 **A**: 外部, 两份:
-- u_asmb_g: gradient路径
-- u_asmb_f: filter路径
+- u_asmb_g: gradient路径（读原图linebuffer）
+- u_asmb_f: filter路径（读原图linebuffer的5行）
 
-### Q6: 模块间传递什么?
+### Q7: 模块间传递什么?
 **A**: 仅传递 assembler 输出的 col5x1, 组装在各自模块内部完成
 
-### Q7: fifo_valid_row_cnt 怎么来?
-**A**: linebuffer 内部维护:
-- EOL 时 `fifo_valid_row_cnt++`
-- Gradient 读走一列时不变（或按需调整）
-- Gradient 有效: cnt >= 4
-- Filter 有效: cnt >= 5
+### Q8: 后续行如何读取滤波邻域?
+**A**: 滤波邻域的构成方式:
+- 原图 linebuffer 提供当前行的 5 个像素（原图）
+- 滤波 linebuffer 提供上方 4 行的 5 个像素（滤波结果）
+- 共同构成 5×5 邻域用于后续像素的滤波计算
