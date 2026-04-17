@@ -13,6 +13,7 @@
 //   -i <file>          Load input from file
 //   -o <file>          Save output to file
 //   -c <file>          Compare with reference
+//   --feedback         Enable linebuffer feedback (default: on)
 //
 // Configuration file format (one param per line):
 //   win_size_thresh=16,24,32,40
@@ -186,11 +187,134 @@ int main(int argc, char* argv[]) {
         printf("Generated random input (seed=%d)\n", seed);
     }
 
-    // Process
-    printf("Running ISP-CSIIR...\n");
+    //==========================================================================
+    // Linebuffer feedback simulation (matches RTL architecture)
+    //
+    // Data path equivalent to RTL:
+    //   - Original LB (4 rows): gradient/stage2 read ORIGINAL data
+    //   - Filtered LB (5 rows): stage4 IIR blend reads FILTERED neighbors
+    //                            current row uses ORIGINAL data (no self-feedback)
+    //
+    // Implementation:
+    //   - src[] buffer: original image (never modified)
+    //   - filt[] buffer: starts as copy of input, updated with filtered values
+    //
+    // For each pixel (i, j):
+    //   - Gradient window: from src[] (original)
+    //   - Stage2 window: from src[] (original)
+    //   - Stage4 IIR window:
+    //       rows 0-3: from filt[] (filtered neighbors)
+    //       row 4: from src[] (original current row)
+    //   - Write filtered value back to filt[]
+    //==========================================================================
+    printf("Running ISP-CSIIR with linebuffer feedback...\n");
+
+    // Allocate working buffers
+    pixel_t* src = new pixel_t[img_height * img_width];
+    pixel_t* filt = new pixel_t[img_height * img_width];
+    memcpy(src, input, img_height * img_width * sizeof(pixel_t));
+    memcpy(filt, input, img_height * img_width * sizeof(pixel_t));
+
+    // Gradient row buffers (2 rows, for stage3 neighbor gradient computation)
+    pixel_t* grad_row_buf[2];
+    for (int r = 0; r < 2; r++) {
+        grad_row_buf[r] = new pixel_t[img_width];
+        memset(grad_row_buf[r], 0, img_width * sizeof(pixel_t));
+    }
+    grad_t grad_shift[3] = {0, 0, 0};
+
+    // Helper: build 5x5 window from a buffer
+    auto build_window = [&](pixel_t* buf, int i, int j, pixel_t win[PATCH_SIZE]) -> void {
+        for (int dy = -2; dy <= 2; dy++) {
+            for (int dx = -2; dx <= 2; dx++) {
+                int row = std::max(0, std::min(img_height - 1, j + dy));
+                int col = std::max(0, std::min(img_width - 1, i + dx * 2));
+                win[(dy + 2) * 5 + (dx + 2)] = buf[row * img_width + col];
+            }
+        }
+    };
+
+    // Process each pixel
     for (int j = 0; j < img_height; j++) {
         for (int i = 0; i < img_width; i++) {
-            output[j * img_width + i] = process_pixel_at(cfg, input, img_width, img_height, i, j);
+            //------ Gradient window: from ORIGINAL (src[]) ------
+            pixel_t src_win[PATCH_SIZE];
+            build_window(src, i, j, src_win);
+
+            //------ Stage 1: Sobel Gradient ------
+            grad_t grad_h, grad_v, grad_c;
+            sobel_gradient_5x5(src_win, grad_h, grad_v, grad_c);
+
+            // Left/right gradients for LUT
+            pixel_t lwin[PATCH_SIZE], rwin[PATCH_SIZE];
+            build_window(src, i - 2, j, lwin);
+            build_window(src, i + 2, j, rwin);
+            grad_t grad_l, grad_r;
+            grad_t tmp1, tmp2;
+            sobel_gradient_5x5(lwin, tmp1, tmp2, grad_l);
+            sobel_gradient_5x5(rwin, tmp1, tmp2, grad_r);
+
+            // Neighbor gradients for fusion (from gradient row buffer)
+            grad_t grad_u = (grad_t)grad_shift[1];
+            grad_t grad_d = grad_row_buf[0][i];
+            grad_shift[0] = grad_shift[1];
+            grad_shift[1] = grad_shift[2];
+            grad_shift[2] = grad_c;
+            grad_row_buf[0][i] = grad_c;
+            grad_row_buf[1][i] = grad_row_buf[0][i];
+
+            //------ Stage 2: Directional Average (reads ORIGINAL) ------
+            s11_t src_s11[PATCH_SIZE];
+            for (int k = 0; k < PATCH_SIZE; k++) {
+                src_s11[k] = u10_to_s11(src_win[k]);
+            }
+            int win_size = lut_win_size(cfg, (int)std::max(grad_l, std::max(grad_c, grad_r)));
+            DirAvgResult dir_avg = compute_directional_avg(cfg, src_s11, win_size);
+
+            //------ Stage 3: Gradient Fusion ------
+            FusionResult fusion = compute_gradient_fusion(dir_avg,
+                (int)grad_u, (int)grad_d, (int)grad_l, (int)grad_r, (int)grad_c);
+
+            //------ Stage 4: IIR Blend ------
+            // Build 5x5 window: rows 0-3 from filtered, row 4 from original
+            s11_t filt_win[PATCH_SIZE];
+            for (int dy = -2; dy <= 2; dy++) {
+                for (int dx = -2; dx <= 2; dx++) {
+                    int patch_idx = (dy + 2) * 5 + (dx + 2);
+                    int row = std::max(0, std::min(img_height - 1, j + dy));
+                    int col = std::max(0, std::min(img_width - 1, i + dx * 2));
+                    if (dy < 0) {
+                        // Rows 0-3: filtered neighbors
+                        filt_win[patch_idx] = u10_to_s11(filt[row * img_width + col]);
+                    } else {
+                        // Row 4 (dy=0): original (current row, no self-feedback)
+                        filt_win[patch_idx] = u10_to_s11(src[row * img_width + col]);
+                    }
+                }
+            }
+
+            s11_t final_patch[PATCH_SIZE];
+            compute_iir_blend(cfg, filt_win, win_size, fusion.blend0, fusion.blend1,
+                              dir_avg.avg0_u, dir_avg.avg1_u,
+                              (int)grad_h, (int)grad_v, final_patch);
+
+            pixel_t dout_pixel = s11_to_u10(final_patch[12]);
+
+            //------ Write back filtered value to filt[] ------
+            filt[j * img_width + i] = dout_pixel;
+
+            //------ Output ------
+            // Output when j >= 2 (window valid from original line buffer)
+            if (j >= 2) {
+                output[j * img_width + i] = dout_pixel;
+            }
+        }
+    }
+
+    // Fill first two rows from input (boundary)
+    for (int j = 0; j < 2 && j < img_height; j++) {
+        for (int i = 0; i < img_width; i++) {
+            output[j * img_width + i] = input[j * img_width + i];
         }
     }
 
@@ -252,6 +376,10 @@ int main(int argc, char* argv[]) {
             fprintf(stderr, "Error: Cannot open reference file %s\n", compare_file);
             delete[] input;
             delete[] output;
+            delete[] src;
+            delete[] filt;
+            for (int r = 0; r < 2; r++)
+                delete[] grad_row_buf[r];
             return 1;
         }
 
@@ -289,6 +417,10 @@ int main(int argc, char* argv[]) {
 
     delete[] input;
     delete[] output;
+    delete[] src;
+    delete[] filt;
+    for (int r = 0; r < 2; r++)
+        delete[] grad_row_buf[r];
 
     return 0;
 }

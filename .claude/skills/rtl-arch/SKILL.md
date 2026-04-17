@@ -74,6 +74,28 @@ description: Use when starting a new RTL design, planning hardware architecture,
 - 数据依赖关系（什么必须等待什么）
 - 并行化机会（什么可以并发执行）
 
+**⚠️ 数据溯源检查（数据流分析必须完成）**
+
+在画模块连接图之前，**必须先画出数据依赖图**。每个 stage 必须明确回答：它读什么数据、输出什么数据、谁消费它的输出、输出是否需要存储。
+
+```
+数据溯源检查表示例（每个 stage 逐行列出）：
+
+Stage        │ 读自           │ 写至          │ 说明
+-------------|----------------|---------------|------------------------
+gradient     │ src_uv (原图)  │ 无 (仅输出grad) │ 来自原图linebuffer
+dir_avg      │ src_uv (原图)  │ 无 (仅输出avg)  │ 与gradient共用原图
+fusion       │ avg_value      │ 无 (仅输出blend)│ 仅流水线，无存储
+iir_blend    │ blend_grad     │ blend_uv      │ 写滤波linebuffer
+后续像素读取 │ 当前行原图+    │ -              │ 原图LB当前行+滤波LB上方4行
+             │ 上方4行滤波    │                │
+
+如果某一行的「读自」或「写至」为空 → 立即向架构师确认。
+如果两个 stage 的「读自」指向同一份数据，但该数据会被其他 stage 覆盖 → 存储架构存在冲突，必须拆分。
+```
+
+**这次检查发现的问题**：gradient 和 stage2 都读 `src_uv`（原图），但 stage4 写回 `blend_uv`（滤波结果）—— 原图和滤波结果不能共存于同一份 linebuffer，需要拆分为两个独立存储。
+
 ### 第三步：流水线架构
 
 设计流水线结构：

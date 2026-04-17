@@ -41,6 +41,28 @@ description: Use when implementing RTL code, converting architecture specificati
 - 有效信号如何传递？
 - 复位策略是什么（同步/异步）？
 
+**⚠️ 数据溯源检查（架构设计前必须完成）**
+
+在设计任何模块接口或连接之前，**必须先回答每个 stage 的数据来源**，并画出数据依赖图：
+
+```
+必答问题（每个 stage 逐一确认）：
+  1. Stage N 读取什么数据？（是原图、中间结果、还是上一级输出？）
+  2. Stage N 输出什么数据？
+  3. Stage N 的输出会写回到哪个存储模块？
+  4. 后续 stage 读取的数据，是来自哪个存储模块？
+  5. 所有中间结果是否都有存储介质保存？
+
+示例检查表：
+  □ S1 (gradient) 读: src_uv (原图)    — 存于: 原图linebuffer
+  □ S2 (dir_avg)   读: src_uv (原图)    — 存于: 原图linebuffer
+  □ S3 (fusion)    读: avg_value        — 存于: 无（仅流水）
+  □ S4 (iir_blend) 读: blend_grad       — 写: blend_uv → 滤波linebuffer
+  □ 后续像素       读: 当前行原图 + 上方4行滤波结果
+```
+
+**⚠️ 如果对某个 stage 的数据来源存在模糊，必须暂停架构设计，先向架构师确认。模糊的数据依赖会导致 linebuffer / storage 设计全部返工。**
+
 ### 第二步：模块设计
 
 **标准模块模板：**

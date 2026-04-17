@@ -469,13 +469,25 @@ void isp_csiir_top(
     isp.cfg.blending_ratio[3] = (int)blend_ratio3;
     isp.cfg.reg_edge_protect = (int)edge_protect;
 
-    // Line buffer with 1PSRAM (RAM_1P_BRAM, time-multiplexed)
-    pixel_pack_t line_buf_pack[5][MAX_WIDTH];
-    #pragma HLS ARRAY_PARTITION variable=line_buf_pack dim=1 complete
-    #pragma HLS RESOURCE variable=line_buf_pack core=RAM_1P_BRAM
+    // Line buffer for ORIGINAL image (4 rows, used by gradient + stage2)
+    // Stores raw input pixels - never modified during feedback
+    pixel_pack_t line_buf_src[4][MAX_WIDTH];
+    #pragma HLS ARRAY_PARTITION variable=line_buf_src dim=1 complete
+    #pragma HLS RESOURCE variable=line_buf_src core=RAM_1P_BRAM
 
-    pixel_t col_buf[5][5];
-    #pragma HLS ARRAY_PARTITION variable=col_buf complete
+    // Line buffer for FILTERED image (5 rows, used by stage4 feedback + subsequent pixels)
+    // Updated with filtered values as pixels are processed
+    pixel_pack_t line_buf_filt[5][MAX_WIDTH];
+    #pragma HLS ARRAY_PARTITION variable=line_buf_filt dim=1 complete
+    #pragma HLS RESOURCE variable=line_buf_filt core=RAM_1P_BRAM
+
+    // Column shift register for ORIGINAL data (for gradient window)
+    pixel_t col_src[5][5];
+    #pragma HLS ARRAY_PARTITION variable=col_src complete
+
+    // Column shift register for FILTERED data (for stage4 IIR blend window)
+    pixel_t col_filt[5][5];
+    #pragma HLS ARRAY_PARTITION variable=col_filt complete
 
     grad_pack_t grad_buf_pack[2][MAX_WIDTH];
     #pragma HLS ARRAY_PARTITION variable=grad_buf_pack dim=1 complete
@@ -487,6 +499,9 @@ void isp_csiir_top(
     grad_t grad_next_row_delay[MAX_WIDTH];
     #pragma HLS RESOURCE variable=grad_next_row_delay core=RAM_1P_BRAM
 
+    // Gradient window: built from original line buffer
+    // Used by stage1 (gradient), stage2 (directional avg)
+    // Note: stage4's IIR blend uses col_filt instead (filtered data)
     pixel_t src_5x5[5][5];
     #pragma HLS ARRAY_PARTITION variable=src_5x5 complete
 
@@ -498,16 +513,25 @@ void isp_csiir_top(
 
     unsigned int total_pixels = (unsigned int)img_width * (unsigned int)img_height;
 
-    // Initialize buffers
+    // Initialize original line buffer
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < MAX_WIDTH; j++) {
+            #pragma HLS UNROLL factor=4
+            line_buf_src[i][j] = 0;
+        }
+    }
+    // Initialize filtered line buffer
     for (int i = 0; i < 5; i++) {
         for (int j = 0; j < MAX_WIDTH; j++) {
             #pragma HLS UNROLL factor=4
-            line_buf_pack[i][j] = 0;
+            line_buf_filt[i][j] = 0;
         }
     }
+    // Initialize column shift registers
     for (int i = 0; i < 5; i++) {
         for (int j = 0; j < 5; j++) {
-            col_buf[i][j] = 0;
+            col_src[i][j] = 0;
+            col_filt[i][j] = 0;
         }
     }
     for (int i = 0; i < 2; i++) {
@@ -534,72 +558,129 @@ void isp_csiir_top(
         // Read input pixel from stream
         axis_pixel_t din = din_stream.read();
 
-        // Shift and update line buffer (1PSRAM access)
+        //======================================================================
+        // Update ORIGINAL line buffer (4 rows, for gradient/stage2)
+        //======================================================================
+        // Shift col_src register right (col_src[r][c] <- col_src[r][c+1])
         for (int r = 0; r < 5; r++) {
             #pragma HLS UNROLL
             for (int c = 0; c < 4; c++) {
                 #pragma HLS UNROLL
-                col_buf[r][c] = col_buf[r][c+1];
+                col_src[r][c] = col_src[r][c+1];
             }
         }
 
-        pixel_pack_t old_row0_pack = line_buf_pack[0][col_val];
-        pixel_pack_t old_row1_pack = line_buf_pack[1][col_val];
-        pixel_pack_t old_row2_pack = line_buf_pack[2][col_val];
-        pixel_pack_t old_row3_pack = line_buf_pack[3][col_val];
-        pixel_pack_t old_row4_pack = line_buf_pack[4][col_val];
+        // Read old rows from original line buffer
+        pixel_pack_t src_old_row0_pack = line_buf_src[0][col_val];
+        pixel_pack_t src_old_row1_pack = line_buf_src[1][col_val];
+        pixel_pack_t src_old_row2_pack = line_buf_src[2][col_val];
+        pixel_pack_t src_old_row3_pack = line_buf_src[3][col_val];
 
-        pixel_t old_row0 = old_row0_pack.range(9, 0);
-        pixel_t old_row1 = old_row1_pack.range(9, 0);
-        pixel_t old_row2 = old_row2_pack.range(9, 0);
-        pixel_t old_row3 = old_row3_pack.range(9, 0);
-        pixel_t old_row4 = old_row4_pack.range(9, 0);
+        pixel_t src_old_row0 = src_old_row0_pack.range(9, 0);
+        pixel_t src_old_row1 = src_old_row1_pack.range(9, 0);
+        pixel_t src_old_row2 = src_old_row2_pack.range(9, 0);
+        pixel_t src_old_row3 = src_old_row3_pack.range(9, 0);
 
-        line_buf_pack[0][col_val] = (pixel_pack_t)old_row1 << 0 | (pixel_pack_t)old_row0 << 10;
-        line_buf_pack[1][col_val] = (pixel_pack_t)old_row2 << 0 | (pixel_pack_t)old_row1 << 10;
-        line_buf_pack[2][col_val] = (pixel_pack_t)old_row3 << 0 | (pixel_pack_t)old_row2 << 10;
-        line_buf_pack[3][col_val] = (pixel_pack_t)old_row4 << 0 | (pixel_pack_t)old_row3 << 10;
-        line_buf_pack[4][col_val] = (pixel_pack_t)din.data << 0 | (pixel_pack_t)old_row4 << 10;
+        // Shift original line buffer down: row0<-row1<-row2<-row3<-din
+        line_buf_src[0][col_val] = (pixel_pack_t)src_old_row1 << 0 | (pixel_pack_t)src_old_row0 << 10;
+        line_buf_src[1][col_val] = (pixel_pack_t)src_old_row2 << 0 | (pixel_pack_t)src_old_row1 << 10;
+        line_buf_src[2][col_val] = (pixel_pack_t)src_old_row3 << 0 | (pixel_pack_t)src_old_row2 << 10;
+        line_buf_src[3][col_val] = (pixel_pack_t)din.data       << 0 | (pixel_pack_t)src_old_row3 << 10;
 
-        col_buf[0][4] = old_row0;
-        col_buf[1][4] = old_row1;
-        col_buf[2][4] = old_row2;
-        col_buf[3][4] = old_row3;
-        col_buf[4][4] = din.data;
+        // Load new pixel into col_src (the "5th" row of the shift register)
+        col_src[0][4] = src_old_row0;
+        col_src[1][4] = src_old_row1;
+        col_src[2][4] = src_old_row2;
+        col_src[3][4] = src_old_row3;
+        col_src[4][4] = din.data;
 
-        // Get 5x5 window
+        //======================================================================
+        // Update FILTERED line buffer (5 rows, for stage4 feedback)
+        //======================================================================
+        // Shift col_filt register right (col_filt[r][c] <- col_filt[r][c+1])
+        for (int r = 0; r < 5; r++) {
+            #pragma HLS UNROLL
+            for (int c = 0; c < 4; c++) {
+                #pragma HLS UNROLL
+                col_filt[r][c] = col_filt[r][c+1];
+            }
+        }
+
+        // Read old rows from filtered line buffer
+        pixel_pack_t filt_old_row0_pack = line_buf_filt[0][col_val];
+        pixel_pack_t filt_old_row1_pack = line_buf_filt[1][col_val];
+        pixel_pack_t filt_old_row2_pack = line_buf_filt[2][col_val];
+        pixel_pack_t filt_old_row3_pack = line_buf_filt[3][col_val];
+        pixel_pack_t filt_old_row4_pack = line_buf_filt[4][col_val];
+
+        pixel_t filt_old_row0 = filt_old_row0_pack.range(9, 0);
+        pixel_t filt_old_row1 = filt_old_row1_pack.range(9, 0);
+        pixel_t filt_old_row2 = filt_old_row2_pack.range(9, 0);
+        pixel_t filt_old_row3 = filt_old_row3_pack.range(9, 0);
+        pixel_t filt_old_row4 = filt_old_row4_pack.range(9, 0);
+
+        // Shift filtered line buffer: rows shift down, current pixel filtered
+        // value will be written AFTER computation (see below)
+        line_buf_filt[0][col_val] = (pixel_pack_t)filt_old_row1 << 0 | (pixel_pack_t)filt_old_row0 << 10;
+        line_buf_filt[1][col_val] = (pixel_pack_t)filt_old_row2 << 0 | (pixel_pack_t)filt_old_row1 << 10;
+        line_buf_filt[2][col_val] = (pixel_pack_t)filt_old_row3 << 0 | (pixel_pack_t)filt_old_row2 << 10;
+        line_buf_filt[3][col_val] = (pixel_pack_t)filt_old_row4 << 0 | (pixel_pack_t)filt_old_row3 << 10;
+        // line_buf_filt[4] will be updated with dout_pixel AFTER computation
+
+        // Load col_filt register: col_filt[r][4] = filtered value at (col_val, row_val-r)
+        // Rows 0-3: previously filtered pixels (already shifted from previous col)
+        // Row 4: placeholders (current pixel hasn't been processed yet)
+        col_filt[0][4] = filt_old_row0;  // (col_val, row-0) = filtered from prev col in same row
+        col_filt[1][4] = filt_old_row1;  // (col_val, row-1)
+        col_filt[2][4] = filt_old_row2;  // (col_val, row-2)
+        col_filt[3][4] = filt_old_row3;  // (col_val, row-3)
+        col_filt[4][4] = din.data;       // (col_val, row-4) = orig for now, updated after
+
+        //======================================================================
+        // Build gradient window from ORIGINAL line buffer (for stage1/stage2)
+        //======================================================================
         for (int r = 0; r < 5; r++) {
             #pragma HLS UNROLL
             for (int c = 0; c < 5; c++) {
                 #pragma HLS UNROLL
                 int win_col = (int)col_val - 2 + c;
                 if (c < 3) {
-                    src_5x5[r][c] = col_buf[r][c + 2];
+                    // col_src[r][c+2]: from shift register (columns col_val-1, col_val, col_val+1)
+                    src_5x5[r][c] = col_src[r][c + 2];
                 } else {
+                    // col_src from line buffer
                     if (win_col < 0) {
-                        src_5x5[r][c] = line_buf_pack[r][0].range(9, 0);
+                        src_5x5[r][c] = line_buf_src[r < 4 ? r : 3][0].range(9, 0);
                     } else if (win_col >= (int)img_width) {
-                        src_5x5[r][c] = line_buf_pack[r][(int)img_width - 1].range(9, 0);
+                        src_5x5[r][c] = line_buf_src[r < 4 ? r : 3][(int)img_width - 1].range(9, 0);
                     } else {
-                        src_5x5[r][c] = line_buf_pack[r][win_col].range(9, 0);
+                        src_5x5[r][c] = line_buf_src[r < 4 ? r : 3][win_col].range(9, 0);
                     }
                 }
             }
         }
 
-        // Compute gradient
+        //======================================================================
+        // Stage 1: Sobel Gradient (reads ORIGINAL data)
+        //======================================================================
         grad_t grad_h, grad_v, grad;
         isp.sobel_gradient_5x5(&src_5x5[0][0], grad_h, grad_v, grad);
 
-        // Convert to s11
+        // Convert gradient window to s11 for stage2
         for (int i = 0; i < PATCH_SIZE; i++) {
             src_s11_5x5[i] = u10_to_s11(src_5x5[i / 5][i % 5]);
         }
 
         int win_size = isp.lut_win_size((int)grad);
 
+        //======================================================================
+        // Stage 2: Directional Average (reads ORIGINAL data)
+        //======================================================================
         DirAvgResult dir_avg = isp.compute_directional_avg(src_s11_5x5, win_size);
 
+        //======================================================================
+        // Stage 3: Gradient Fusion - neighbor gradients
+        //======================================================================
         grad_t grad_next_row = grad_next_row_delay[col_val];
 
         grad_u = grad_buf_pack[0][col_val].range(13, 0);
@@ -620,20 +701,78 @@ void isp_csiir_top(
         FusionResult fusion = isp.compute_gradient_fusion(dir_avg,
             (int)grad_u, (int)grad_d, (int)grad_l, (int)grad_r, (int)grad_c);
 
+        //======================================================================
+        // Stage 4: IIR Blend
+        // - grad/stage2 read src_s11_5x5 (ORIGINAL data)
+        // - stage4 reads col_filt for filtered neighborhood
+        //======================================================================
+        // Build stage4's 5x5 window from filtered line buffer:
+        //   Rows 0-3: from col_filt (filtered data from previous columns)
+        //   Row 4: from col_src (original data for current row, to be replaced by filtered)
+        s11_t filt_5x5[PATCH_SIZE];
+        for (int r = 0; r < 5; r++) {
+            #pragma HLS UNROLL
+            for (int c = 0; c < 5; c++) {
+                #pragma HLS UNROLL
+                int win_col = (int)col_val - 2 + c;
+                int patch_idx = r * 5 + c;
+                if (r < 4) {
+                    // Rows 0-3: from filtered col_filt
+                    if (c < 3) {
+                        filt_5x5[patch_idx] = u10_to_s11(col_filt[r][c + 2]);
+                    } else {
+                        if (win_col < 0) {
+                            filt_5x5[patch_idx] = u10_to_s11(line_buf_filt[r][0].range(9, 0));
+                        } else if (win_col >= (int)img_width) {
+                            filt_5x5[patch_idx] = u10_to_s11(line_buf_filt[r][(int)img_width - 1].range(9, 0));
+                        } else {
+                            filt_5x5[patch_idx] = u10_to_s11(line_buf_filt[r][win_col].range(9, 0));
+                        }
+                    }
+                } else {
+                    // Row 4: original data (for boundary extension logic)
+                    if (c < 3) {
+                        filt_5x5[patch_idx] = u10_to_s11(col_src[4][c + 2]);
+                    } else {
+                        if (win_col < 0) {
+                            filt_5x5[patch_idx] = u10_to_s11(line_buf_src[3][0].range(9, 0));
+                        } else if (win_col >= (int)img_width) {
+                            filt_5x5[patch_idx] = u10_to_s11(line_buf_src[3][(int)img_width - 1].range(9, 0));
+                        } else {
+                            filt_5x5[patch_idx] = u10_to_s11(line_buf_src[3][win_col].range(9, 0));
+                        }
+                    }
+                }
+            }
+        }
+
         s11_t final_patch[PATCH_SIZE];
-        isp.compute_iir_blend(src_s11_5x5, win_size, fusion.blend0, fusion.blend1,
+        isp.compute_iir_blend(filt_5x5, win_size, fusion.blend0, fusion.blend1,
                               dir_avg.avg0_u, dir_avg.avg1_u,
                               (int)grad_h, (int)grad_v, final_patch);
 
         pixel_t dout_pixel = s11_to_u10(final_patch[12]);
 
-        // Write output pixel to stream
+        //======================================================================
+        // Write back filtered value to line buffer (FEEDBACK)
+        //======================================================================
+        // Update line_buf_filt[4] with filtered value for current position
+        // This makes the filtered value available for subsequent pixel processing
+        pixel_pack_t filt_row4_pack = line_buf_filt[4][col_val];
+        pixel_t filt_row4_even = filt_row4_pack.range(9, 0);
+        line_buf_filt[4][col_val] = (pixel_pack_t)dout_pixel << 0 | (pixel_pack_t)filt_row4_even << 10;
+        // Also update col_filt[4][4] so the next column sees the filtered value
+        col_filt[4][4] = dout_pixel;
+
+        //======================================================================
+        // Output
+        //======================================================================
         axis_pixel_t dout;
         dout.data = dout_pixel;
         dout.last = (row_val == (unsigned int)img_height - 1 && col_val == (unsigned int)img_width - 1) ? 1 : 0;
         dout.user = (row_val == 0 && col_val == 0) ? 1 : 0;
 
-        // Only output after 2 row delay to account for window
+        // Output when current row >= 2 (window fully valid from original line buffer)
         if (row_val >= 2) {
             dout_stream.write(dout);
         }

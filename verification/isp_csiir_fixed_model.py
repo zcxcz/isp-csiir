@@ -379,6 +379,7 @@ class ISPCSIIRFixedModel:
                                  emit_linebuffer_rows: bool = False,
                                  emit_patch_stream: bool = False):
         src = input_image.astype(np.int32).copy()
+        filt = input_image.astype(np.int32).copy()
         self.src_uv = src
         h, w = src.shape
         center_stream = [] if emit_center_stream else None
@@ -387,12 +388,25 @@ class ISPCSIIRFixedModel:
 
         for j in range(h):
             for i in range(w):
+                # Gradient/stage2/stage3: from ORIGINAL (src)
                 grad_h, grad_v, _, win_size, center_win = self._grad_triplet_win_size(src, i, j)
                 stage2 = self._stage2_directional_avg(center_win, win_size)
                 grads = self._stage3_neighbors(src, i, j)
                 blend0_grad, blend1_grad = self._stage3_fusion(stage2["avg0"], stage2["avg1"], grads)
+
+                # Stage4 IIR blend: rows 0-3 from filt, row 4 from src
+                stage4_win = np.zeros((5, 5), dtype=np.int32)
+                for dy in range(-2, 3):
+                    for dx in range(-2, 3):
+                        x = self._clip(i + dx, 0, w - 1)
+                        y = self._clip(j + dy, 0, h - 1)
+                        if dy < 0:
+                            stage4_win[dy + 2, dx + 2] = filt[y, x]
+                        else:
+                            stage4_win[dy + 2, dx + 2] = src[y, x]
+
                 stage4 = self._stage4_window_blend(
-                    center_win,
+                    stage4_win,
                     win_size,
                     blend0_grad,
                     blend1_grad,
@@ -410,21 +424,30 @@ class ISPCSIIRFixedModel:
                         "center_y": j,
                         "patch_u10": np.vectorize(self._s11_to_u10)(patch).astype(np.int32),
                     })
+
+                # Write filtered patch back to filt
                 for dy in range(-2, 3):
                     for dx in range(-2, 3):
                         x = self._clip(i + dx, 0, w - 1)
                         y = self._clip(j + dy, 0, h - 1)
-                        src[y, x] = self._s11_to_u10(int(patch[dy + 2, dx + 2]))
+                        filt[y, x] = self._s11_to_u10(int(patch[dy + 2, dx + 2]))
 
             if linebuffer_rows is not None:
-                row_indices = np.array([self._clip(j + dy, 0, h - 1) for dy in range(-2, 3)], dtype=np.int32)
+                row_indices = np.array([self._clip(j + dy, 0, h - 1) for dy in range(-2, 5)], dtype=np.int32)
                 linebuffer_rows.append({
                     "after_row": j,
                     "row_indices": row_indices,
-                    "rows": src[row_indices, :].copy(),
+                    "rows": filt[row_indices, :].copy(),
                 })
 
-        final_image = src.astype(np.int32)
+        # Output: rows 0-1 from input (boundary), rows 2+ from filt
+        final_image = np.empty((h, w), dtype=np.int32)
+        for j in range(min(2, h)):
+            for i in range(w):
+                final_image[j, i] = input_image[j, i]
+        for j in range(2, h):
+            for i in range(w):
+                final_image[j, i] = filt[j, i]
         if center_stream is None and linebuffer_rows is None and patch_stream is None:
             return final_image
         if center_stream is not None and linebuffer_rows is None and patch_stream is None:
@@ -464,15 +487,54 @@ class ISPCSIIRFixedModel:
 
 
 def test_fixed_model():
-    config = FixedPointConfig(IMG_WIDTH=32, IMG_HEIGHT=32)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--width', type=int, default=64)
+    parser.add_argument('--height', type=int, default=64)
+    parser.add_argument('--input', type=str, default=None)
+    parser.add_argument('--output', type=str, default=None)
+    parser.add_argument('--compare', type=str, default=None)
+    args = parser.parse_args()
+
+    config = FixedPointConfig(IMG_WIDTH=args.width, IMG_HEIGHT=args.height)
     model = ISPCSIIRFixedModel(config)
-    np.random.seed(42)
-    input_img = np.random.randint(0, 1024, (32, 32), dtype=np.int32)
+
+    if args.input:
+        with open(args.input) as f:
+            input_vals = [int(line.strip(), 16) for line in f if line.strip()]
+        input_img = np.array(input_vals, dtype=np.int32).reshape(args.height, args.width)
+    else:
+        np.random.seed(42)
+        input_img = np.random.randint(0, 1024, (args.height, args.width), dtype=np.int32)
+
     output = model.process(input_img)
     print(f"输入范围: [{input_img.min()}, {input_img.max()}]")
     print(f"输出范围: [{output.min()}, {output.max()}]")
     assert output.min() >= 0
     assert output.max() <= 1023
+
+    if args.output:
+        np.savetxt(args.output, output.astype(np.int32), fmt='%03x')
+        print(f"Python output written to {args.output}")
+
+    if args.compare:
+        with open(args.compare) as f:
+            ref_vals = [int(line.strip(), 16) for line in f if line.strip()]
+        ref = np.array(ref_vals, dtype=np.int32).reshape(args.height, args.width)
+        diff = np.abs(output.astype(np.int32) - ref.astype(np.int32))
+        diff_count = np.sum(diff != 0)
+        max_diff = int(np.max(diff))
+        mean_diff = float(np.mean(diff[diff != 0])) if diff_count > 0 else 0.0
+        print(f"\n=== Python vs Reference Comparison ===")
+        print(f"Total pixels: {args.width * args.height}")
+        print(f"Pixels with diff: {diff_count}")
+        print(f"Max abs diff: {max_diff}")
+        print(f"Mean abs diff: {mean_diff:.2f}")
+        if diff_count == 0:
+            print("PASS: All outputs match!")
+        else:
+            print(f"FAIL: {diff_count} pixels differ")
+
     print("定点模型测试通过!")
     return output
 
