@@ -2,6 +2,7 @@
 // Module: common_lb_ctrl
 // Purpose: Line buffer control for multi-row storage (circular buffer)
 //          Controls write/read pointers for N-row line buffer
+//          Integrates boundary padding for 5x5 window operations
 // Author: rtl-impl
 // Date: 2026-04-18
 //-----------------------------------------------------------------------------
@@ -10,11 +11,12 @@
 //   - Write: fills rows progressively with incoming packed data
 //   - Read: releases rows to downstream when buffer is full
 //   - Tracks valid row count and read/write column pointers
+//   - Boundary padding for 5x5 window at image edges
 //
-// Design Principles:
-//   1. Separate always blocks for logically unrelated signals
-//   2. No state machine for simple logic (use direct combinational where possible)
-//   3. Two-segment state machine only when needed (not three-segment)
+// Interface (data_wi_fb style):
+//   Write: din_valid/din_ready/din (upstream) -> wr_en/wr_addr/wr_data (to SRAM)
+//   Read:  rd_en/rd_addr (to SRAM) -> rd_data/rd_data_valid (from SRAM)
+//          -> common_padding -> dout_valid/dout_ready/dout (to downstream)
 //
 // Write Condition:
 //   din_ready = enable AND (
@@ -23,8 +25,8 @@
 //   )
 //
 // Read Condition:
+//   rows_ready = (valid_row_cnt == NUM_ROWS)  // buffer full
 //   rd_en = rows_ready AND rd_ready
-//   rows_ready = (valid_row_cnt == NUM_ROWS) AND 后级无反压
 //
 // EOL Handling:
 //   When EOL fires: if row was started (wr_col_ptr > 0), valid_row_cnt++
@@ -38,13 +40,15 @@
 //   LINE_ADDR_WIDTH   - bits for column address
 //   NUM_ROWS          - number of rows in line buffer (default 4)
 //   PACK_PIXELS       - pixels per word (default 2)
+//   PAD_SIZE          - padding size for 5x5 window (default 2)
 //-----------------------------------------------------------------------------
 
 module common_lb_ctrl #(
     parameter DATA_WIDTH        = 10,  // bits per pixel
     parameter LINE_ADDR_WIDTH   = 14,  // IMG_WIDTH/2 depth
     parameter NUM_ROWS          = 4,   // number of rows
-    parameter PACK_PIXELS        = 2    // pixels per word
+    parameter PACK_PIXELS       = 2,    // pixels per word
+    parameter PAD_SIZE          = 2     // padding size (2 for 5x5 window)
 )(
     input  wire                              clk,
     input  wire                              rst_n,
@@ -52,21 +56,32 @@ module common_lb_ctrl #(
 
     // Configuration
     input  wire [LINE_ADDR_WIDTH-1:0]       img_width,
+    input  wire [LINE_ADDR_WIDTH-1:0]       img_height,
 
-    // Write side (from upstream, to common_lb)
+    // Write interface (from upstream, data_wi_fb)
     input  wire [DATA_WIDTH*PACK_PIXELS-1:0] din,
     input  wire                              din_valid,
     output wire                              din_ready,
+
+    // Write control (to SRAM)
     output wire [LINE_ADDR_WIDTH-1:0]        wr_addr,
-    output wire [NUM_ROWS-1:0]               wr_row_en,
+    output wire [NUM_ROWS-1:0]             wr_row_en,
     output wire [DATA_WIDTH*PACK_PIXELS-1:0] wr_data,
     output wire                              wr_en,
 
-    // Read side (to downstream)
+    // Read control (to SRAM)
     output wire                              rd_en,
-    output wire [LINE_ADDR_WIDTH-1:0]         rd_addr,
+    output wire [LINE_ADDR_WIDTH-1:0]        rd_addr,
+
+    // Read data (from SRAM)
+    input  wire [DATA_WIDTH*PACK_PIXELS*NUM_ROWS-1:0] rd_data,
+    input  wire                                              rd_data_valid,
+
+    // Output (to downstream, data_wi_fb with padding applied)
     output wire                              rows_ready,
-    input  wire                              rd_ready,
+    output wire [DATA_WIDTH*PACK_PIXELS*NUM_ROWS-1:0] dout,
+    output wire                              dout_valid,
+    input  wire                              dout_ready,
 
     // Frame signals
     input  wire                              sof,
@@ -77,23 +92,25 @@ module common_lb_ctrl #(
     // Local Parameters
     //=========================================================================
     localparam CTR_WIDTH = $clog2(NUM_ROWS+1);  // valid_row_cnt width
+    localparam PACK_DW   = DATA_WIDTH * PACK_PIXELS;  // packed pixel width
+    localparam COL_DW    = PACK_DW * NUM_ROWS;  // full column width
 
     //=========================================================================
     // Internal Signals - Write Side
     //=========================================================================
-    reg [CTR_WIDTH-1:0]            valid_row_cnt;  // 0 to NUM_ROWS
-    reg [$clog2(NUM_ROWS)-1:0]     wr_row_ptr;    // 0 to NUM_ROWS-1 cycling
-    reg [LINE_ADDR_WIDTH-1:0]       wr_col_ptr;    // column write pointer
-    reg                             row_started;    // current row has data
+    reg [CTR_WIDTH-1:0]            valid_row_cnt;
+    reg [$clog2(NUM_ROWS)-1:0]     wr_row_ptr;
+    reg [LINE_ADDR_WIDTH-1:0]       wr_col_ptr;
+    reg                             row_started;
 
     //=========================================================================
     // Internal Signals - Read Side
     //=========================================================================
-    reg [$clog2(NUM_ROWS)-1:0]     rd_row_ptr;    // 0 to NUM_ROWS-1 cycling
-    reg [LINE_ADDR_WIDTH-1:0]       rd_col_ptr;    // column read pointer
+    reg [$clog2(NUM_ROWS)-1:0]     rd_row_ptr;
+    reg [LINE_ADDR_WIDTH-1:0]       rd_col_ptr;
 
     //=========================================================================
-    // EOL Edge Detection (Write Side)
+    // EOL Edge Detection
     //=========================================================================
     reg  eol_d1;
     wire eol_fire;
@@ -113,8 +130,6 @@ module common_lb_ctrl #(
     //=========================================================================
     // Write Column Pointer & Row Started Flag
     //=========================================================================
-    // These two are tightly coupled - both update on din_valid && din_ready
-    // EOL resets wr_col_ptr and marks row as complete
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             wr_col_ptr <= {LINE_ADDR_WIDTH{1'b0}};
@@ -134,7 +149,6 @@ module common_lb_ctrl #(
     //=========================================================================
     // Write Row Pointer
     //=========================================================================
-    // Advances on EOL (if row was started), cycles 0→1→2→3→0
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             wr_row_ptr <= {$clog2(NUM_ROWS){1'b0}};
@@ -147,22 +161,17 @@ module common_lb_ctrl #(
     end
 
     //=========================================================================
-    // Valid Row Count (Single Block for Write and Read)
+    // Valid Row Count (Write Increment / Read Decrement)
     //=========================================================================
-    // Write: EOL fires and row was started -> increment (if not already full)
-    // Read:  rd_en fires and row completed -> decrement
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             valid_row_cnt <= {CTR_WIDTH{1'b0}};
         end else if (sof) begin
             valid_row_cnt <= {CTR_WIDTH{1'b0}};
         end else if (enable) begin
-            // EOL fires: row write completed, increment valid_row_cnt if not full
             if (eol_fire && row_started && valid_row_cnt < NUM_ROWS) begin
                 valid_row_cnt <= valid_row_cnt + 1'b1;
-            end
-            // Read row completed: rd_col_ptr reached end and rd_en fires
-            else if (rd_en && rd_col_ptr >= img_width - 1 && valid_row_cnt > 0) begin
+            end else if (rd_en && rd_col_ptr >= img_width - 1 && valid_row_cnt > 0) begin
                 valid_row_cnt <= valid_row_cnt - 1'b1;
             end
         end
@@ -171,7 +180,6 @@ module common_lb_ctrl #(
     //=========================================================================
     // Read Column Pointer
     //=========================================================================
-    // Advances on each read cycle
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rd_col_ptr <= {LINE_ADDR_WIDTH{1'b0}};
@@ -189,7 +197,6 @@ module common_lb_ctrl #(
     //=========================================================================
     // Read Row Pointer
     //=========================================================================
-    // Advances when rd_col_ptr wraps (row completed)
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rd_row_ptr <= {$clog2(NUM_ROWS){1'b0}};
@@ -202,18 +209,34 @@ module common_lb_ctrl #(
     end
 
     //=========================================================================
+    // common_padding Instance
+    //=========================================================================
+    common_padding #(
+        .DATA_WIDTH    (DATA_WIDTH),
+        .PACK_PIXELS   (PACK_PIXELS),
+        .NUM_ROWS      (NUM_ROWS),
+        .PAD_SIZE      (PAD_SIZE)
+    ) u_padding (
+        .center_x      (rd_col_ptr),
+        .center_y      (rd_row_ptr),
+        .img_width     (img_width),
+        .img_height    (img_height),
+        .rd_data       (rd_data),
+        .rd_data_valid (rd_data_valid),
+        .dout          (dout),
+        .dout_valid    (dout_valid)
+    );
+
+    //=========================================================================
     // Output Assignments
     //=========================================================================
     // Din ready: buffer not full, or can overwrite oldest unread data
-    // Can write when: buffer not full OR (full but wr_ptr < rd_ptr)
     assign din_ready = enable &&
                        (valid_row_cnt < NUM_ROWS ||
                         (valid_row_cnt == NUM_ROWS && wr_col_ptr < rd_col_ptr));
 
-    // Write enable
+    // Write control
     assign wr_en = enable && din_valid && din_ready;
-
-    // Write address
     assign wr_addr = wr_col_ptr;
     assign wr_data = din;
 
@@ -229,7 +252,7 @@ module common_lb_ctrl #(
     assign rows_ready = (valid_row_cnt == NUM_ROWS);
 
     // Read enable: buffer full and downstream ready
-    assign rd_en = rows_ready && rd_ready;
+    assign rd_en = rows_ready && dout_ready;
 
     // Read address
     assign rd_addr = rd_col_ptr;
