@@ -26,16 +26,16 @@
 //   NUM_ROWS          - number of rows in line buffer (default 4)
 //   PACK_PIXELS       - pixels per word (default 2)
 //   PAD_SIZE          - padding size (default 2)
+//   READ_START_THRESHOLD - gradient path starts reading when valid_row_cnt >= this
 //-----------------------------------------------------------------------------
 
 module common_lb_ctrl #(
-    parameter DATA_WIDTH        = 10,  // bits per pixel
-    parameter LINE_ADDR_WIDTH   = 14,  // IMG_WIDTH/2 depth
-    parameter NUM_ROWS          = 4,   // number of rows in line buffer
-    parameter PACK_PIXELS       = 2,   // pixels per word
-    parameter PAD_SIZE          = 2,   // padding size (2 for 5x5 window)
-    parameter READ_START_THRESHOLD = 4, // start reading when valid_row_cnt >= this value
-    parameter FILTER_ROWS       = 1    // extra rows for filter (default 1 for filter path)
+    parameter DATA_WIDTH            = 10,  // bits per pixel
+    parameter LINE_ADDR_WIDTH       = 14,  // IMG_WIDTH/2 depth
+    parameter NUM_ROWS              = 4,   // number of rows in line buffer
+    parameter PACK_PIXELS           = 2,   // pixels per word
+    parameter PAD_SIZE              = 2,   // padding size (2 for 5x5 window)
+    parameter READ_START_THRESHOLD  = 4    // start reading when valid_row_cnt >= this
 )(
     input  wire                              clk,
     input  wire                              rst_n,
@@ -62,12 +62,9 @@ module common_lb_ctrl #(
 
     // Output (5 columns, each column = 5 pixels = 5 rows)
     // Format: {col4, col3, col2, col1, col0} where colX = {p4, p3, p2, p1, p0}
-    output wire                              rows_ready,   // gradient path ready
-    output wire                              rows_ready_f, // filter path ready
-    output wire [DATA_WIDTH*5*5-1:0]        dout,  // 5 cols × 5 pixels (gradient)
+    output wire                              rows_ready,
+    output wire [DATA_WIDTH*5*5-1:0]        dout,
     output wire                              dout_valid,
-    output wire [DATA_WIDTH-1:0]            cur_pixel_f,  // current pixel for filter
-    output wire                              cur_pixel_f_valid,
     input  wire                              dout_ready,
 
     // Frame signals
@@ -78,87 +75,75 @@ module common_lb_ctrl #(
     //=========================================================================
     // Local Parameters
     //=========================================================================
-    localparam CTR_WIDTH = $clog2(NUM_ROWS+1);
-    localparam PACK_DW   = DATA_WIDTH * PACK_PIXELS;           // 2P width
-    localparam LB_DW     = PACK_DW * NUM_ROWS;                 // 4 rows × 2P
-    localparam FIFO_DEPTH = 8;
-    localparam FIFO_ADDR_W = $clog2(FIFO_DEPTH);
+    localparam CTR_WIDTH     = $clog2(NUM_ROWS+1);
+    localparam PACK_DW       = DATA_WIDTH * PACK_PIXELS;           // 2P width
+    localparam FIFO_DEPTH    = 8;
+    localparam FIFO_ADDR_W   = $clog2(FIFO_DEPTH);
 
     //=========================================================================
     // Internal Signals - s2p (1P → 2P)
     //=========================================================================
-    wire [PACK_DW-1:0]            s2p_dout;
-    wire                              s2p_dout_valid;
-    wire                              s2p_din_ready;
+    wire [PACK_DW-1:0]                        s2p_dout;
+    wire                                      s2p_dout_valid;
+    wire                                      s2p_din_ready;
 
     //=========================================================================
     // Internal Signals - fifo_din (buffer current 1P pixel)
     //=========================================================================
-    wire                              fifo_wr;
-    wire [DATA_WIDTH-1:0]            fifo_wdata;
-    wire                              fifo_rd;
-    wire [DATA_WIDTH-1:0]            fifo_rdata;
-    wire                              fifo_empty;
-    wire                              fifo_full;
+    wire                                      fifo_wr;
+    wire [DATA_WIDTH-1:0]                    fifo_wdata;
+    wire                                      fifo_rd;
+    wire [DATA_WIDTH-1:0]                    fifo_rdata;
+    wire                                      fifo_empty;
+    wire                                      fifo_full;
 
     //=========================================================================
     // Internal Signals - p2s (4 rows 2P → 4 cols 1P)
     //=========================================================================
-    wire [DATA_WIDTH*NUM_ROWS-1:0] p2s_dout;  // 4 pixels (1 per row)
-    wire                              p2s_dout_valid;
-    wire                              p2s_din_ready;
+    wire [DATA_WIDTH*NUM_ROWS-1:0]          p2s_dout;
+    wire                                      p2s_dout_valid;
+    wire                                      p2s_din_ready;
 
     //=========================================================================
     // Internal Signals - padding
     //=========================================================================
-    wire [DATA_WIDTH*5*5-1:0]        pad_dout;
-    wire                              pad_dout_valid;
+    wire [DATA_WIDTH*5*5-1:0]                pad_dout;
+    wire                                      pad_dout_valid;
+
+    //=========================================================================
+    // Handshake indicators
+    //=========================================================================
+    wire                                      wr_shake;
+    wire                                      rd_shake;
 
     //=========================================================================
     // Write Side
     //=========================================================================
-    reg [CTR_WIDTH-1:0]            valid_row_cnt;
-    reg [$clog2(NUM_ROWS)-1:0]     wr_row_ptr;
-    reg [LINE_ADDR_WIDTH-1:0]       wr_col_ptr;
-    reg                             row_started;
+    reg [CTR_WIDTH-1:0]                    valid_row_cnt;
+    reg [$clog2(NUM_ROWS)-1:0]             wr_row_ptr;
+    reg [LINE_ADDR_WIDTH-1:0]               wr_col_ptr;
+    reg                                      row_started;
 
     //=========================================================================
     // Read Side
     //=========================================================================
-    reg [$clog2(NUM_ROWS)-1:0]     rd_row_ptr;
-    reg [LINE_ADDR_WIDTH-1:0]       rd_col_ptr;
-    reg                              rd_active;
+    reg [$clog2(NUM_ROWS)-1:0]             rd_row_ptr;
+    reg [LINE_ADDR_WIDTH-1:0]               rd_col_ptr;
+    reg                                      rd_active;
 
     //=========================================================================
-    // p2s and cur pixel buffering for 5x5 window assembly
+    // p2s buffering (5x5 window assembly)
     //=========================================================================
     // p2s outputs PACK_PIXELS columns per cycle, each column has NUM_ROWS pixels
     // For 5x5 window: we need 5 columns, so we need to buffer across cycles
-    //
-    // With PACK_PIXELS=2, p2s outputs 2 columns per cycle:
-    //   - p2s_dout[DATA_WIDTH*0 +: DATA_WIDTH] = col0_row0
-    //   - p2s_dout[DATA_WIDTH*1 +: DATA_WIDTH] = col0_row1
-    //   - ...
-    //   - p2s_dout[DATA_WIDTH*PACK_PIXELS*0 +: DATA_WIDTH] = col0_rowN
-    //   - p2s_dout[DATA_WIDTH*PACK_PIXELS*1 +: DATA_WIDTH] = col1_rowN
-    //
-    // For a 5x5 window at position x, we need columns x-2, x-1, x, x+1, x+2
-    // With 2P packing: 2 consecutive columns share one SRAM address
-    // So we need to read at multiple addresses and buffer p2s outputs
-    //
-    // Current design limitation: PACK_PIXELS=2 gives only 2 columns per cycle
-    // To get 5 columns, we need to read across multiple SRAM addresses
-    // and buffer the p2s outputs across cycles.
     //=========================================================================
-    // Buffer for p2s outputs (stores NUM_ROWS pixels per column)
-    reg [DATA_WIDTH*NUM_ROWS-1:0] p2s_buf0;  // Column 0 from first SRAM read
-    reg [DATA_WIDTH*NUM_ROWS-1:0] p2s_buf1;  // Column 1 from first SRAM read
-    reg [DATA_WIDTH*NUM_ROWS-1:0] p2s_buf2;  // Column 2 from second SRAM read
-    reg [DATA_WIDTH*NUM_ROWS-1:0] p2s_buf3;  // Column 3 from second SRAM read
-    reg [DATA_WIDTH-1:0]          cur_buf [0:3];  // Current pixel for each column
-    reg [1:0]                     buf_filled;  // Track which buffer slots have data
-    reg                              buf_valid;
-    reg [2:0]                       rd_cycle;   // Track which read cycle we're in
+    reg [DATA_WIDTH*NUM_ROWS-1:0]          p2s_buf0;
+    reg [DATA_WIDTH*NUM_ROWS-1:0]          p2s_buf1;
+    reg [DATA_WIDTH*NUM_ROWS-1:0]          p2s_buf2;
+    reg [DATA_WIDTH*NUM_ROWS-1:0]          p2s_buf3;
+    reg [DATA_WIDTH-1:0]                   cur_buf [0:3];
+    reg [2:0]                              rd_cycle;
+    reg                                      buf_valid;
 
     //=========================================================================
     // s2p Instance (1P → 2P)
@@ -194,40 +179,15 @@ module common_lb_ctrl #(
         .count      ()
     );
 
-    assign fifo_wr = din_valid && s2p_din_ready && enable;
+    //=========================================================================
+    // Handshake signals
+    //=========================================================================
+    assign wr_shake = enable && s2p_dout_valid && s2p_din_ready;
+    assign rd_shake = enable && p2s_dout_valid && p2s_din_ready;
+
+    assign fifo_wr    = din_valid && s2p_din_ready && enable;
     assign fifo_wdata = din;
-
-    //=========================================================================
-    // fifo_din_f Instance (extra buffer for filter path)
-    //=========================================================================
-    // Filter path needs extra buffering because it starts computing 1 row later
-    // than gradient, but both consume din at the same rate
-    //=========================================================================
-    wire                              fifo_f_wr;
-    wire [DATA_WIDTH-1:0]            fifo_f_wdata;
-    wire                              fifo_f_rd;
-    wire [DATA_WIDTH-1:0]            fifo_f_rdata;
-    wire                              fifo_f_empty;
-    wire                              fifo_f_full;
-
-    common_fifo #(
-        .DATA_WIDTH (DATA_WIDTH),
-        .DEPTH      (FIFO_DEPTH),
-        .ADDR_WIDTH (FIFO_ADDR_W)
-    ) u_fifo_din_f (
-        .clk        (clk),
-        .rst_n      (rst_n),
-        .wr_en      (fifo_f_wr),
-        .wr_data    (fifo_f_wdata),
-        .rd_en      (fifo_f_rd),
-        .rd_data    (fifo_f_rdata),
-        .empty      (fifo_f_empty),
-        .full       (fifo_f_full),
-        .count      ()
-    );
-
-    assign fifo_f_wr = din_valid && s2p_din_ready && enable;
-    assign fifo_f_wdata = din;
+    assign fifo_rd    = rd_shake;
 
     //=========================================================================
     // EOL Edge Detection
@@ -248,35 +208,52 @@ module common_lb_ctrl #(
     assign eol_fire = eol && !eol_d1 && enable;
 
     //=========================================================================
-    // Write Side Logic
+    // wr_col_ptr
     //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             wr_col_ptr <= {LINE_ADDR_WIDTH{1'b0}};
-            row_started <= 1'b0;
         end else if (sof) begin
             wr_col_ptr <= {LINE_ADDR_WIDTH{1'b0}};
-            row_started <= 1'b0;
-        end else if (enable && s2p_dout_valid && s2p_din_ready) begin
+        end else if (wr_shake) begin
             wr_col_ptr <= wr_col_ptr + 1'b1;
-            row_started <= 1'b1;
         end else if (eol_fire) begin
             wr_col_ptr <= {LINE_ADDR_WIDTH{1'b0}};
+        end
+    end
+
+    //=========================================================================
+    // row_started
+    //=========================================================================
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            row_started <= 1'b0;
+        end else if (sof) begin
+            row_started <= 1'b0;
+        end else if (wr_shake) begin
+            row_started <= 1'b1;
+        end else if (eol_fire) begin
             row_started <= 1'b0;
         end
     end
 
+    //=========================================================================
+    // wr_row_ptr
+    //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             wr_row_ptr <= {$clog2(NUM_ROWS){1'b0}};
         end else if (sof) begin
             wr_row_ptr <= {$clog2(NUM_ROWS){1'b0}};
-        end else if (enable && eol_fire && row_started) begin
+        end else if (eol_fire && row_started) begin
             wr_row_ptr <= (wr_row_ptr == NUM_ROWS-1) ? {$clog2(NUM_ROWS){1'b0}}
                                                       : wr_row_ptr + 1'b1;
         end
     end
 
+    //=========================================================================
+    // valid_row_cnt
+    //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             valid_row_cnt <= {CTR_WIDTH{1'b0}};
@@ -285,21 +262,19 @@ module common_lb_ctrl #(
         end else if (enable) begin
             if (eol_fire && row_started && valid_row_cnt < NUM_ROWS) begin
                 valid_row_cnt <= valid_row_cnt + 1'b1;
-            end else if (buf_valid && dout_ready && rd_col_ptr >= img_width - 1 && valid_row_cnt > 0) begin
-                valid_row_cnt <= valid_row_cnt - 1'b1;
             end
         end
     end
 
     //=========================================================================
-    // Read Side Logic
+    // rd_col_ptr
     //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rd_col_ptr <= {LINE_ADDR_WIDTH{1'b0}};
         end else if (sof) begin
             rd_col_ptr <= {LINE_ADDR_WIDTH{1'b0}};
-        end else if (enable && buf_valid && dout_ready) begin
+        end else if (buf_valid && dout_ready) begin
             if (rd_col_ptr >= img_width - 1) begin
                 rd_col_ptr <= {LINE_ADDR_WIDTH{1'b0}};
             end else begin
@@ -308,17 +283,23 @@ module common_lb_ctrl #(
         end
     end
 
+    //=========================================================================
+    // rd_row_ptr
+    //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rd_row_ptr <= {$clog2(NUM_ROWS){1'b0}};
         end else if (sof) begin
             rd_row_ptr <= {$clog2(NUM_ROWS){1'b0}};
-        end else if (enable && buf_valid && dout_ready && rd_col_ptr >= img_width - 1) begin
+        end else if (buf_valid && dout_ready && rd_col_ptr >= img_width - 1) begin
             rd_row_ptr <= (rd_row_ptr == NUM_ROWS-1) ? {$clog2(NUM_ROWS){1'b0}}
                                                       : rd_row_ptr + 1'b1;
         end
     end
 
+    //=========================================================================
+    // rd_active
+    //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rd_active <= 1'b0;
@@ -353,118 +334,137 @@ module common_lb_ctrl #(
         .sof        (sof)
     );
 
-    assign fifo_rd = p2s_dout_valid && p2s_din_ready && enable;
-    assign fifo_f_rd = rows_ready_f && !fifo_f_empty && enable;  // filter path reads with delay
-
     //=========================================================================
-    // Buffer Management - Assemble 5 columns from p2s output + current pixel
+    // p2s_buf0
     //=========================================================================
-    // For 5x5 window with PACK_PIXELS=2, p2s outputs 2 columns per cycle.
-    // We need 5 columns, so we buffer across multiple cycles.
-    //
-    // Each p2s_buf stores NUM_ROWS (4) pixels representing one column.
-    // The current pixel (from fifo_din) is duplicated to fill row 4.
-    //
-    // The 5 columns for 5x5 window at position x:
-    //   col0: from p2s_buf0 (column x-2)
-    //   col1: from p2s_buf1 (column x-1)
-    //   col2: from p2s_buf2 (column x)
-    //   col3: from p2s_buf3 (column x+1)
-    //   col4: cur_buf (current pixel, duplicated for all rows)
-    //=========================================================================
-    integer i;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             p2s_buf0 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-            p2s_buf1 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-            p2s_buf2 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-            p2s_buf3 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-            for (i = 0; i < 4; i = i + 1) begin
-                cur_buf[i] <= {DATA_WIDTH{1'b0}};
-            end
-            buf_filled <= 2'b00;
-            buf_valid <= 1'b0;
-            rd_cycle <= 3'd0;
         end else if (sof) begin
             p2s_buf0 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-            p2s_buf1 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-            p2s_buf2 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-            p2s_buf3 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-            for (i = 0; i < 4; i = i + 1) begin
-                cur_buf[i] <= {DATA_WIDTH{1'b0}};
-            end
-            buf_filled <= 2'b00;
-            buf_valid <= 1'b0;
-            rd_cycle <= 3'd0;
-        end else if (enable) begin
-            // Capture p2s output and current pixel when rd is active
-            if (p2s_dout_valid && p2s_din_ready) begin
-                case (rd_cycle)
-                    3'd0: begin
-                        // First read: columns x-2, x-1
-                        p2s_buf0 <= p2s_dout;  // column x-2 (first pixel pair)
-                        cur_buf[0] <= fifo_rdata;  // gradient path current pixel
-                        rd_cycle <= 3'd1;
-                    end
-                    3'd1: begin
-                        // Second read: columns x, x+1
-                        p2s_buf1 <= p2s_dout;  // column x-1 (first pixel pair)
-                        cur_buf[1] <= fifo_rdata;
-                        rd_cycle <= 3'd2;
-                    end
-                    3'd2: begin
-                        // Third read: columns x+2, x+3 (only need x+2)
-                        p2s_buf2 <= p2s_dout;  // column x (second pixel pair)
-                        cur_buf[2] <= fifo_rdata;
-                        rd_cycle <= 3'd3;
-                    end
-                    3'd3: begin
-                        // Fourth read: columns x+4, x+5 (only need x+2)
-                        p2s_buf3 <= p2s_dout;  // column x+1 (second pixel pair)
-                        cur_buf[3] <= fifo_rdata;
-                        rd_cycle <= 3'd0;
-                        buf_valid <= 1'b1;  // All columns buffered
-                    end
-                endcase
-            end
-
-            // Clear buffer when output is consumed
-            if (buf_valid && dout_ready) begin
-                buf_valid <= 1'b0;
-                buf_filled <= 2'b00;
-            end
+        end else if (rd_shake && rd_cycle == 3'd0) begin
+            p2s_buf0 <= p2s_dout;
         end
     end
 
     //=========================================================================
-    // Filter path current pixel (delayed by extra FIFO)
+    // p2s_buf1
     //=========================================================================
-    // The filter path needs 1 extra row delay, so it reads from fifo_f
-    // which is filled in parallel with fifo (gradient path)
-    //=========================================================================
-    reg [DATA_WIDTH-1:0] cur_pixel_f_r;
-    reg                  cur_pixel_f_valid_r;
-
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            cur_pixel_f_r <= {DATA_WIDTH{1'b0}};
-            cur_pixel_f_valid_r <= 1'b0;
+            p2s_buf1 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
         end else if (sof) begin
-            cur_pixel_f_r <= {DATA_WIDTH{1'b0}};
-            cur_pixel_f_valid_r <= 1'b0;
-        end else if (enable) begin
-            // Filter path reads from fifo_f with 1 row delay
-            if (rows_ready_f && !fifo_f_empty) begin
-                cur_pixel_f_r <= fifo_f_rdata;
-                cur_pixel_f_valid_r <= 1'b1;
-            end else if (cur_pixel_f_valid_r && dout_ready) begin
-                cur_pixel_f_valid_r <= 1'b0;
-            end
+            p2s_buf1 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
+        end else if (rd_shake && rd_cycle == 3'd1) begin
+            p2s_buf1 <= p2s_dout;
         end
     end
 
-    assign cur_pixel_f = cur_pixel_f_r;
-    assign cur_pixel_f_valid = cur_pixel_f_valid_r;
+    //=========================================================================
+    // p2s_buf2
+    //=========================================================================
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            p2s_buf2 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
+        end else if (sof) begin
+            p2s_buf2 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
+        end else if (rd_shake && rd_cycle == 3'd2) begin
+            p2s_buf2 <= p2s_dout;
+        end
+    end
+
+    //=========================================================================
+    // p2s_buf3
+    //=========================================================================
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            p2s_buf3 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
+        end else if (sof) begin
+            p2s_buf3 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
+        end else if (rd_shake && rd_cycle == 3'd3) begin
+            p2s_buf3 <= p2s_dout;
+        end
+    end
+
+    //=========================================================================
+    // cur_buf[0]
+    //=========================================================================
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            cur_buf[0] <= {DATA_WIDTH{1'b0}};
+        end else if (sof) begin
+            cur_buf[0] <= {DATA_WIDTH{1'b0}};
+        end else if (rd_shake && rd_cycle == 3'd0) begin
+            cur_buf[0] <= fifo_rdata;
+        end
+    end
+
+    //=========================================================================
+    // cur_buf[1]
+    //=========================================================================
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            cur_buf[1] <= {DATA_WIDTH{1'b0}};
+        end else if (sof) begin
+            cur_buf[1] <= {DATA_WIDTH{1'b0}};
+        end else if (rd_shake && rd_cycle == 3'd1) begin
+            cur_buf[1] <= fifo_rdata;
+        end
+    end
+
+    //=========================================================================
+    // cur_buf[2]
+    //=========================================================================
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            cur_buf[2] <= {DATA_WIDTH{1'b0}};
+        end else if (sof) begin
+            cur_buf[2] <= {DATA_WIDTH{1'b0}};
+        end else if (rd_shake && rd_cycle == 3'd2) begin
+            cur_buf[2] <= fifo_rdata;
+        end
+    end
+
+    //=========================================================================
+    // cur_buf[3]
+    //=========================================================================
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            cur_buf[3] <= {DATA_WIDTH{1'b0}};
+        end else if (sof) begin
+            cur_buf[3] <= {DATA_WIDTH{1'b0}};
+        end else if (rd_shake && rd_cycle == 3'd3) begin
+            cur_buf[3] <= fifo_rdata;
+        end
+    end
+
+    //=========================================================================
+    // rd_cycle
+    //=========================================================================
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            rd_cycle <= 3'd0;
+        end else if (sof) begin
+            rd_cycle <= 3'd0;
+        end else if (rd_shake) begin
+            rd_cycle <= rd_cycle + 1'b1;
+        end
+    end
+
+    //=========================================================================
+    // buf_valid
+    //=========================================================================
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            buf_valid <= 1'b0;
+        end else if (sof) begin
+            buf_valid <= 1'b0;
+        end else if (rd_shake && rd_cycle == 3'd3) begin
+            buf_valid <= 1'b1;
+        end else if (buf_valid && dout_ready) begin
+            buf_valid <= 1'b0;
+        end
+    end
 
     //=========================================================================
     // Assemble 5x5 window from buffered columns for padding
@@ -473,39 +473,33 @@ module common_lb_ctrl #(
     // rows 0-3 from p2s_buf, row 4 from cur_buf (current pixel duplicated)
     //
     // Window format: {col4, col3, col2, col1, col0} where colX = {p4, p3, p2, p1, p0}
-    // Each pixel is DATA_WIDTH bits
     //=========================================================================
-    wire [DATA_WIDTH*5*5-1:0] window_5x5;  // 5 cols × 5 rows
+    wire [DATA_WIDTH*5*5-1:0] window_5x5;
 
     genvar row_idx;
     generate
         for (row_idx = 0; row_idx < NUM_ROWS; row_idx = row_idx + 1) begin : gen_window_rows
-            // Column 0 (oldest, from p2s_buf0)
             assign window_5x5[row_idx * DATA_WIDTH +: DATA_WIDTH] =
                    p2s_buf0[row_idx * DATA_WIDTH +: DATA_WIDTH];
-            // Column 1 (from p2s_buf1)
             assign window_5x5[5 * DATA_WIDTH + row_idx * DATA_WIDTH +: DATA_WIDTH] =
                    p2s_buf1[row_idx * DATA_WIDTH +: DATA_WIDTH];
-            // Column 2 (from p2s_buf2)
             assign window_5x5[2 * 5 * DATA_WIDTH + row_idx * DATA_WIDTH +: DATA_WIDTH] =
                    p2s_buf2[row_idx * DATA_WIDTH +: DATA_WIDTH];
-            // Column 3 (from p2s_buf3)
             assign window_5x5[3 * 5 * DATA_WIDTH + row_idx * DATA_WIDTH +: DATA_WIDTH] =
                    p2s_buf3[row_idx * DATA_WIDTH +: DATA_WIDTH];
         end
     endgenerate
 
-    // Row 4 (current pixel, duplicated for all 5 columns)
     genvar col_idx;
     generate
         for (col_idx = 0; col_idx < 5; col_idx = col_idx + 1) begin : gen_cur_row
             assign window_5x5[4 * DATA_WIDTH + col_idx * 5 * DATA_WIDTH +: DATA_WIDTH] =
-                   cur_buf[col_idx % 4];  // Cycle through cur_buf entries
+                   cur_buf[col_idx % 4];
         end
     endgenerate
 
     //=========================================================================
-    // Padding Instance - Apply boundary padding to 5x5 window
+    // Padding Instance
     //=========================================================================
     common_padding #(
         .DATA_WIDTH   (DATA_WIDTH),
@@ -524,22 +518,17 @@ module common_lb_ctrl #(
     );
 
     //=========================================================================
-    // Output: Connect padded output to dout
+    // Output assignments
     //=========================================================================
-    // The padding module outputs the properly padded 5x5 window
-    assign dout = pad_dout;
+    assign dout       = pad_dout;
     assign dout_valid = pad_dout_valid;
-
-    // rows_ready: gradient path ready when valid_row_cnt >= READ_START_THRESHOLD
     assign rows_ready = (valid_row_cnt >= READ_START_THRESHOLD);
-    // rows_ready_f: filter path ready when valid_row_cnt >= NUM_ROWS (all rows filled)
-    assign rows_ready_f = (valid_row_cnt >= NUM_ROWS);
+    assign din_ready  = s2p_din_ready && enable && !fifo_full;
 
-    // Input ready: s2p ready and not full
-    assign din_ready = s2p_din_ready && enable && !fifo_full;
-
+    //=========================================================================
     // Write control
-    assign wr_en = enable && s2p_dout_valid && s2p_din_ready;
+    //=========================================================================
+    assign wr_en   = wr_shake;
     assign wr_addr = wr_col_ptr;
     assign wr_data = s2p_dout;
 
@@ -550,8 +539,10 @@ module common_lb_ctrl #(
         end
     endgenerate
 
+    //=========================================================================
     // Read control
-    assign rd_en = rd_active;
+    //=========================================================================
+    assign rd_en   = rd_active;
     assign rd_addr = rd_col_ptr;
 
 endmodule
