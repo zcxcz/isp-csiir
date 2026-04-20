@@ -91,13 +91,13 @@ BLEND_FACTOR_3X3 = np.array([
     [0, 0, 0, 0, 0],
 ], dtype=np.int32)
 BLEND_FACTOR_4X4 = np.array([
-    [1, 2, 2, 2, 1],
-    [2, 4, 4, 4, 2],
-    [2, 4, 4, 4, 2],
-    [2, 4, 4, 4, 2],
-    [1, 2, 2, 2, 1],
+    [1, 1, 2, 1, 1],
+    [1, 2, 4, 2, 1],
+    [2, 4, 8, 4, 2],
+    [1, 2, 4, 2, 1],
+    [1, 1, 2, 1, 1],
 ], dtype=np.int32)
-BLEND_FACTOR_5X5 = np.full((5, 5), 4, dtype=np.int32)
+BLEND_FACTOR_5X5 = np.ones((5, 5), dtype=np.int32)
 
 SOBEL_X = np.array([
     [1, 1, 1, 1, 1],
@@ -205,7 +205,9 @@ class ISPCSIIRFixedModel:
     def _stage1_gradient(self, win: np.ndarray) -> Tuple[int, int, int]:
         grad_h = int(np.sum(win * SOBEL_X))
         grad_v = int(np.sum(win * SOBEL_Y))
-        grad = self._round_div(abs(grad_h), 5) + self._round_div(abs(grad_v), 5)
+        grad_h = abs(grad_h)  # Match C++ sobel_gradient_5x5 behavior
+        grad_v = abs(grad_v)
+        grad = self._round_div(grad_h, 5) + self._round_div(grad_v, 5)
         return grad_h, grad_v, grad
 
     def _grad_triplet_win_size(self, img: np.ndarray, i: int, j: int) -> Tuple[int, int, int, int, np.ndarray]:
@@ -283,20 +285,35 @@ class ISPCSIIRFixedModel:
         return {"c": grad_c, "u": grad_u, "d": grad_d, "l": grad_l, "r": grad_r}
 
     def _stage3_fusion(self, avg0: Dict[str, int], avg1: Dict[str, int], grads: Dict[str, int]) -> Tuple[int, int]:
-        grad_pairs = [("u", grads["u"]), ("d", grads["d"]), ("l", grads["l"]), ("r", grads["r"]), ("c", grads["c"])]
-        grad_pairs_sorted = sorted(grad_pairs, key=lambda item: item[1], reverse=True)
-        grad_inv = {}
-        for idx, (dir_name, _) in enumerate(grad_pairs_sorted):
-            grad_inv[dir_name] = grad_pairs_sorted[4 - idx][1]
-        grad_sum = sum(grad_inv.values())
+        # g array like C++: order is u(0), d(1), l(2), r(3), c(4)
+        g = [grads["u"], grads["d"], grads["l"], grads["r"], grads["c"]]
 
-        def blend(values: Dict[str, int]) -> int:
+        # Bubble sort tracking original indices (same as C++ grad_inverse_remap)
+        idx = list(range(5))  # [0, 1, 2, 3, 4]
+        for i in range(4):
+            for j in range(4 - i):
+                if g[idx[j]] < g[idx[j+1]]:
+                    idx[j], idx[j+1] = idx[j+1], idx[j]
+
+        # Build inverse mapping: inv[original_idx_of_value_at_sorted_pos_i] = g_sorted[4-i]
+        # Like C++: for i in 0..4: inv[idx[4-i]] = g[idx[i]]
+        inv = [0, 0, 0, 0, 0]
+        for i in range(5):
+            inv[idx[4 - i]] = g[idx[i]]
+
+        grad_sum = sum(inv)
+
+        # v array order: c(0), u(1), d(2), l(3), r(4) - matches C++
+        v0 = [avg0["c"], avg0["u"], avg0["d"], avg0["l"], avg0["r"]]
+        v1 = [avg1["c"], avg1["u"], avg1["d"], avg1["l"], avg1["r"]]
+
+        def blend(v: List[int]) -> int:
             if grad_sum == 0:
-                return self._saturate_s11(self._round_div(sum(values.values()), 5))
-            total = sum(int(values[key]) * int(grad_inv[key]) for key in ("c", "u", "d", "l", "r"))
+                return self._saturate_s11(self._round_div(sum(v), 5))
+            total = sum(v[i] * inv[i] for i in range(5))
             return self._saturate_s11(self._round_div(total, grad_sum))
 
-        return blend(avg0), blend(avg1)
+        return blend(v0), blend(v1)
 
     def _mix_scalar_with_patch(self, scalar: int, src_uv_s11_5x5: np.ndarray, factor: np.ndarray) -> np.ndarray:
         out = np.zeros((5, 5), dtype=np.int32)
@@ -318,8 +335,8 @@ class ISPCSIIRFixedModel:
         blend0_hor = self._saturate_s11(self._round_div(ratio * blend0_grad + (64 - ratio) * avg0_u, 64))
         blend1_hor = self._saturate_s11(self._round_div(ratio * blend1_grad + (64 - ratio) * avg1_u, 64))
 
-        orient_factor = BLEND_FACTOR_2X2_H if abs(grad_v) > abs(grad_h) else BLEND_FACTOR_2X2_V
-        orientation = "h" if abs(grad_v) > abs(grad_h) else "v"
+        orient_factor = BLEND_FACTOR_2X2_H if abs(grad_h) > abs(grad_v) else BLEND_FACTOR_2X2_V
+        orientation = "h" if abs(grad_h) > abs(grad_v) else "v"
 
         t0, t1, t2, t3 = self.config.win_size_thresh
         blend0_win = None
@@ -398,7 +415,7 @@ class ISPCSIIRFixedModel:
                 stage4_win = np.zeros((5, 5), dtype=np.int32)
                 for dy in range(-2, 3):
                     for dx in range(-2, 3):
-                        x = self._clip(i + dx, 0, w - 1)
+                        x = self._clip(i + dx * HORIZONTAL_TAP_STEP, 0, w - 1)
                         y = self._clip(j + dy, 0, h - 1)
                         if dy < 0:
                             stage4_win[dy + 2, dx + 2] = filt[y, x]
@@ -425,12 +442,8 @@ class ISPCSIIRFixedModel:
                         "patch_u10": np.vectorize(self._s11_to_u10)(patch).astype(np.int32),
                     })
 
-                # Write filtered patch back to filt
-                for dy in range(-2, 3):
-                    for dx in range(-2, 3):
-                        x = self._clip(i + dx, 0, w - 1)
-                        y = self._clip(j + dy, 0, h - 1)
-                        filt[y, x] = self._s11_to_u10(int(patch[dy + 2, dx + 2]))
+                # Write filtered center pixel back to filt (matches C++ behavior)
+                filt[j, i] = self._s11_to_u10(int(patch[2, 2]))
 
             if linebuffer_rows is not None:
                 row_indices = np.array([self._clip(j + dy, 0, h - 1) for dy in range(-2, 5)], dtype=np.int32)
