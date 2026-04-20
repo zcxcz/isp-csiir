@@ -116,6 +116,7 @@ module common_lb_ctrl #(
     wire                                      wr_shake;
     wire                                      rd_shake;
     wire                                      eol_fire;
+    wire                                      eol_d1;
 
     //=========================================================================
     // Internal Signals - wr_col_ptr pipeline
@@ -188,6 +189,106 @@ module common_lb_ctrl #(
     wire                                      pipe_row_started_dout_ready;
 
     //=========================================================================
+    // Internal Signals - p2s_buf0 pipeline
+    //=========================================================================
+    wire                                      pipe_p2s_buf0_din_valid;
+    wire                                      pipe_p2s_buf0_din_ready;
+    wire [DATA_WIDTH*NUM_ROWS-1:0]          pipe_p2s_buf0_din;
+    wire [DATA_WIDTH*NUM_ROWS-1:0]            pipe_p2s_buf0_dout;
+    wire                                      pipe_p2s_buf0_dout_valid;
+    wire                                      pipe_p2s_buf0_dout_ready;
+
+    //=========================================================================
+    // Internal Signals - p2s_buf1 pipeline
+    //=========================================================================
+    wire                                      pipe_p2s_buf1_din_valid;
+    wire                                      pipe_p2s_buf1_din_ready;
+    wire [DATA_WIDTH*NUM_ROWS-1:0]          pipe_p2s_buf1_din;
+    wire [DATA_WIDTH*NUM_ROWS-1:0]            pipe_p2s_buf1_dout;
+    wire                                      pipe_p2s_buf1_dout_valid;
+    wire                                      pipe_p2s_buf1_dout_ready;
+
+    //=========================================================================
+    // Internal Signals - p2s_buf2 pipeline
+    //=========================================================================
+    wire                                      pipe_p2s_buf2_din_valid;
+    wire                                      pipe_p2s_buf2_din_ready;
+    wire [DATA_WIDTH*NUM_ROWS-1:0]          pipe_p2s_buf2_din;
+    wire [DATA_WIDTH*NUM_ROWS-1:0]            pipe_p2s_buf2_dout;
+    wire                                      pipe_p2s_buf2_dout_valid;
+    wire                                      pipe_p2s_buf2_dout_ready;
+
+    //=========================================================================
+    // Internal Signals - p2s_buf3 pipeline
+    //=========================================================================
+    wire                                      pipe_p2s_buf3_din_valid;
+    wire                                      pipe_p2s_buf3_din_ready;
+    wire [DATA_WIDTH*NUM_ROWS-1:0]          pipe_p2s_buf3_din;
+    wire [DATA_WIDTH*NUM_ROWS-1:0]            pipe_p2s_buf3_dout;
+    wire                                      pipe_p2s_buf3_dout_valid;
+    wire                                      pipe_p2s_buf3_dout_ready;
+
+    //=========================================================================
+    // Internal Signals - cur_buf[0] pipeline
+    //=========================================================================
+    wire                                      pipe_cur_buf0_din_valid;
+    wire                                      pipe_cur_buf0_din_ready;
+    wire [DATA_WIDTH-1:0]                    pipe_cur_buf0_din;
+    wire [DATA_WIDTH-1:0]                     pipe_cur_buf0_dout;
+    wire                                      pipe_cur_buf0_dout_valid;
+    wire                                      pipe_cur_buf0_dout_ready;
+
+    //=========================================================================
+    // Internal Signals - cur_buf[1] pipeline
+    //=========================================================================
+    wire                                      pipe_cur_buf1_din_valid;
+    wire                                      pipe_cur_buf1_din_ready;
+    wire [DATA_WIDTH-1:0]                    pipe_cur_buf1_din;
+    wire [DATA_WIDTH-1:0]                     pipe_cur_buf1_dout;
+    wire                                      pipe_cur_buf1_dout_valid;
+    wire                                      pipe_cur_buf1_dout_ready;
+
+    //=========================================================================
+    // Internal Signals - cur_buf[2] pipeline
+    //=========================================================================
+    wire                                      pipe_cur_buf2_din_valid;
+    wire                                      pipe_cur_buf2_din_ready;
+    wire [DATA_WIDTH-1:0]                    pipe_cur_buf2_din;
+    wire [DATA_WIDTH-1:0]                     pipe_cur_buf2_dout;
+    wire                                      pipe_cur_buf2_dout_valid;
+    wire                                      pipe_cur_buf2_dout_ready;
+
+    //=========================================================================
+    // Internal Signals - cur_buf[3] pipeline
+    //=========================================================================
+    wire                                      pipe_cur_buf3_din_valid;
+    wire                                      pipe_cur_buf3_din_ready;
+    wire [DATA_WIDTH-1:0]                    pipe_cur_buf3_din;
+    wire [DATA_WIDTH-1:0]                     pipe_cur_buf3_dout;
+    wire                                      pipe_cur_buf3_dout_valid;
+    wire                                      pipe_cur_buf3_dout_ready;
+
+    //=========================================================================
+    // Internal Signals - rd_cycle pipeline
+    //=========================================================================
+    wire                                      pipe_rd_cycle_din_valid;
+    wire                                      pipe_rd_cycle_din_ready;
+    wire [2:0]                              pipe_rd_cycle_din;
+    wire [2:0]                                pipe_rd_cycle_dout;
+    wire                                      pipe_rd_cycle_dout_valid;
+    wire                                      pipe_rd_cycle_dout_ready;
+
+    //=========================================================================
+    // Internal Signals - buf_valid pipeline
+    //=========================================================================
+    wire                                      pipe_buf_valid_din_valid;
+    wire                                      pipe_buf_valid_din_ready;
+    wire                                      pipe_buf_valid_din;
+    wire                                      pipe_buf_valid_dout;
+    wire                                      pipe_buf_valid_dout_valid;
+    wire                                      pipe_buf_valid_dout_ready;
+
+    //=========================================================================
     // Internal Signals - window assembly
     //=========================================================================
     wire [DATA_WIDTH*5*5-1:0]                window_5x5;
@@ -203,17 +304,16 @@ module common_lb_ctrl #(
     reg                                      rd_active_raw;
     reg                                      row_started_raw;
     reg                                      eol_d1_raw;
-
-    //=========================================================================
-    // p2s buffering
-    //=========================================================================
-    reg [DATA_WIDTH*NUM_ROWS-1:0]          p2s_buf0;
-    reg [DATA_WIDTH*NUM_ROWS-1:0]          p2s_buf1;
-    reg [DATA_WIDTH*NUM_ROWS-1:0]          p2s_buf2;
-    reg [DATA_WIDTH*NUM_ROWS-1:0]          p2s_buf3;
-    reg [DATA_WIDTH-1:0]                   cur_buf [0:3];
-    reg [2:0]                              rd_cycle;
-    reg                                      buf_valid;
+    reg [DATA_WIDTH*NUM_ROWS-1:0]          p2s_buf0_raw;
+    reg [DATA_WIDTH*NUM_ROWS-1:0]          p2s_buf1_raw;
+    reg [DATA_WIDTH*NUM_ROWS-1:0]          p2s_buf2_raw;
+    reg [DATA_WIDTH*NUM_ROWS-1:0]          p2s_buf3_raw;
+    reg [DATA_WIDTH-1:0]                    cur_buf0_raw;
+    reg [DATA_WIDTH-1:0]                    cur_buf1_raw;
+    reg [DATA_WIDTH-1:0]                    cur_buf2_raw;
+    reg [DATA_WIDTH-1:0]                    cur_buf3_raw;
+    reg [2:0]                              rd_cycle_raw;
+    reg                                      buf_valid_raw;
 
     //=========================================================================
     // Handshake signals
@@ -262,33 +362,33 @@ module common_lb_ctrl #(
     //=========================================================================
     // rd_col_ptr pipeline logic
     //=========================================================================
-    assign pipe_rd_col_ptr_din_valid = sof || (buf_valid && dout_ready);
+    assign pipe_rd_col_ptr_din_valid = sof || (pipe_buf_valid_dout && dout_ready);
     assign pipe_rd_col_ptr_din_ready = 1'b1;
     assign pipe_rd_col_ptr_din =
         (sof)       ? {LINE_ADDR_WIDTH{1'b0}} :
-        (buf_valid && dout_ready) ?
+        (pipe_buf_valid_dout && dout_ready) ?
             (rd_col_ptr_raw >= img_width - 1) ? {LINE_ADDR_WIDTH{1'b0}} : rd_col_ptr_raw + 1'b1 :
         rd_col_ptr_raw;
 
     //=========================================================================
     // rd_row_ptr pipeline logic
     //=========================================================================
-    assign pipe_rd_row_ptr_din_valid = sof || (buf_valid && dout_ready && (rd_col_ptr_raw >= img_width - 1));
+    assign pipe_rd_row_ptr_din_valid = sof || (pipe_buf_valid_dout && dout_ready && (rd_col_ptr_raw >= img_width - 1));
     assign pipe_rd_row_ptr_din_ready = 1'b1;
     assign pipe_rd_row_ptr_din =
         (sof)       ? {$clog2(NUM_ROWS){1'b0}} :
-        (buf_valid && dout_ready && (rd_col_ptr_raw >= img_width - 1)) ?
+        (pipe_buf_valid_dout && dout_ready && (rd_col_ptr_raw >= img_width - 1)) ?
             (rd_row_ptr_raw == NUM_ROWS-1) ? {$clog2(NUM_ROWS){1'b0}} : rd_row_ptr_raw + 1'b1 :
         rd_row_ptr_raw;
 
     //=========================================================================
     // rd_active pipeline logic
     //=========================================================================
-    assign pipe_rd_active_din_valid = sof || (buf_valid && (rd_col_ptr_raw >= img_width - 1));
+    assign pipe_rd_active_din_valid = sof || (pipe_buf_valid_dout && (rd_col_ptr_raw >= img_width - 1));
     assign pipe_rd_active_din_ready = 1'b1;
     assign pipe_rd_active_din =
         (sof)       ? 1'b0 :
-        (buf_valid && (rd_col_ptr_raw >= img_width - 1)) ? 1'b0 :
+        (pipe_buf_valid_dout && (rd_col_ptr_raw >= img_width - 1)) ? 1'b0 :
         (valid_row_cnt_raw >= READ_START_THRESHOLD && !rd_active_raw) ? 1'b1 :
         rd_active_raw;
 
@@ -302,6 +402,107 @@ module common_lb_ctrl #(
         (wr_shake)  ? 1'b1 :
         (eol_fire)  ? 1'b0 :
         row_started_raw;
+
+    //=========================================================================
+    // p2s_buf0 pipeline logic
+    //=========================================================================
+    assign pipe_p2s_buf0_din_valid = sof || 1'b1;
+    assign pipe_p2s_buf0_din_ready = 1'b1;
+    assign pipe_p2s_buf0_din =
+        (sof)       ? {DATA_WIDTH*NUM_ROWS{1'b0}} :
+        (rd_shake && rd_cycle_raw == 3'd0) ? p2s_dout :
+        p2s_buf0_raw;
+
+    //=========================================================================
+    // p2s_buf1 pipeline logic
+    //=========================================================================
+    assign pipe_p2s_buf1_din_valid = sof || 1'b1;
+    assign pipe_p2s_buf1_din_ready = 1'b1;
+    assign pipe_p2s_buf1_din =
+        (sof)       ? {DATA_WIDTH*NUM_ROWS{1'b0}} :
+        (rd_shake && rd_cycle_raw == 3'd1) ? p2s_dout :
+        p2s_buf1_raw;
+
+    //=========================================================================
+    // p2s_buf2 pipeline logic
+    //=========================================================================
+    assign pipe_p2s_buf2_din_valid = sof || 1'b1;
+    assign pipe_p2s_buf2_din_ready = 1'b1;
+    assign pipe_p2s_buf2_din =
+        (sof)       ? {DATA_WIDTH*NUM_ROWS{1'b0}} :
+        (rd_shake && rd_cycle_raw == 3'd2) ? p2s_dout :
+        p2s_buf2_raw;
+
+    //=========================================================================
+    // p2s_buf3 pipeline logic
+    //=========================================================================
+    assign pipe_p2s_buf3_din_valid = sof || 1'b1;
+    assign pipe_p2s_buf3_din_ready = 1'b1;
+    assign pipe_p2s_buf3_din =
+        (sof)       ? {DATA_WIDTH*NUM_ROWS{1'b0}} :
+        (rd_shake && rd_cycle_raw == 3'd3) ? p2s_dout :
+        p2s_buf3_raw;
+
+    //=========================================================================
+    // cur_buf[0] pipeline logic
+    //=========================================================================
+    assign pipe_cur_buf0_din_valid = sof || 1'b1;
+    assign pipe_cur_buf0_din_ready = 1'b1;
+    assign pipe_cur_buf0_din =
+        (sof)       ? {DATA_WIDTH{1'b0}} :
+        (rd_shake && rd_cycle_raw == 3'd0) ? fifo_rdata :
+        cur_buf0_raw;
+
+    //=========================================================================
+    // cur_buf[1] pipeline logic
+    //=========================================================================
+    assign pipe_cur_buf1_din_valid = sof || 1'b1;
+    assign pipe_cur_buf1_din_ready = 1'b1;
+    assign pipe_cur_buf1_din =
+        (sof)       ? {DATA_WIDTH{1'b0}} :
+        (rd_shake && rd_cycle_raw == 3'd1) ? fifo_rdata :
+        cur_buf1_raw;
+
+    //=========================================================================
+    // cur_buf[2] pipeline logic
+    //=========================================================================
+    assign pipe_cur_buf2_din_valid = sof || 1'b1;
+    assign pipe_cur_buf2_din_ready = 1'b1;
+    assign pipe_cur_buf2_din =
+        (sof)       ? {DATA_WIDTH{1'b0}} :
+        (rd_shake && rd_cycle_raw == 3'd2) ? fifo_rdata :
+        cur_buf2_raw;
+
+    //=========================================================================
+    // cur_buf[3] pipeline logic
+    //=========================================================================
+    assign pipe_cur_buf3_din_valid = sof || 1'b1;
+    assign pipe_cur_buf3_din_ready = 1'b1;
+    assign pipe_cur_buf3_din =
+        (sof)       ? {DATA_WIDTH{1'b0}} :
+        (rd_shake && rd_cycle_raw == 3'd3) ? fifo_rdata :
+        cur_buf3_raw;
+
+    //=========================================================================
+    // rd_cycle pipeline logic
+    //=========================================================================
+    assign pipe_rd_cycle_din_valid = sof || 1'b1;
+    assign pipe_rd_cycle_din_ready = 1'b1;
+    assign pipe_rd_cycle_din =
+        (sof)       ? 3'd0 :
+        (rd_shake)  ? rd_cycle_raw + 1'b1 :
+        rd_cycle_raw;
+
+    //=========================================================================
+    // buf_valid pipeline logic
+    //=========================================================================
+    assign pipe_buf_valid_din_valid = sof || 1'b1;
+    assign pipe_buf_valid_din_ready = 1'b1;
+    assign pipe_buf_valid_din =
+        (sof)       ? 1'b0 :
+        (rd_shake && rd_cycle_raw == 3'd3) ? 1'b1 :
+        (pipe_buf_valid_dout && dout_ready) ? 1'b0 :
+        buf_valid_raw;
 
     //=========================================================================
     // Output assignments
@@ -333,13 +534,13 @@ module common_lb_ctrl #(
     generate
         for (row_idx = 0; row_idx < NUM_ROWS; row_idx = row_idx + 1) begin : gen_window_rows
             assign window_5x5[row_idx * DATA_WIDTH +: DATA_WIDTH] =
-                   p2s_buf0[row_idx * DATA_WIDTH +: DATA_WIDTH];
+                   pipe_p2s_buf0_dout[row_idx * DATA_WIDTH +: DATA_WIDTH];
             assign window_5x5[5 * DATA_WIDTH + row_idx * DATA_WIDTH +: DATA_WIDTH] =
-                   p2s_buf1[row_idx * DATA_WIDTH +: DATA_WIDTH];
+                   pipe_p2s_buf1_dout[row_idx * DATA_WIDTH +: DATA_WIDTH];
             assign window_5x5[2 * 5 * DATA_WIDTH + row_idx * DATA_WIDTH +: DATA_WIDTH] =
-                   p2s_buf2[row_idx * DATA_WIDTH +: DATA_WIDTH];
+                   pipe_p2s_buf2_dout[row_idx * DATA_WIDTH +: DATA_WIDTH];
             assign window_5x5[3 * 5 * DATA_WIDTH + row_idx * DATA_WIDTH +: DATA_WIDTH] =
-                   p2s_buf3[row_idx * DATA_WIDTH +: DATA_WIDTH];
+                   pipe_p2s_buf3_dout[row_idx * DATA_WIDTH +: DATA_WIDTH];
         end
     endgenerate
 
@@ -347,229 +548,34 @@ module common_lb_ctrl #(
     generate
         for (col_idx = 0; col_idx < 5; col_idx = col_idx + 1) begin : gen_cur_row
             assign window_5x5[4 * DATA_WIDTH + col_idx * 5 * DATA_WIDTH +: DATA_WIDTH] =
-                   cur_buf[col_idx % 4];
+                   (col_idx == 0) ? pipe_cur_buf0_dout :
+                   (col_idx == 1) ? pipe_cur_buf1_dout :
+                   (col_idx == 2) ? pipe_cur_buf2_dout :
+                   pipe_cur_buf3_dout;
         end
     endgenerate
 
     //=========================================================================
-    // wr_col_ptr_raw
+    // Raw signal assignments (registered inputs to pipelines)
     //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            wr_col_ptr_raw <= {LINE_ADDR_WIDTH{1'b0}};
-        end else begin
-            wr_col_ptr_raw <= pipe_wr_col_ptr_din;
-        end
-    end
-
-    //=========================================================================
-    // wr_row_ptr_raw
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            wr_row_ptr_raw <= {$clog2(NUM_ROWS){1'b0}};
-        end else begin
-            wr_row_ptr_raw <= pipe_wr_row_ptr_din;
-        end
-    end
-
-    //=========================================================================
-    // valid_row_cnt_raw
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            valid_row_cnt_raw <= {CTR_WIDTH{1'b0}};
-        end else begin
-            valid_row_cnt_raw <= pipe_valid_row_cnt_din;
-        end
-    end
-
-    //=========================================================================
-    // rd_col_ptr_raw
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            rd_col_ptr_raw <= {LINE_ADDR_WIDTH{1'b0}};
-        end else begin
-            rd_col_ptr_raw <= pipe_rd_col_ptr_din;
-        end
-    end
-
-    //=========================================================================
-    // rd_row_ptr_raw
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            rd_row_ptr_raw <= {$clog2(NUM_ROWS){1'b0}};
-        end else begin
-            rd_row_ptr_raw <= pipe_rd_row_ptr_din;
-        end
-    end
-
-    //=========================================================================
-    // rd_active_raw
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            rd_active_raw <= 1'b0;
-        end else begin
-            rd_active_raw <= pipe_rd_active_din;
-        end
-    end
-
-    //=========================================================================
-    // row_started_raw
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            row_started_raw <= 1'b0;
-        end else begin
-            row_started_raw <= pipe_row_started_din;
-        end
-    end
-
-    //=========================================================================
-    // eol_d1_raw
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            eol_d1_raw <= 1'b0;
-        end else begin
-            eol_d1_raw <= eol;
-        end
-    end
-
-    //=========================================================================
-    // p2s_buf0
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            p2s_buf0 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-        end else if (sof) begin
-            p2s_buf0 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-        end else if (rd_shake && rd_cycle == 3'd0) begin
-            p2s_buf0 <= p2s_dout;
-        end
-    end
-
-    //=========================================================================
-    // p2s_buf1
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            p2s_buf1 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-        end else if (sof) begin
-            p2s_buf1 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-        end else if (rd_shake && rd_cycle == 3'd1) begin
-            p2s_buf1 <= p2s_dout;
-        end
-    end
-
-    //=========================================================================
-    // p2s_buf2
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            p2s_buf2 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-        end else if (sof) begin
-            p2s_buf2 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-        end else if (rd_shake && rd_cycle == 3'd2) begin
-            p2s_buf2 <= p2s_dout;
-        end
-    end
-
-    //=========================================================================
-    // p2s_buf3
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            p2s_buf3 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-        end else if (sof) begin
-            p2s_buf3 <= {DATA_WIDTH*NUM_ROWS{1'b0}};
-        end else if (rd_shake && rd_cycle == 3'd3) begin
-            p2s_buf3 <= p2s_dout;
-        end
-    end
-
-    //=========================================================================
-    // cur_buf[0]
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            cur_buf[0] <= {DATA_WIDTH{1'b0}};
-        end else if (sof) begin
-            cur_buf[0] <= {DATA_WIDTH{1'b0}};
-        end else if (rd_shake && rd_cycle == 3'd0) begin
-            cur_buf[0] <= fifo_rdata;
-        end
-    end
-
-    //=========================================================================
-    // cur_buf[1]
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            cur_buf[1] <= {DATA_WIDTH{1'b0}};
-        end else if (sof) begin
-            cur_buf[1] <= {DATA_WIDTH{1'b0}};
-        end else if (rd_shake && rd_cycle == 3'd1) begin
-            cur_buf[1] <= fifo_rdata;
-        end
-    end
-
-    //=========================================================================
-    // cur_buf[2]
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            cur_buf[2] <= {DATA_WIDTH{1'b0}};
-        end else if (sof) begin
-            cur_buf[2] <= {DATA_WIDTH{1'b0}};
-        end else if (rd_shake && rd_cycle == 3'd2) begin
-            cur_buf[2] <= fifo_rdata;
-        end
-    end
-
-    //=========================================================================
-    // cur_buf[3]
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            cur_buf[3] <= {DATA_WIDTH{1'b0}};
-        end else if (sof) begin
-            cur_buf[3] <= {DATA_WIDTH{1'b0}};
-        end else if (rd_shake && rd_cycle == 3'd3) begin
-            cur_buf[3] <= fifo_rdata;
-        end
-    end
-
-    //=========================================================================
-    // rd_cycle
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            rd_cycle <= 3'd0;
-        end else if (sof) begin
-            rd_cycle <= 3'd0;
-        end else if (rd_shake) begin
-            rd_cycle <= rd_cycle + 1'b1;
-        end
-    end
-
-    //=========================================================================
-    // buf_valid
-    //=========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            buf_valid <= 1'b0;
-        end else if (sof) begin
-            buf_valid <= 1'b0;
-        end else if (rd_shake && rd_cycle == 3'd3) begin
-            buf_valid <= 1'b1;
-        end else if (buf_valid && dout_ready) begin
-            buf_valid <= 1'b0;
-        end
-    end
+    assign wr_col_ptr_raw = pipe_wr_col_ptr_dout;
+    assign wr_row_ptr_raw = pipe_wr_row_ptr_dout;
+    assign valid_row_cnt_raw = pipe_valid_row_cnt_dout;
+    assign rd_col_ptr_raw = pipe_rd_col_ptr_dout;
+    assign rd_row_ptr_raw = pipe_rd_row_ptr_dout;
+    assign rd_active_raw = pipe_rd_active_dout;
+    assign row_started_raw = pipe_row_started_dout;
+    assign eol_d1_raw = eol_d1;
+    assign p2s_buf0_raw = pipe_p2s_buf0_dout;
+    assign p2s_buf1_raw = pipe_p2s_buf1_dout;
+    assign p2s_buf2_raw = pipe_p2s_buf2_dout;
+    assign p2s_buf3_raw = pipe_p2s_buf3_dout;
+    assign cur_buf0_raw = pipe_cur_buf0_dout;
+    assign cur_buf1_raw = pipe_cur_buf1_dout;
+    assign cur_buf2_raw = pipe_cur_buf2_dout;
+    assign cur_buf3_raw = pipe_cur_buf3_dout;
+    assign rd_cycle_raw = pipe_rd_cycle_dout;
+    assign buf_valid_raw = pipe_buf_valid_dout;
 
     //=========================================================================
     // Module Instances
@@ -642,13 +648,31 @@ module common_lb_ctrl #(
         .img_width    (img_width),
         .img_height   (img_height),
         .rd_data      (window_5x5),
-        .rd_data_valid(buf_valid),
+        .rd_data_valid(pipe_buf_valid_dout),
         .dout         (pad_dout),
         .dout_valid   (pad_dout_valid)
     );
 
     //=========================================================================
-    // Pipeline Instances
+    // eol_d1 pipeline instance
+    //=========================================================================
+    common_pipe_slice #(
+        .DATA_WIDTH (1),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_eol_d1 (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (eol),
+        .din_valid  (1'b1),
+        .din_ready  (),
+        .dout       (eol_d1),
+        .dout_valid (),
+        .dout_ready (1'b1)
+    );
+
+    //=========================================================================
+    // Pipeline Instances - Control Signals
     //=========================================================================
     // wr_col_ptr pipeline
     common_pipe_slice #(
@@ -760,6 +784,169 @@ module common_lb_ctrl #(
         .dout       (pipe_row_started_dout),
         .dout_valid (pipe_row_started_dout_valid),
         .dout_ready (pipe_row_started_dout_ready)
+    );
+
+    //=========================================================================
+    // Pipeline Instances - Data Path
+    //=========================================================================
+    // p2s_buf0 pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH (DATA_WIDTH * NUM_ROWS),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_p2s_buf0 (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_p2s_buf0_din),
+        .din_valid  (pipe_p2s_buf0_din_valid),
+        .din_ready  (pipe_p2s_buf0_din_ready),
+        .dout       (pipe_p2s_buf0_dout),
+        .dout_valid (pipe_p2s_buf0_dout_valid),
+        .dout_ready (pipe_p2s_buf0_dout_ready)
+    );
+
+    // p2s_buf1 pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH (DATA_WIDTH * NUM_ROWS),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_p2s_buf1 (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_p2s_buf1_din),
+        .din_valid  (pipe_p2s_buf1_din_valid),
+        .din_ready  (pipe_p2s_buf1_din_ready),
+        .dout       (pipe_p2s_buf1_dout),
+        .dout_valid (pipe_p2s_buf1_dout_valid),
+        .dout_ready (pipe_p2s_buf1_dout_ready)
+    );
+
+    // p2s_buf2 pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH (DATA_WIDTH * NUM_ROWS),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_p2s_buf2 (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_p2s_buf2_din),
+        .din_valid  (pipe_p2s_buf2_din_valid),
+        .din_ready  (pipe_p2s_buf2_din_ready),
+        .dout       (pipe_p2s_buf2_dout),
+        .dout_valid (pipe_p2s_buf2_dout_valid),
+        .dout_ready (pipe_p2s_buf2_dout_ready)
+    );
+
+    // p2s_buf3 pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH (DATA_WIDTH * NUM_ROWS),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_p2s_buf3 (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_p2s_buf3_din),
+        .din_valid  (pipe_p2s_buf3_din_valid),
+        .din_ready  (pipe_p2s_buf3_din_ready),
+        .dout       (pipe_p2s_buf3_dout),
+        .dout_valid (pipe_p2s_buf3_dout_valid),
+        .dout_ready (pipe_p2s_buf3_dout_ready)
+    );
+
+    // cur_buf[0] pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH (DATA_WIDTH),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_cur_buf0 (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_cur_buf0_din),
+        .din_valid  (pipe_cur_buf0_din_valid),
+        .din_ready  (pipe_cur_buf0_din_ready),
+        .dout       (pipe_cur_buf0_dout),
+        .dout_valid (pipe_cur_buf0_dout_valid),
+        .dout_ready (pipe_cur_buf0_dout_ready)
+    );
+
+    // cur_buf[1] pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH (DATA_WIDTH),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_cur_buf1 (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_cur_buf1_din),
+        .din_valid  (pipe_cur_buf1_din_valid),
+        .din_ready  (pipe_cur_buf1_din_ready),
+        .dout       (pipe_cur_buf1_dout),
+        .dout_valid (pipe_cur_buf1_dout_valid),
+        .dout_ready (pipe_cur_buf1_dout_ready)
+    );
+
+    // cur_buf[2] pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH (DATA_WIDTH),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_cur_buf2 (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_cur_buf2_din),
+        .din_valid  (pipe_cur_buf2_din_valid),
+        .din_ready  (pipe_cur_buf2_din_ready),
+        .dout       (pipe_cur_buf2_dout),
+        .dout_valid (pipe_cur_buf2_dout_valid),
+        .dout_ready (pipe_cur_buf2_dout_ready)
+    );
+
+    // cur_buf[3] pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH (DATA_WIDTH),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_cur_buf3 (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_cur_buf3_din),
+        .din_valid  (pipe_cur_buf3_din_valid),
+        .din_ready  (pipe_cur_buf3_din_ready),
+        .dout       (pipe_cur_buf3_dout),
+        .dout_valid (pipe_cur_buf3_dout_valid),
+        .dout_ready (pipe_cur_buf3_dout_ready)
+    );
+
+    // rd_cycle pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH (3),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_rd_cycle (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_rd_cycle_din),
+        .din_valid  (pipe_rd_cycle_din_valid),
+        .din_ready  (pipe_rd_cycle_din_ready),
+        .dout       (pipe_rd_cycle_dout),
+        .dout_valid (pipe_rd_cycle_dout_valid),
+        .dout_ready (pipe_rd_cycle_dout_ready)
+    );
+
+    // buf_valid pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH (1),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_buf_valid (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_buf_valid_din),
+        .din_valid  (pipe_buf_valid_din_valid),
+        .din_ready  (pipe_buf_valid_din_ready),
+        .dout       (pipe_buf_valid_dout),
+        .dout_valid (pipe_buf_valid_dout_valid),
+        .dout_ready (pipe_buf_valid_dout_ready)
     );
 
 endmodule
