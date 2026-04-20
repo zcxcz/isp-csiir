@@ -33,7 +33,9 @@ module common_lb_ctrl #(
     parameter LINE_ADDR_WIDTH   = 14,  // IMG_WIDTH/2 depth
     parameter NUM_ROWS          = 4,   // number of rows in line buffer
     parameter PACK_PIXELS       = 2,   // pixels per word
-    parameter PAD_SIZE          = 2    // padding size (2 for 5x5 window)
+    parameter PAD_SIZE          = 2,   // padding size (2 for 5x5 window)
+    parameter READ_START_THRESHOLD = 4, // start reading when valid_row_cnt >= this value
+    parameter FILTER_ROWS       = 1    // extra rows for filter (default 1 for filter path)
 )(
     input  wire                              clk,
     input  wire                              rst_n,
@@ -60,9 +62,12 @@ module common_lb_ctrl #(
 
     // Output (5 columns, each column = 5 pixels = 5 rows)
     // Format: {col4, col3, col2, col1, col0} where colX = {p4, p3, p2, p1, p0}
-    output wire                              rows_ready,
-    output wire [DATA_WIDTH*5*5-1:0]        dout,  // 5 cols × 5 pixels
+    output wire                              rows_ready,   // gradient path ready
+    output wire                              rows_ready_f, // filter path ready
+    output wire [DATA_WIDTH*5*5-1:0]        dout,  // 5 cols × 5 pixels (gradient)
     output wire                              dout_valid,
+    output wire [DATA_WIDTH-1:0]            cur_pixel_f,  // current pixel for filter
+    output wire                              cur_pixel_f_valid,
     input  wire                              dout_ready,
 
     // Frame signals
@@ -193,6 +198,38 @@ module common_lb_ctrl #(
     assign fifo_wdata = din;
 
     //=========================================================================
+    // fifo_din_f Instance (extra buffer for filter path)
+    //=========================================================================
+    // Filter path needs extra buffering because it starts computing 1 row later
+    // than gradient, but both consume din at the same rate
+    //=========================================================================
+    wire                              fifo_f_wr;
+    wire [DATA_WIDTH-1:0]            fifo_f_wdata;
+    wire                              fifo_f_rd;
+    wire [DATA_WIDTH-1:0]            fifo_f_rdata;
+    wire                              fifo_f_empty;
+    wire                              fifo_f_full;
+
+    common_fifo #(
+        .DATA_WIDTH (DATA_WIDTH),
+        .DEPTH      (FIFO_DEPTH),
+        .ADDR_WIDTH (FIFO_ADDR_W)
+    ) u_fifo_din_f (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .wr_en      (fifo_f_wr),
+        .wr_data    (fifo_f_wdata),
+        .rd_en      (fifo_f_rd),
+        .rd_data    (fifo_f_rdata),
+        .empty      (fifo_f_empty),
+        .full       (fifo_f_full),
+        .count      ()
+    );
+
+    assign fifo_f_wr = din_valid && s2p_din_ready && enable;
+    assign fifo_f_wdata = din;
+
+    //=========================================================================
     // EOL Edge Detection
     //=========================================================================
     reg eol_d1;
@@ -288,7 +325,7 @@ module common_lb_ctrl #(
         end else if (sof) begin
             rd_active <= 1'b0;
         end else if (enable) begin
-            if (valid_row_cnt == NUM_ROWS && !rd_active) begin
+            if (valid_row_cnt >= READ_START_THRESHOLD && !rd_active) begin
                 rd_active <= 1'b1;
             end else if (buf_valid && rd_col_ptr >= img_width - 1) begin
                 rd_active <= 1'b0;
@@ -317,6 +354,7 @@ module common_lb_ctrl #(
     );
 
     assign fifo_rd = p2s_dout_valid && p2s_din_ready && enable;
+    assign fifo_f_rd = rows_ready_f && !fifo_f_empty && enable;  // filter path reads with delay
 
     //=========================================================================
     // Buffer Management - Assemble 5 columns from p2s output + current pixel
@@ -365,7 +403,7 @@ module common_lb_ctrl #(
                     3'd0: begin
                         // First read: columns x-2, x-1
                         p2s_buf0 <= p2s_dout;  // column x-2 (first pixel pair)
-                        cur_buf[0] <= fifo_rdata;
+                        cur_buf[0] <= fifo_rdata;  // gradient path current pixel
                         rd_cycle <= 3'd1;
                     end
                     3'd1: begin
@@ -397,6 +435,36 @@ module common_lb_ctrl #(
             end
         end
     end
+
+    //=========================================================================
+    // Filter path current pixel (delayed by extra FIFO)
+    //=========================================================================
+    // The filter path needs 1 extra row delay, so it reads from fifo_f
+    // which is filled in parallel with fifo (gradient path)
+    //=========================================================================
+    reg [DATA_WIDTH-1:0] cur_pixel_f_r;
+    reg                  cur_pixel_f_valid_r;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            cur_pixel_f_r <= {DATA_WIDTH{1'b0}};
+            cur_pixel_f_valid_r <= 1'b0;
+        end else if (sof) begin
+            cur_pixel_f_r <= {DATA_WIDTH{1'b0}};
+            cur_pixel_f_valid_r <= 1'b0;
+        end else if (enable) begin
+            // Filter path reads from fifo_f with 1 row delay
+            if (rows_ready_f && !fifo_f_empty) begin
+                cur_pixel_f_r <= fifo_f_rdata;
+                cur_pixel_f_valid_r <= 1'b1;
+            end else if (cur_pixel_f_valid_r && dout_ready) begin
+                cur_pixel_f_valid_r <= 1'b0;
+            end
+        end
+    end
+
+    assign cur_pixel_f = cur_pixel_f_r;
+    assign cur_pixel_f_valid = cur_pixel_f_valid_r;
 
     //=========================================================================
     // Assemble 5x5 window from buffered columns for padding
@@ -462,8 +530,10 @@ module common_lb_ctrl #(
     assign dout = pad_dout;
     assign dout_valid = pad_dout_valid;
 
-    // rows_ready indicates window is ready (4 rows + current pixel available)
-    assign rows_ready = (valid_row_cnt == NUM_ROWS);
+    // rows_ready: gradient path ready when valid_row_cnt >= READ_START_THRESHOLD
+    assign rows_ready = (valid_row_cnt >= READ_START_THRESHOLD);
+    // rows_ready_f: filter path ready when valid_row_cnt >= NUM_ROWS (all rows filled)
+    assign rows_ready_f = (valid_row_cnt >= NUM_ROWS);
 
     // Input ready: s2p ready and not full
     assign din_ready = s2p_din_ready && enable && !fifo_full;
