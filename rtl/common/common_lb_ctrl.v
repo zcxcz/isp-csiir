@@ -4,7 +4,7 @@
 //          Integrates: s2p, linebuffer, p2s, fifo_din, padding
 // Author: rtl-impl
 // Date: 2026-04-18
-// Modified: 2026-04-20
+// Modified: 2026-04-21
 //-----------------------------------------------------------------------------
 // Description:
 //   5x5 Window Data Path:
@@ -31,11 +31,11 @@
 
 module common_lb_ctrl #(
     parameter DATA_WIDTH            = 10,  // bits per pixel
-    parameter LINE_ADDR_WIDTH       = 14,  // IMG_WIDTH/2 depth
-    parameter NUM_ROWS              = 4,   // number of rows in line buffer
-    parameter PACK_PIXELS           = 2,   // pixels per word
-    parameter PAD_SIZE              = 2,   // padding size (2 for 5x5 window)
-    parameter READ_START_THRESHOLD  = 4    // start reading when valid_row_cnt >= this
+    parameter LINE_ADDR_WIDTH     = 14,  // IMG_WIDTH/2 depth
+    parameter NUM_ROWS            = 4,   // number of rows in line buffer
+    parameter PACK_PIXELS         = 2,   // pixels per word
+    parameter PAD_SIZE            = 2,   // padding size (2 for 5x5 window)
+    parameter READ_START_THRESHOLD = 4    // start reading when valid_row_cnt >= this
 )(
     input  wire                              clk,
     input  wire                              rst_n,
@@ -121,11 +121,71 @@ module common_lb_ctrl #(
     // Internal Signals - wr_col_ptr pipeline
     //=========================================================================
     wire                                      pipe_wr_col_ptr_din_valid;
-    wire [LINE_ADDR_WIDTH-1:0]               pipe_wr_col_ptr_din;
     wire                                      pipe_wr_col_ptr_din_ready;
+    wire [LINE_ADDR_WIDTH-1:0]               pipe_wr_col_ptr_din;
     wire [LINE_ADDR_WIDTH-1:0]               pipe_wr_col_ptr_dout;
     wire                                      pipe_wr_col_ptr_dout_valid;
     wire                                      pipe_wr_col_ptr_dout_ready;
+
+    //=========================================================================
+    // Internal Signals - wr_row_ptr pipeline
+    //=========================================================================
+    wire                                      pipe_wr_row_ptr_din_valid;
+    wire                                      pipe_wr_row_ptr_din_ready;
+    wire [$clog2(NUM_ROWS)-1:0]             pipe_wr_row_ptr_din;
+    wire [$clog2(NUM_ROWS)-1:0]               pipe_wr_row_ptr_dout;
+    wire                                      pipe_wr_row_ptr_dout_valid;
+    wire                                      pipe_wr_row_ptr_dout_ready;
+
+    //=========================================================================
+    // Internal Signals - valid_row_cnt pipeline
+    //=========================================================================
+    wire                                      pipe_valid_row_cnt_din_valid;
+    wire                                      pipe_valid_row_cnt_din_ready;
+    wire [CTR_WIDTH-1:0]                    pipe_valid_row_cnt_din;
+    wire [CTR_WIDTH-1:0]                    pipe_valid_row_cnt_dout;
+    wire                                      pipe_valid_row_cnt_dout_valid;
+    wire                                      pipe_valid_row_cnt_dout_ready;
+
+    //=========================================================================
+    // Internal Signals - rd_col_ptr pipeline
+    //=========================================================================
+    wire                                      pipe_rd_col_ptr_din_valid;
+    wire                                      pipe_rd_col_ptr_din_ready;
+    wire [LINE_ADDR_WIDTH-1:0]               pipe_rd_col_ptr_din;
+    wire [LINE_ADDR_WIDTH-1:0]               pipe_rd_col_ptr_dout;
+    wire                                      pipe_rd_col_ptr_dout_valid;
+    wire                                      pipe_rd_col_ptr_dout_ready;
+
+    //=========================================================================
+    // Internal Signals - rd_row_ptr pipeline
+    //=========================================================================
+    wire                                      pipe_rd_row_ptr_din_valid;
+    wire                                      pipe_rd_row_ptr_din_ready;
+    wire [$clog2(NUM_ROWS)-1:0]             pipe_rd_row_ptr_din;
+    wire [$clog2(NUM_ROWS)-1:0]               pipe_rd_row_ptr_dout;
+    wire                                      pipe_rd_row_ptr_dout_valid;
+    wire                                      pipe_rd_row_ptr_dout_ready;
+
+    //=========================================================================
+    // Internal Signals - rd_active pipeline
+    //=========================================================================
+    wire                                      pipe_rd_active_din_valid;
+    wire                                      pipe_rd_active_din_ready;
+    wire                                      pipe_rd_active_din;
+    wire                                      pipe_rd_active_dout;
+    wire                                      pipe_rd_active_dout_valid;
+    wire                                      pipe_rd_active_dout_ready;
+
+    //=========================================================================
+    // Internal Signals - row_started pipeline
+    //=========================================================================
+    wire                                      pipe_row_started_din_valid;
+    wire                                      pipe_row_started_din_ready;
+    wire                                      pipe_row_started_din;
+    wire                                      pipe_row_started_dout;
+    wire                                      pipe_row_started_dout_valid;
+    wire                                      pipe_row_started_dout_ready;
 
     //=========================================================================
     // Internal Signals - window assembly
@@ -133,19 +193,16 @@ module common_lb_ctrl #(
     wire [DATA_WIDTH*5*5-1:0]                window_5x5;
 
     //=========================================================================
-    // Write Side
+    // Raw signals (registered inputs to pipelines)
     //=========================================================================
-    reg [CTR_WIDTH-1:0]                    valid_row_cnt;
-    reg [$clog2(NUM_ROWS)-1:0]             wr_row_ptr;
     reg [LINE_ADDR_WIDTH-1:0]               wr_col_ptr_raw;
-    reg                                      row_started;
-
-    //=========================================================================
-    // Read Side
-    //=========================================================================
-    reg [$clog2(NUM_ROWS)-1:0]             rd_row_ptr;
-    reg [LINE_ADDR_WIDTH-1:0]               rd_col_ptr;
-    reg                                      rd_active;
+    reg [$clog2(NUM_ROWS)-1:0]             wr_row_ptr_raw;
+    reg [CTR_WIDTH-1:0]                    valid_row_cnt_raw;
+    reg [LINE_ADDR_WIDTH-1:0]               rd_col_ptr_raw;
+    reg [$clog2(NUM_ROWS)-1:0]             rd_row_ptr_raw;
+    reg                                      rd_active_raw;
+    reg                                      row_started_raw;
+    reg                                      eol_d1_raw;
 
     //=========================================================================
     // p2s buffering
@@ -159,16 +216,11 @@ module common_lb_ctrl #(
     reg                                      buf_valid;
 
     //=========================================================================
-    // EOL Edge Detection
-    //=========================================================================
-    reg eol_d1;
-
-    //=========================================================================
     // Handshake signals
     //=========================================================================
     assign wr_shake = enable && s2p_dout_valid && s2p_din_ready;
     assign rd_shake = enable && p2s_dout_valid && p2s_din_ready;
-    assign eol_fire = eol && !eol_d1 && enable;
+    assign eol_fire = eol && !eol_d1_raw && enable;
 
     assign fifo_wr    = din_valid && s2p_din_ready && enable;
     assign fifo_wdata = din;
@@ -177,8 +229,8 @@ module common_lb_ctrl #(
     //=========================================================================
     // wr_col_ptr pipeline logic
     //=========================================================================
-    assign pipe_wr_col_ptr_din_ready = 1'b1;
     assign pipe_wr_col_ptr_din_valid = sof || wr_shake || eol_fire;
+    assign pipe_wr_col_ptr_din_ready = 1'b1;
     assign pipe_wr_col_ptr_din =
         (sof)       ? {LINE_ADDR_WIDTH{1'b0}} :
         (wr_shake)  ? wr_col_ptr_raw + 1'b1 :
@@ -186,17 +238,83 @@ module common_lb_ctrl #(
         wr_col_ptr_raw;
 
     //=========================================================================
+    // wr_row_ptr pipeline logic
+    //=========================================================================
+    assign pipe_wr_row_ptr_din_valid = sof || (eol_fire && row_started_raw);
+    assign pipe_wr_row_ptr_din_ready = 1'b1;
+    assign pipe_wr_row_ptr_din =
+        (sof)       ? {$clog2(NUM_ROWS){1'b0}} :
+        (eol_fire && row_started_raw) ?
+            (wr_row_ptr_raw == NUM_ROWS-1) ? {$clog2(NUM_ROWS){1'b0}} : wr_row_ptr_raw + 1'b1 :
+        wr_row_ptr_raw;
+
+    //=========================================================================
+    // valid_row_cnt pipeline logic
+    //=========================================================================
+    assign pipe_valid_row_cnt_din_valid = sof || (eol_fire && row_started_raw);
+    assign pipe_valid_row_cnt_din_ready = 1'b1;
+    assign pipe_valid_row_cnt_din =
+        (sof)       ? {CTR_WIDTH{1'b0}} :
+        (eol_fire && row_started_raw && valid_row_cnt_raw < NUM_ROWS) ?
+            valid_row_cnt_raw + 1'b1 :
+        valid_row_cnt_raw;
+
+    //=========================================================================
+    // rd_col_ptr pipeline logic
+    //=========================================================================
+    assign pipe_rd_col_ptr_din_valid = sof || (buf_valid && dout_ready);
+    assign pipe_rd_col_ptr_din_ready = 1'b1;
+    assign pipe_rd_col_ptr_din =
+        (sof)       ? {LINE_ADDR_WIDTH{1'b0}} :
+        (buf_valid && dout_ready) ?
+            (rd_col_ptr_raw >= img_width - 1) ? {LINE_ADDR_WIDTH{1'b0}} : rd_col_ptr_raw + 1'b1 :
+        rd_col_ptr_raw;
+
+    //=========================================================================
+    // rd_row_ptr pipeline logic
+    //=========================================================================
+    assign pipe_rd_row_ptr_din_valid = sof || (buf_valid && dout_ready && (rd_col_ptr_raw >= img_width - 1));
+    assign pipe_rd_row_ptr_din_ready = 1'b1;
+    assign pipe_rd_row_ptr_din =
+        (sof)       ? {$clog2(NUM_ROWS){1'b0}} :
+        (buf_valid && dout_ready && (rd_col_ptr_raw >= img_width - 1)) ?
+            (rd_row_ptr_raw == NUM_ROWS-1) ? {$clog2(NUM_ROWS){1'b0}} : rd_row_ptr_raw + 1'b1 :
+        rd_row_ptr_raw;
+
+    //=========================================================================
+    // rd_active pipeline logic
+    //=========================================================================
+    assign pipe_rd_active_din_valid = sof || (buf_valid && (rd_col_ptr_raw >= img_width - 1));
+    assign pipe_rd_active_din_ready = 1'b1;
+    assign pipe_rd_active_din =
+        (sof)       ? 1'b0 :
+        (buf_valid && (rd_col_ptr_raw >= img_width - 1)) ? 1'b0 :
+        (valid_row_cnt_raw >= READ_START_THRESHOLD && !rd_active_raw) ? 1'b1 :
+        rd_active_raw;
+
+    //=========================================================================
+    // row_started pipeline logic
+    //=========================================================================
+    assign pipe_row_started_din_valid = sof || wr_shake || eol_fire;
+    assign pipe_row_started_din_ready = 1'b1;
+    assign pipe_row_started_din =
+        (sof)       ? 1'b0 :
+        (wr_shake)  ? 1'b1 :
+        (eol_fire)  ? 1'b0 :
+        row_started_raw;
+
+    //=========================================================================
     // Output assignments
     //=========================================================================
-    assign rows_ready = (valid_row_cnt >= READ_START_THRESHOLD);
+    assign rows_ready = (pipe_valid_row_cnt_dout >= READ_START_THRESHOLD);
     assign din_ready  = s2p_din_ready && enable && !fifo_full;
 
     assign wr_en   = wr_shake;
     assign wr_addr = pipe_wr_col_ptr_dout;
     assign wr_data = s2p_dout;
 
-    assign rd_en   = rd_active;
-    assign rd_addr = rd_col_ptr;
+    assign rd_en   = pipe_rd_active_dout;
+    assign rd_addr = pipe_rd_col_ptr_dout;
 
     assign dout       = pad_dout;
     assign dout_valid = pad_dout_valid;
@@ -204,7 +322,7 @@ module common_lb_ctrl #(
     genvar g;
     generate
         for (g = 0; g < NUM_ROWS; g = g + 1) begin : gen_wr_row_en
-            assign wr_row_en[g] = (wr_row_ptr == g) && wr_en;
+            assign wr_row_en[g] = (pipe_wr_row_ptr_dout == g) && wr_en;
         end
     endgenerate
 
@@ -234,120 +352,90 @@ module common_lb_ctrl #(
     endgenerate
 
     //=========================================================================
-    // EOL Edge Detection
+    // wr_col_ptr_raw
     //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            eol_d1 <= 1'b0;
+            wr_col_ptr_raw <= {LINE_ADDR_WIDTH{1'b0}};
         end else begin
-            eol_d1 <= eol;
+            wr_col_ptr_raw <= pipe_wr_col_ptr_din;
         end
     end
 
     //=========================================================================
-    // wr_col_ptr (raw input to pipeline)
+    // wr_row_ptr_raw
     //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            wr_col_ptr_raw <= {LINE_ADDR_WIDTH{1'b0}};
-        end else if (sof) begin
-            wr_col_ptr_raw <= {LINE_ADDR_WIDTH{1'b0}};
-        end else if (wr_shake) begin
-            wr_col_ptr_raw <= wr_col_ptr_raw + 1'b1;
-        end else if (eol_fire) begin
-            wr_col_ptr_raw <= {LINE_ADDR_WIDTH{1'b0}};
+            wr_row_ptr_raw <= {$clog2(NUM_ROWS){1'b0}};
+        end else begin
+            wr_row_ptr_raw <= pipe_wr_row_ptr_din;
         end
     end
 
     //=========================================================================
-    // row_started
+    // valid_row_cnt_raw
     //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            row_started <= 1'b0;
-        end else if (sof) begin
-            row_started <= 1'b0;
-        end else if (wr_shake) begin
-            row_started <= 1'b1;
-        end else if (eol_fire) begin
-            row_started <= 1'b0;
+            valid_row_cnt_raw <= {CTR_WIDTH{1'b0}};
+        end else begin
+            valid_row_cnt_raw <= pipe_valid_row_cnt_din;
         end
     end
 
     //=========================================================================
-    // wr_row_ptr
+    // rd_col_ptr_raw
     //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            wr_row_ptr <= {$clog2(NUM_ROWS){1'b0}};
-        end else if (sof) begin
-            wr_row_ptr <= {$clog2(NUM_ROWS){1'b0}};
-        end else if (eol_fire && row_started) begin
-            wr_row_ptr <= (wr_row_ptr == NUM_ROWS-1) ? {$clog2(NUM_ROWS){1'b0}}
-                                                      : wr_row_ptr + 1'b1;
+            rd_col_ptr_raw <= {LINE_ADDR_WIDTH{1'b0}};
+        end else begin
+            rd_col_ptr_raw <= pipe_rd_col_ptr_din;
         end
     end
 
     //=========================================================================
-    // valid_row_cnt
+    // rd_row_ptr_raw
     //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            valid_row_cnt <= {CTR_WIDTH{1'b0}};
-        end else if (sof) begin
-            valid_row_cnt <= {CTR_WIDTH{1'b0}};
-        end else if (enable) begin
-            if (eol_fire && row_started && valid_row_cnt < NUM_ROWS) begin
-                valid_row_cnt <= valid_row_cnt + 1'b1;
-            end
+            rd_row_ptr_raw <= {$clog2(NUM_ROWS){1'b0}};
+        end else begin
+            rd_row_ptr_raw <= pipe_rd_row_ptr_din;
         end
     end
 
     //=========================================================================
-    // rd_col_ptr
+    // rd_active_raw
     //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            rd_col_ptr <= {LINE_ADDR_WIDTH{1'b0}};
-        end else if (sof) begin
-            rd_col_ptr <= {LINE_ADDR_WIDTH{1'b0}};
-        end else if (buf_valid && dout_ready) begin
-            if (rd_col_ptr >= img_width - 1) begin
-                rd_col_ptr <= {LINE_ADDR_WIDTH{1'b0}};
-            end else begin
-                rd_col_ptr <= rd_col_ptr + 1'b1;
-            end
+            rd_active_raw <= 1'b0;
+        end else begin
+            rd_active_raw <= pipe_rd_active_din;
         end
     end
 
     //=========================================================================
-    // rd_row_ptr
+    // row_started_raw
     //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            rd_row_ptr <= {$clog2(NUM_ROWS){1'b0}};
-        end else if (sof) begin
-            rd_row_ptr <= {$clog2(NUM_ROWS){1'b0}};
-        end else if (buf_valid && dout_ready && rd_col_ptr >= img_width - 1) begin
-            rd_row_ptr <= (rd_row_ptr == NUM_ROWS-1) ? {$clog2(NUM_ROWS){1'b0}}
-                                                      : rd_row_ptr + 1'b1;
+            row_started_raw <= 1'b0;
+        end else begin
+            row_started_raw <= pipe_row_started_din;
         end
     end
 
     //=========================================================================
-    // rd_active
+    // eol_d1_raw
     //=========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            rd_active <= 1'b0;
-        end else if (sof) begin
-            rd_active <= 1'b0;
-        end else if (enable) begin
-            if (valid_row_cnt >= READ_START_THRESHOLD && !rd_active) begin
-                rd_active <= 1'b1;
-            end else if (buf_valid && rd_col_ptr >= img_width - 1) begin
-                rd_active <= 1'b0;
-            end
+            eol_d1_raw <= 1'b0;
+        end else begin
+            eol_d1_raw <= eol;
         end
     end
 
@@ -534,7 +622,7 @@ module common_lb_ctrl #(
         .rst_n      (rst_n),
         .enable     (enable),
         .din        (rd_data),
-        .din_valid  (rd_active),
+        .din_valid  (pipe_rd_active_dout),
         .din_ready  (p2s_din_ready),
         .dout       (p2s_dout),
         .dout_valid (p2s_dout_valid),
@@ -549,7 +637,7 @@ module common_lb_ctrl #(
         .NUM_ROWS     (5),
         .PAD_SIZE     (PAD_SIZE)
     ) u_padding (
-        .center_x     (rd_col_ptr),
+        .center_x     (pipe_rd_col_ptr_dout),
         .center_y     ({12{1'b0}}),
         .img_width    (img_width),
         .img_height   (img_height),
@@ -559,6 +647,9 @@ module common_lb_ctrl #(
         .dout_valid   (pad_dout_valid)
     );
 
+    //=========================================================================
+    // Pipeline Instances
+    //=========================================================================
     // wr_col_ptr pipeline
     common_pipe_slice #(
         .DATA_WIDTH (LINE_ADDR_WIDTH),
@@ -573,6 +664,102 @@ module common_lb_ctrl #(
         .dout       (pipe_wr_col_ptr_dout),
         .dout_valid (pipe_wr_col_ptr_dout_valid),
         .dout_ready (pipe_wr_col_ptr_dout_ready)
+    );
+
+    // wr_row_ptr pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH ($clog2(NUM_ROWS)),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_wr_row_ptr (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_wr_row_ptr_din),
+        .din_valid  (pipe_wr_row_ptr_din_valid),
+        .din_ready  (pipe_wr_row_ptr_din_ready),
+        .dout       (pipe_wr_row_ptr_dout),
+        .dout_valid (pipe_wr_row_ptr_dout_valid),
+        .dout_ready (pipe_wr_row_ptr_dout_ready)
+    );
+
+    // valid_row_cnt pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH (CTR_WIDTH),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_valid_row_cnt (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_valid_row_cnt_din),
+        .din_valid  (pipe_valid_row_cnt_din_valid),
+        .din_ready  (pipe_valid_row_cnt_din_ready),
+        .dout       (pipe_valid_row_cnt_dout),
+        .dout_valid (pipe_valid_row_cnt_dout_valid),
+        .dout_ready (pipe_valid_row_cnt_dout_ready)
+    );
+
+    // rd_col_ptr pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH (LINE_ADDR_WIDTH),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_rd_col_ptr (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_rd_col_ptr_din),
+        .din_valid  (pipe_rd_col_ptr_din_valid),
+        .din_ready  (pipe_rd_col_ptr_din_ready),
+        .dout       (pipe_rd_col_ptr_dout),
+        .dout_valid (pipe_rd_col_ptr_dout_valid),
+        .dout_ready (pipe_rd_col_ptr_dout_ready)
+    );
+
+    // rd_row_ptr pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH ($clog2(NUM_ROWS)),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_rd_row_ptr (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_rd_row_ptr_din),
+        .din_valid  (pipe_rd_row_ptr_din_valid),
+        .din_ready  (pipe_rd_row_ptr_din_ready),
+        .dout       (pipe_rd_row_ptr_dout),
+        .dout_valid (pipe_rd_row_ptr_dout_valid),
+        .dout_ready (pipe_rd_row_ptr_dout_ready)
+    );
+
+    // rd_active pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH (1),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_rd_active (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_rd_active_din),
+        .din_valid  (pipe_rd_active_din_valid),
+        .din_ready  (pipe_rd_active_din_ready),
+        .dout       (pipe_rd_active_dout),
+        .dout_valid (pipe_rd_active_dout_valid),
+        .dout_ready (pipe_rd_active_dout_ready)
+    );
+
+    // row_started pipeline
+    common_pipe_slice #(
+        .DATA_WIDTH (1),
+        .RESET_VAL  (0),
+        .PIPE_TYPE  (0)
+    ) u_pipe_row_started (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .din        (pipe_row_started_din),
+        .din_valid  (pipe_row_started_din_valid),
+        .din_ready  (pipe_row_started_din_ready),
+        .dout       (pipe_row_started_dout),
+        .dout_valid (pipe_row_started_dout_valid),
+        .dout_ready (pipe_row_started_dout_ready)
     );
 
 endmodule
