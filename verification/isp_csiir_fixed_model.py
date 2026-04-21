@@ -212,11 +212,11 @@ class ISPCSIIRFixedModel:
 
     def _grad_triplet_win_size(self, img: np.ndarray, i: int, j: int) -> Tuple[int, int, int, int, np.ndarray]:
         h, w = img.shape
-        left_i = self._clip(i - HORIZONTAL_TAP_STEP, 0, w - 1)
-        right_i = self._clip(i + HORIZONTAL_TAP_STEP, 0, w - 1)
-        left_win = self._get_window(img, left_i, j)
+        # Use unclipped center positions for window building - _get_window handles clipping internally
+        # This ensures dx offsets are applied correctly before clipping, matching C++ behavior
+        left_win = self._get_window(img, i - HORIZONTAL_TAP_STEP, j)
         center_win = self._get_window(img, i, j)
-        right_win = self._get_window(img, right_i, j)
+        right_win = self._get_window(img, i + HORIZONTAL_TAP_STEP, j)
         grad_h, grad_v, grad_c = self._stage1_gradient(center_win)
         _, _, grad_l = self._stage1_gradient(left_win)
         _, _, grad_r = self._stage1_gradient(right_win)
@@ -403,12 +403,37 @@ class ISPCSIIRFixedModel:
         linebuffer_rows = [] if emit_linebuffer_rows else None
         patch_stream = [] if emit_patch_stream else None
 
+        # Gradient row buffer (matches C++ grad_row_buf[2][width])
+        grad_row_buf = np.zeros((2, w), dtype=np.int32)
+        grad_shift = [0, 0, 0]  # grad_shift[3] register
+
         for j in range(h):
             for i in range(w):
+                # C++ processes ALL rows through Stage4 pipeline, but only outputs from row 2+
+                # For rows 0,1: gradients are computed (for grad_row_buf to have valid data for row 2),
+                # but output is not written (output[0,1] stay as original per C++ semantics)
+
                 # Gradient/stage2/stage3: from ORIGINAL (src)
-                grad_h, grad_v, _, win_size, center_win = self._grad_triplet_win_size(src, i, j)
+                grad_h, grad_v, grad_c, win_size, center_win = self._grad_triplet_win_size(src, i, j)
                 stage2 = self._stage2_directional_avg(center_win, win_size)
-                grads = self._stage3_neighbors(src, i, j)
+
+                # Neighbor gradients - use grad_row_buf like C++
+                # grad_u from grad_shift[1], grad_d from grad_row_buf[0][i]
+                grad_u = grad_shift[1]
+                grad_d = grad_row_buf[0, i]
+                grad_l = self._stage1_gradient(self._get_window(src,
+                    self._clip(i - HORIZONTAL_TAP_STEP, 0, w - 1), j))[2]
+                grad_r = self._stage1_gradient(self._get_window(src,
+                    self._clip(i + HORIZONTAL_TAP_STEP, 0, w - 1), j))[2]
+                grads = {"u": grad_u, "d": grad_d, "l": grad_l, "r": grad_r, "c": grad_c}
+
+                # Update gradient row buffer (matches C++ shift logic)
+                grad_shift[0] = grad_shift[1]
+                grad_shift[1] = grad_shift[2]
+                grad_shift[2] = grad_c
+                grad_row_buf[0, i] = grad_c
+                grad_row_buf[1, i] = grad_row_buf[0, i]
+
                 blend0_grad, blend1_grad = self._stage3_fusion(stage2["avg0"], stage2["avg1"], grads)
 
                 # Stage4 IIR blend: rows 0-3 from filt, row 4 from src
@@ -433,17 +458,20 @@ class ISPCSIIRFixedModel:
                     grad_v,
                 )
                 patch = stage4["final_patch"]
-                if center_stream is not None:
-                    center_stream.append(self._s11_to_u10(int(patch[2, 2])))
-                if patch_stream is not None:
-                    patch_stream.append({
-                        "center_x": i,
-                        "center_y": j,
-                        "patch_u10": np.vectorize(self._s11_to_u10)(patch).astype(np.int32),
-                    })
 
-                # Write filtered center pixel back to filt (matches C++ behavior)
+                # Write filtered center pixel back to filt (ALL rows, matches C++ behavior)
                 filt[j, i] = self._s11_to_u10(int(patch[2, 2]))
+
+                # Output only from row 2+ (matches C++ behavior: if j >= 2, output[j,i] = dout_pixel)
+                if j >= 2:
+                    if center_stream is not None:
+                        center_stream.append(self._s11_to_u10(int(patch[2, 2])))
+                    if patch_stream is not None:
+                        patch_stream.append({
+                            "center_x": i,
+                            "center_y": j,
+                            "patch_u10": np.vectorize(self._s11_to_u10)(patch).astype(np.int32),
+                        })
 
             if linebuffer_rows is not None:
                 row_indices = np.array([self._clip(j + dy, 0, h - 1) for dy in range(-2, 5)], dtype=np.int32)
