@@ -421,10 +421,8 @@ class ISPCSIIRFixedModel:
                 # grad_u from grad_shift[1], grad_d from grad_row_buf[0][i]
                 grad_u = grad_shift[1]
                 grad_d = grad_row_buf[0, i]
-                grad_l = self._stage1_gradient(self._get_window(src,
-                    self._clip(i - HORIZONTAL_TAP_STEP, 0, w - 1), j))[2]
-                grad_r = self._stage1_gradient(self._get_window(src,
-                    self._clip(i + HORIZONTAL_TAP_STEP, 0, w - 1), j))[2]
+                grad_l = self._stage1_gradient(self._get_window(src, i - HORIZONTAL_TAP_STEP, j))[2]
+                grad_r = self._stage1_gradient(self._get_window(src, i + HORIZONTAL_TAP_STEP, j))[2]
                 grads = {"u": grad_u, "d": grad_d, "l": grad_l, "r": grad_r, "c": grad_c}
 
                 # Update gradient row buffer (matches C++ shift logic)
