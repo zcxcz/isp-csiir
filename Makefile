@@ -78,7 +78,7 @@ run_hls: gen_input
 	@cd $(HLS_DIR) && $(MAKE) clean && $(MAKE) 2>&1 | tail -3
 	@echo ""
 	@echo "Running HLS model..."
-	@cd $(HLS_DIR) && ./hls_top_tb $(INPUT_HEX) $(HLS_OUT) 2>&1 | grep -E "^(Input|Output|First|Test|Output written)"
+	@cd $(HLS_DIR) && ./hls_top_tb $(shell realpath $(INPUT_HEX)) $(shell realpath $(HLS_OUT)) 2>&1 | grep -v "WARNING:" | head -20
 	@echo ""
 	@echo "HLS output: $(HLS_OUT)"
 

@@ -766,7 +766,7 @@ void isp_csiir_top(
         // Also update col_filt[4][4] so the next column sees the filtered value
         col_filt[4][4] = dout_pixel;
 
-        //======================================================================
+                //======================================================================
         // Output
         //======================================================================
         axis_pixel_t dout;
@@ -774,10 +774,8 @@ void isp_csiir_top(
         dout.last = (row_val == (unsigned int)img_height - 1 && col_val == (unsigned int)img_width - 1) ? 1 : 0;
         dout.user = (row_val == 0 && col_val == 0) ? 1 : 0;
 
-        // Output when current row >= 2 (window fully valid from original line buffer)
-        if (row_val >= 2) {
-            dout_stream.write(dout);
-        }
+        // Output current pixel (filtered value)
+        dout_stream.write(dout);
 
         current_grad = grad;
     }
