@@ -111,10 +111,11 @@ compare: run_python run_hls
 	@echo "Comparing outputs..."
 	@python3 $(SCRIPTS_DIR)/compare_outputs.py --python $(PYTHON_OUT) --hls $(HLS_OUT)
 
-run: run_python run_hls compare
+run: gen_config gen_input run_python run_hls compare
 
-test:
-	@make run WIDTH=16 HEIGHT=16 PATTERN=random SEED=42
+test: clean_all
+	@make gen_config WIDTH=16 HEIGHT=16 PATTERN=random SEED=42
+	@make run CONFIG=build/config.json
 	@echo ""
 	@echo "Quick test complete"
 

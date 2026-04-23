@@ -444,6 +444,10 @@ void isp_csiir_top(
     isp.cfg.win_size_thresh[1] = (int)regs.win_thresh1;
     isp.cfg.win_size_thresh[2] = (int)regs.win_thresh2;
     isp.cfg.win_size_thresh[3] = (int)regs.win_thresh3;
+    isp.cfg.win_size_clip_y[0] = (int)regs.grad_clip0;
+    isp.cfg.win_size_clip_y[1] = (int)regs.grad_clip1;
+    isp.cfg.win_size_clip_y[2] = (int)regs.grad_clip2;
+    isp.cfg.win_size_clip_y[3] = (int)regs.grad_clip3;
     isp.cfg.blending_ratio[0] = (int)regs.blend_ratio0;
     isp.cfg.blending_ratio[1] = (int)regs.blend_ratio1;
     isp.cfg.blending_ratio[2] = (int)regs.blend_ratio2;
