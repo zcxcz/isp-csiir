@@ -673,7 +673,12 @@ void isp_csiir_top(
             src_s11_5x5[i] = u10_to_s11(src_5x5[i / 5][i % 5]);
         }
 
-        int win_size = isp.lut_win_size((int)grad);
+        // Read grad_l BEFORE computing win_size (grad_l = grad(i-2,j) from shift register)
+        // At pixel (i,j), BEFORE shift: grad_shift[0]=grad(i-3), grad_shift[1]=grad(i-2), grad_shift[2]=grad(i-1)
+        grad_t grad_l_for_win = grad_shift[1];  // grad(i-2,j)
+
+        // Compute win_size using max(grad_l, grad_c) - grad_r not available yet
+        int win_size = isp.lut_win_size((int)((grad_l_for_win > grad) ? grad_l_for_win : grad));
 
         //======================================================================
         // Stage 2: Directional Average (reads ORIGINAL data)
@@ -686,11 +691,14 @@ void isp_csiir_top(
         grad_t grad_next_row = grad_next_row_delay[col_val];
 
         grad_u = grad_buf_pack[0][col_val].range(13, 0);
-        grad_l = grad_shift[1];
+        // grad_l from shift register BEFORE update: grad_shift[0] = grad(i-2,j)
+        grad_l = grad_l_for_win;
         grad_t grad_c = grad;
         grad_d = grad_next_row;
-        grad_r = grad_shift[2];
+        // grad_r approximation: use current grad (will be refined in delayed output)
+        grad_r = grad;
 
+        // Update shift register AFTER reading grad_l
         grad_shift[0] = grad_shift[1];
         grad_shift[1] = grad_shift[2];
         grad_shift[2] = grad;
