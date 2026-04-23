@@ -720,7 +720,9 @@ class ISPCSIIRFixedModel:
 
 def test_fixed_model():
     import argparse
-    parser = argparse.ArgumentParser()
+    import json
+    parser = argparse.ArgumentParser(description='ISP-CSIIR Fixed-Point Model')
+    parser.add_argument('--config', type=str, default=None, help='配置文件 (JSON)')
     parser.add_argument('--width', type=int, default=64)
     parser.add_argument('--height', type=int, default=64)
     parser.add_argument('--input', type=str, default=None)
@@ -728,13 +730,30 @@ def test_fixed_model():
     parser.add_argument('--compare', type=str, default=None)
     args = parser.parse_args()
 
-    config = FixedPointConfig(IMG_WIDTH=args.width, IMG_HEIGHT=args.height)
+    # 从配置文件加载参数
+    if args.config:
+        with open(args.config, 'r') as f:
+            cfg = json.load(f)
+        width = cfg.get('width', args.width)
+        height = cfg.get('height', args.height)
+        config = FixedPointConfig(
+            IMG_WIDTH=width,
+            IMG_HEIGHT=height,
+            win_size_thresh=cfg.get('win_thresh'),
+            win_size_clip_y=cfg.get('grad_clip'),
+            blending_ratio=cfg.get('blend_ratio'),
+            reg_edge_protect=cfg.get('edge_protect', 32)
+        )
+    else:
+        width = args.width
+        height = args.height
+        config = FixedPointConfig(IMG_WIDTH=width, IMG_HEIGHT=height)
     model = ISPCSIIRFixedModel(config)
 
     if args.input:
         with open(args.input) as f:
             input_vals = [int(line.strip(), 16) for line in f if line.strip()]
-        input_img = np.array(input_vals, dtype=np.int32).reshape(args.height, args.width)
+        input_img = np.array(input_vals, dtype=np.int32).reshape(height, width)
     else:
         np.random.seed(42)
         input_img = np.random.randint(0, 1024, (args.height, args.width), dtype=np.int32)
