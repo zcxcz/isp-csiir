@@ -533,8 +533,7 @@ module common_lb_ctrl #(
     //   - 4 LBs, each outputs 2P per read
     //   - P2S converts 2P → 1P (parallel to serial), outputting 1 pixel per cycle
     //   - Total input: 4×2P (from LBs) + 1×2P (din) = 5×2P
-    //   - P2S outputs 5 pixels per cycle (one column), over 2 cycles per column
-    //   - rd_cycle[1:0] selects which pixel within the 2P to output
+    //   - rd_cycle[0] selects which pixel within the 2P to output
     //
     // col5x1 format: 5 pixels (one per row in 5x5 window)
     //   pixel[4] = row y+2 (newest row)
@@ -543,15 +542,19 @@ module common_lb_ctrl #(
     //   pixel[1] = row y-1
     //   pixel[0] = row y-2 (oldest row)
     //
-    // Mapping based on rd_cycle:
-    //   rd_cycle=0: first pixel from each 2P word
-    //     col5x1 = {cur_buf0, p2s_buf0[0], p2s_buf1[0], p2s_buf2[0], p2s_buf3[0]}
-    //   rd_cycle=1: second pixel from each 2P word
-    //     col5x1 = {cur_buf1, p2s_buf0[1], p2s_buf1[1], p2s_buf2[1], p2s_buf3[1]}
+    // LB index remap based on rd_row_loop (circular shift):
+    //   rd_row_loop=0: pixel[3]=lb3, pixel[2]=lb2, pixel[1]=lb1, pixel[0]=lb0
+    //   rd_row_loop=1: pixel[3]=lb0, pixel[2]=lb1, pixel[1]=lb2, pixel[0]=lb3
+    //   rd_row_loop=2: pixel[3]=lb1, pixel[2]=lb2, pixel[1]=lb3, pixel[0]=lb0
+    //   rd_row_loop=3: pixel[3]=lb2, pixel[2]=lb3, pixel[1]=lb0, pixel[0]=lb1
+    //
+    // Mapping based on valid_row_cnt:
+    //   valid_row_cnt=2: pixel[4]=cur, pixel[3]=lb1, pixel[2]=lb0, pixel[1]=pad, pixel[0]=pad
+    //   valid_row_cnt=3: pixel[4]=cur, pixel[3]=lb2, pixel[2]=lb1, pixel[1]=lb0, pixel[0]=pad
+    //   valid_row_cnt=4: pixel[4]=cur, pixel[3]=lb3, pixel[2]=lb2, pixel[1]=lb1, pixel[0]=lb0 (rd_row_loop=0)
     //=========================================================================
 
-    // col5x1: 5 pixels for current column (at x = rd_col_ptr)
-    // p2s_buf stores 2P per row, indexed by rd_cycle[0] (0=first pixel, 1=second pixel)
+    // p2s_buf pixel extraction based on rd_cycle[0]
     wire [DATA_WIDTH-1:0] p2s_col_pixel [0:3];
     assign p2s_col_pixel[0] = (~rd_cycle_raw[0]) ?
                               pipe_p2s_buf0_dout[0 * DATA_WIDTH +: DATA_WIDTH] :
@@ -570,45 +573,137 @@ module common_lb_ctrl #(
     assign cur_col_pixel = (~rd_cycle_raw[0]) ?
                            pipe_cur_buf0_dout : pipe_cur_buf1_dout;
 
+    // Remapped LB indices for pixel[3:0] using direct case
+    // rd_row_loop=0: pixel[3]=lb3, pixel[2]=lb2, pixel[1]=lb1, pixel[0]=lb0
+    // rd_row_loop=1: pixel[3]=lb0, pixel[2]=lb1, pixel[1]=lb2, pixel[0]=lb3
+    // rd_row_loop=2: pixel[3]=lb1, pixel[2]=lb2, pixel[1]=lb3, pixel[0]=lb0
+    // rd_row_loop=3: pixel[3]=lb2, pixel[2]=lb3, pixel[1]=lb0, pixel[0]=lb1
+    wire [1:0] remap_3, remap_2, remap_1, remap_0;
+    always @(*) begin
+        case (rd_row_loop_raw)
+            2'd0: begin
+                remap_3 = 3;  // pixel[3] = lb3
+                remap_2 = 2;  // pixel[2] = lb2
+                remap_1 = 1;  // pixel[1] = lb1
+                remap_0 = 0;  // pixel[0] = lb0
+            end
+            2'd1: begin
+                remap_3 = 0;  // pixel[3] = lb0
+                remap_2 = 1;  // pixel[2] = lb1
+                remap_1 = 2;  // pixel[1] = lb2
+                remap_0 = 3;  // pixel[0] = lb3
+            end
+            2'd2: begin
+                remap_3 = 1;  // pixel[3] = lb1
+                remap_2 = 2;  // pixel[2] = lb2
+                remap_1 = 3;  // pixel[1] = lb3
+                remap_0 = 0;  // pixel[0] = lb0
+            end
+            default: begin  // 2'd3
+                remap_3 = 2;  // pixel[3] = lb2
+                remap_2 = 3;  // pixel[2] = lb3
+                remap_1 = 0;  // pixel[1] = lb0
+                remap_0 = 1;  // pixel[0] = lb1
+            end
+        endcase
+    end
+
+    // Select LB data based on remapped indices
+    wire [DATA_WIDTH-1:0] remap_p3, remap_p2, remap_p1, remap_p0;
+    assign remap_p3 = (remap_3 == 2'd0) ? p2s_col_pixel[0] :
+                      (remap_3 == 2'd1) ? p2s_col_pixel[1] :
+                      (remap_3 == 2'd2) ? p2s_col_pixel[2] :
+                      p2s_col_pixel[3];
+    assign remap_p2 = (remap_2 == 2'd0) ? p2s_col_pixel[0] :
+                      (remap_2 == 2'd1) ? p2s_col_pixel[1] :
+                      (remap_2 == 2'd2) ? p2s_col_pixel[2] :
+                      p2s_col_pixel[3];
+    assign remap_p1 = (remap_1 == 2'd0) ? p2s_col_pixel[0] :
+                      (remap_1 == 2'd1) ? p2s_col_pixel[1] :
+                      (remap_1 == 2'd2) ? p2s_col_pixel[2] :
+                      p2s_col_pixel[3];
+    assign remap_p0 = (remap_0 == 2'd0) ? p2s_col_pixel[0] :
+                      (remap_0 == 2'd1) ? p2s_col_pixel[1] :
+                      (remap_0 == 2'd2) ? p2s_col_pixel[2] :
+                      p2s_col_pixel[3];
+
     // Output mode selection
     generate
         if (OUTPUT_MODE == "LB_ONLY") begin : gen_lb_only
+            // LB_ONLY mode: only use LB data, no cur
             assign col5x1 = {
-                p2s_col_pixel[0],  // pixel[4] = row y+2
-                p2s_col_pixel[1],  // pixel[3] = row y+1
-                p2s_col_pixel[2],  // pixel[2] = row y
-                p2s_col_pixel[3],  // pixel[1] = row y-1
-                {DATA_WIDTH{1'b0}}  // pixel[0] = row y-2 (not available)
+                remap_p3,    // pixel[4] = newest valid LB
+                remap_p2,    // pixel[3]
+                remap_p1,    // pixel[2]
+                remap_p0,    // pixel[1]
+                {DATA_WIDTH{1'b0}}  // pixel[0] = padding (no cur in LB_ONLY)
             };
         end else begin : gen_lb_plus_din
-            assign col5x1 = {
-                cur_col_pixel,     // pixel[4] = row y+2 (current din)
-                p2s_col_pixel[0],  // pixel[3] = row y+1
-                p2s_col_pixel[1],  // pixel[2] = row y
-                p2s_col_pixel[2],  // pixel[1] = row y-1
-                p2s_col_pixel[3]   // pixel[0] = row y-2
-            };
+            // LB_PLUS_DIN mode: use LB data + current din
+            // Mapping based on valid_row_cnt:
+            //   valid_row_cnt=2: pixel[4]=cur, pixel[3]=lb1, pixel[2]=lb0, pixel[1]=pad, pixel[0]=pad
+            //   valid_row_cnt=3: pixel[4]=cur, pixel[3]=lb2, pixel[2]=lb1, pixel[1]=lb0, pixel[0]=pad
+            //   valid_row_cnt=4: pixel[4]=cur, pixel[3]=lb3, pixel[2]=lb2, pixel[1]=lb1, pixel[0]=lb0
+            always @(*) begin
+                case (valid_row_cnt_raw)
+                    2'd1: begin
+                        // valid_row_cnt=1: only cur valid, all LBs padding
+                        col5x1 = {
+                            cur_col_pixel,  // pixel[4]
+                            {DATA_WIDTH{1'b0}},  // pixel[3]
+                            {DATA_WIDTH{1'b0}},  // pixel[2]
+                            {DATA_WIDTH{1'b0}},  // pixel[1]
+                            {DATA_WIDTH{1'b0}}   // pixel[0]
+                        };
+                    end
+                    2'd2: begin
+                        // valid_row_cnt=2: pixel[4]=cur, pixel[3]=lb1, pixel[2]=lb0, pixel[1,0]=pad
+                        // At rd_row_loop=0: remap_p3=lb3, remap_p2=lb2, remap_p1=lb1, remap_p0=lb0
+                        // But we need: pixel[3]=lb1, pixel[2]=lb0
+                        // So use remap_p1 for pixel[3] and remap_p0 for pixel[2]
+                        col5x1 = {
+                            cur_col_pixel,  // pixel[4]
+                            {DATA_WIDTH{1'b0}},  // pixel[3] = lb1 (invalid at valid_row_cnt=2)
+                            {DATA_WIDTH{1'b0}},  // pixel[2] = lb0 (invalid at valid_row_cnt=2)
+                            remap_p1,   // pixel[1] = lb1
+                            remap_p0    // pixel[0] = lb0
+                        };
+                    end
+                    2'd3: begin
+                        // valid_row_cnt=3: pixel[4]=cur, pixel[3]=lb2, pixel[2]=lb1, pixel[1]=lb0, pixel[0]=pad
+                        col5x1 = {
+                            cur_col_pixel,  // pixel[4]
+                            {DATA_WIDTH{1'b0}},  // pixel[3] = lb2 (invalid at valid_row_cnt=3)
+                            remap_p1,   // pixel[2] = lb1
+                            remap_p0,   // pixel[1] = lb0
+                            {DATA_WIDTH{1'b0}}   // pixel[0] = padding
+                        };
+                    end
+                    default: begin
+                        // valid_row_cnt=4: all LBs valid
+                        // pixel[3]=remap_p3, pixel[2]=remap_p2, pixel[1]=remap_p1, pixel[0]=remap_p0
+                        col5x1 = {
+                            cur_col_pixel,  // pixel[4]
+                            remap_p3,   // pixel[3] = oldest LB
+                            remap_p2,   // pixel[2]
+                            remap_p1,   // pixel[1]
+                            remap_p0    // pixel[0] = newest LB
+                        };
+                    end
+                endcase
+            end
         end
     endgenerate
 
     //=========================================================================
     // col5x1_pad_mask: indicates which pixels need boundary padding
-    // For a 5x5 window centered at (center_x, center_y):
-    //   - pixel[4] at y+2: valid if center_y < img_height - 2
-    //   - pixel[3] at y+1: valid if center_y < img_height - 1
-    //   - pixel[2] at y:   always valid if within image (center pixel)
-    //   - pixel[1] at y-1: valid if center_y >= 1
-    //   - pixel[0] at y-2: valid if center_y >= 2
     //=========================================================================
-    wire [$clog2(NUM_ROWS)-1:0] center_y;
-    assign center_y = pipe_rd_row_ptr_dout;  // current y position
-
     assign col5x1_pad_mask = {
-        (center_y < img_height - PAD_SIZE),  // pixel[4] row y+2
-        (center_y < img_height - 1),          // pixel[3] row y+1
-        1'b1,                                  // pixel[2] row y (always valid)
-        (center_y >= 1),                       // pixel[1] row y-1
-        (center_y >= PAD_SIZE)                 // pixel[0] row y-2
+        1'b1,                                              // pixel[4] = cur (always valid)
+        (valid_row_cnt_raw >= 3),                          // pixel[3] = valid if valid_row_cnt >= 3
+        (valid_row_cnt_raw >= 2),                          // pixel[2] = valid if valid_row_cnt >= 2
+        (valid_row_cnt_raw >= 2),                          // pixel[1] = valid if valid_row_cnt >= 2
+        (valid_row_cnt_raw >= 3)                           // pixel[0] = valid if valid_row_cnt >= 3
     };
 
     //=========================================================================
