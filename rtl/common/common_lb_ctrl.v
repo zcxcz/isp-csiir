@@ -1,10 +1,11 @@
 //-----------------------------------------------------------------------------
 // Module: common_lb_ctrl
 // Purpose: Line buffer control with din merging for 5x5 window
-//          Integrates: s2p, linebuffer, p2s, fifo_din, padding
+//          Integrates: s2p, linebuffer, p2s, fifo_din
+//          Output: col5x1 (5 columns, 5 pixels per column) with padding mask
 // Author: rtl-impl
 // Date: 2026-04-18
-// Modified: 2026-04-21
+// Modified: 2026-04-23
 //-----------------------------------------------------------------------------
 // Description:
 //   5x5 Window Data Path:
@@ -14,11 +15,11 @@
 //     - Need to buffer across cycles to form full 5 columns
 //     - Current pixel (col 4) duplicated to fill 5th row position
 //
-//   Output: 5 columns (each column = 5 pixels = 5 rows)
+//   Output: col5x1 (5 columns, 5 pixels per column)
+//     - Each column = 5 pixels (rows y-2 to y+2 at that column position)
 //     - Columns 0-3: from p2s output (buffered across cycles)
 //     - Column 4: current pixel (duplicated 5 times)
-//
-//   Padding is applied to each column (5 pixels) based on position
+//     - Plus boundary padding metadata
 //
 // Parameters:
 //   DATA_WIDTH        - bits per pixel
@@ -35,7 +36,8 @@ module common_lb_ctrl #(
     parameter NUM_ROWS            = 4,   // number of rows in line buffer
     parameter PACK_PIXELS         = 2,   // pixels per word
     parameter PAD_SIZE            = 2,   // padding size (2 for 5x5 window)
-    parameter READ_START_THRESHOLD = 4    // start reading when valid_row_cnt >= this
+    parameter READ_START_THRESHOLD = 4,   // start reading when valid_row_cnt >= this
+    parameter OUTPUT_MODE          = "LB_PLUS_DIN"  // "LB_ONLY" or "LB_PLUS_DIN"
 )(
     input  wire                              clk,
     input  wire                              rst_n,
@@ -60,10 +62,11 @@ module common_lb_ctrl #(
     output wire [LINE_ADDR_WIDTH-1:0]       rd_addr,
     input  wire [DATA_WIDTH*PACK_PIXELS*NUM_ROWS-1:0] rd_data,
 
-    // Output (5 columns, each column = 5 pixels = 5 rows)
-    // Format: {col4, col3, col2, col1, col0} where colX = {p4, p3, p2, p1, p0}
+    // Output (col5x1: 5 columns, each column = 5 pixels = 5 rows)
+    // Format: {col4, col3, col2, col1, col0} where each col = {row4, row3, row2, row1, row0}
     output wire                              rows_ready,
-    output wire [DATA_WIDTH*5*5-1:0]        dout,
+    output wire [DATA_WIDTH*5-1:0]          dout,          // col5x1: 5 pixels
+    output wire [5-1:0]                      dout_pad_mask, // which pixels need padding
     output wire                              dout_valid,
     input  wire                              dout_ready,
 
@@ -103,12 +106,6 @@ module common_lb_ctrl #(
     wire [DATA_WIDTH*NUM_ROWS-1:0]          p2s_dout;
     wire                                      p2s_dout_valid;
     wire                                      p2s_din_ready;
-
-    //=========================================================================
-    // Internal Signals - padding
-    //=========================================================================
-    wire [DATA_WIDTH*5*5-1:0]                pad_dout;
-    wire                                      pad_dout_valid;
 
     //=========================================================================
     // Internal Signals - handshake
@@ -289,9 +286,10 @@ module common_lb_ctrl #(
     wire                                      pipe_buf_valid_dout_ready;
 
     //=========================================================================
-    // Internal Signals - window assembly
+    // Internal Signals - col5x1 output
     //=========================================================================
-    wire [DATA_WIDTH*5*5-1:0]                window_5x5;
+    wire [DATA_WIDTH*5-1:0]                  col5x1;         // 5 pixels
+    wire [5-1:0]                              col5x1_pad_mask; // padding mask per pixel
 
     //=========================================================================
     // Raw signals (registered inputs to pipelines)
@@ -517,8 +515,9 @@ module common_lb_ctrl #(
     assign rd_en   = pipe_rd_active_dout;
     assign rd_addr = pipe_rd_col_ptr_dout;
 
-    assign dout       = pad_dout;
-    assign dout_valid = pad_dout_valid;
+    assign dout       = col5x1;
+    assign dout_valid = pipe_buf_valid_dout;
+    assign dout_pad_mask = col5x1_pad_mask;
 
     genvar g;
     generate
@@ -528,32 +527,89 @@ module common_lb_ctrl #(
     endgenerate
 
     //=========================================================================
-    // Window assembly
+    // col5x1 assembly (5 pixels, each column = 5 rows)
     //=========================================================================
-    genvar row_idx;
+    // Data flow:
+    //   - 4 LBs, each outputs 2P per read
+    //   - P2S converts 2P → 1P (parallel to serial), outputting 1 pixel per cycle
+    //   - Total input: 4×2P (from LBs) + 1×2P (din) = 5×2P
+    //   - P2S outputs 5 pixels per cycle (one column), over 2 cycles per column
+    //   - rd_cycle[1:0] selects which pixel within the 2P to output
+    //
+    // col5x1 format: 5 pixels (one per row in 5x5 window)
+    //   pixel[4] = row y+2 (newest row)
+    //   pixel[3] = row y+1
+    //   pixel[2] = row y   (center row)
+    //   pixel[1] = row y-1
+    //   pixel[0] = row y-2 (oldest row)
+    //
+    // Mapping based on rd_cycle:
+    //   rd_cycle=0: first pixel from each 2P word
+    //     col5x1 = {cur_buf0, p2s_buf0[0], p2s_buf1[0], p2s_buf2[0], p2s_buf3[0]}
+    //   rd_cycle=1: second pixel from each 2P word
+    //     col5x1 = {cur_buf1, p2s_buf0[1], p2s_buf1[1], p2s_buf2[1], p2s_buf3[1]}
+    //=========================================================================
+
+    // col5x1: 5 pixels for current column (at x = rd_col_ptr)
+    // p2s_buf stores 2P per row, indexed by rd_cycle[0] (0=first pixel, 1=second pixel)
+    wire [DATA_WIDTH-1:0] p2s_col_pixel [0:3];
+    assign p2s_col_pixel[0] = (~rd_cycle_raw[0]) ?
+                              pipe_p2s_buf0_dout[0 * DATA_WIDTH +: DATA_WIDTH] :
+                              pipe_p2s_buf0_dout[1 * DATA_WIDTH +: DATA_WIDTH];
+    assign p2s_col_pixel[1] = (~rd_cycle_raw[0]) ?
+                              pipe_p2s_buf1_dout[0 * DATA_WIDTH +: DATA_WIDTH] :
+                              pipe_p2s_buf1_dout[1 * DATA_WIDTH +: DATA_WIDTH];
+    assign p2s_col_pixel[2] = (~rd_cycle_raw[0]) ?
+                              pipe_p2s_buf2_dout[0 * DATA_WIDTH +: DATA_WIDTH] :
+                              pipe_p2s_buf2_dout[1 * DATA_WIDTH +: DATA_WIDTH];
+    assign p2s_col_pixel[3] = (~rd_cycle_raw[0]) ?
+                              pipe_p2s_buf3_dout[0 * DATA_WIDTH +: DATA_WIDTH] :
+                              pipe_p2s_buf3_dout[1 * DATA_WIDTH +: DATA_WIDTH];
+
+    wire [DATA_WIDTH-1:0] cur_col_pixel;
+    assign cur_col_pixel = (~rd_cycle_raw[0]) ?
+                           pipe_cur_buf0_dout : pipe_cur_buf1_dout;
+
+    // Output mode selection
     generate
-        for (row_idx = 0; row_idx < NUM_ROWS; row_idx = row_idx + 1) begin : gen_window_rows
-            assign window_5x5[row_idx * DATA_WIDTH +: DATA_WIDTH] =
-                   pipe_p2s_buf0_dout[row_idx * DATA_WIDTH +: DATA_WIDTH];
-            assign window_5x5[5 * DATA_WIDTH + row_idx * DATA_WIDTH +: DATA_WIDTH] =
-                   pipe_p2s_buf1_dout[row_idx * DATA_WIDTH +: DATA_WIDTH];
-            assign window_5x5[2 * 5 * DATA_WIDTH + row_idx * DATA_WIDTH +: DATA_WIDTH] =
-                   pipe_p2s_buf2_dout[row_idx * DATA_WIDTH +: DATA_WIDTH];
-            assign window_5x5[3 * 5 * DATA_WIDTH + row_idx * DATA_WIDTH +: DATA_WIDTH] =
-                   pipe_p2s_buf3_dout[row_idx * DATA_WIDTH +: DATA_WIDTH];
+        if (OUTPUT_MODE == "LB_ONLY") begin : gen_lb_only
+            assign col5x1 = {
+                p2s_col_pixel[0],  // pixel[4] = row y+2
+                p2s_col_pixel[1],  // pixel[3] = row y+1
+                p2s_col_pixel[2],  // pixel[2] = row y
+                p2s_col_pixel[3],  // pixel[1] = row y-1
+                {DATA_WIDTH{1'b0}}  // pixel[0] = row y-2 (not available)
+            };
+        end else begin : gen_lb_plus_din
+            assign col5x1 = {
+                cur_col_pixel,     // pixel[4] = row y+2 (current din)
+                p2s_col_pixel[0],  // pixel[3] = row y+1
+                p2s_col_pixel[1],  // pixel[2] = row y
+                p2s_col_pixel[2],  // pixel[1] = row y-1
+                p2s_col_pixel[3]   // pixel[0] = row y-2
+            };
         end
     endgenerate
 
-    genvar col_idx;
-    generate
-        for (col_idx = 0; col_idx < 5; col_idx = col_idx + 1) begin : gen_cur_row
-            assign window_5x5[4 * DATA_WIDTH + col_idx * 5 * DATA_WIDTH +: DATA_WIDTH] =
-                   (col_idx == 0) ? pipe_cur_buf0_dout :
-                   (col_idx == 1) ? pipe_cur_buf1_dout :
-                   (col_idx == 2) ? pipe_cur_buf2_dout :
-                   pipe_cur_buf3_dout;
-        end
-    endgenerate
+    //=========================================================================
+    // col5x1_pad_mask: indicates which pixels need boundary padding
+    // For a 5x5 window centered at (center_x, center_y):
+    //   - pixel[4] at y+2: valid if center_y < img_height - 2
+    //   - pixel[3] at y+1: valid if center_y < img_height - 1
+    //   - pixel[2] at y:   always valid if within image (center pixel)
+    //   - pixel[1] at y-1: valid if center_y >= 1
+    //   - pixel[0] at y-2: valid if center_y >= 2
+    //=========================================================================
+    wire [$clog2(NUM_ROWS)-1:0] center_y;
+    assign center_y = pipe_rd_row_ptr_dout;  // current y position
+
+    assign col5x1_pad_mask = {
+        (center_y < img_height - PAD_SIZE),  // pixel[4] row y+2
+        (center_y < img_height - 1),          // pixel[3] row y+1
+        1'b1,                                  // pixel[2] row y (always valid)
+        (center_y >= 1),                       // pixel[1] row y-1
+        (center_y >= PAD_SIZE)                 // pixel[0] row y-2
+    };
 
     //=========================================================================
     // Raw signal assignments (registered inputs to pipelines)
@@ -634,23 +690,6 @@ module common_lb_ctrl #(
         .dout_valid (p2s_dout_valid),
         .dout_ready (1'b1),
         .sof        (sof)
-    );
-
-    // padding: apply boundary padding
-    common_padding #(
-        .DATA_WIDTH   (DATA_WIDTH),
-        .NUM_COLS     (5),
-        .NUM_ROWS     (5),
-        .PAD_SIZE     (PAD_SIZE)
-    ) u_padding (
-        .center_x     (pipe_rd_col_ptr_dout),
-        .center_y     ({12{1'b0}}),
-        .img_width    (img_width),
-        .img_height   (img_height),
-        .rd_data      (window_5x5),
-        .rd_data_valid(pipe_buf_valid_dout),
-        .dout         (pad_dout),
-        .dout_valid   (pad_dout_valid)
     );
 
     //=========================================================================
