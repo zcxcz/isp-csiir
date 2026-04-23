@@ -110,7 +110,7 @@ inline void sobel_gradient_5x5(const pixel_t window[PATCH_SIZE],
 
     grad_h = (grad_t)std::abs(sum_h);
     grad_v = (grad_t)std::abs(sum_v);
-    grad = (grad_t)(round_div(grad_h, 5) + round_div(grad_v, 5));
+    grad = (grad_t)clip<int>(round_div(grad_h, 5) + round_div(grad_v, 5), 0, 127);
 }
 
 //==============================================================================
@@ -176,47 +176,155 @@ struct DirAvgResult {
     bool avg1_enable;
 };
 
-// 5x5 kernels
-static const int K2X2[PATCH_SIZE] = {
+// 2x2 center and directional kernels
+static const int K2X2_C[PATCH_SIZE] = {
     0, 0, 0, 0, 0,
     0, 1, 2, 1, 0,
     0, 2, 4, 2, 0,
     0, 1, 2, 1, 0,
     0, 0, 0, 0, 0
 };
-
-static const int K3X3[PATCH_SIZE] = {
+static const int K2X2_U[PATCH_SIZE] = {
     0, 0, 0, 0, 0,
     0, 1, 1, 1, 0,
-    0, 1, 1, 1, 0,
+    0, 1, 3, 1, 0,
+    0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0
+};
+static const int K2X2_D[PATCH_SIZE] = {
+    0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+    0, 1, 3, 1, 0,
     0, 1, 1, 1, 0,
     0, 0, 0, 0, 0
 };
-
-static const int K4X4[PATCH_SIZE] = {
-    1, 1, 2, 1, 1,
-    1, 2, 4, 2, 1,
-    2, 4, 8, 4, 2,
-    1, 2, 4, 2, 1,
-    1, 1, 2, 1, 1
+static const int K2X2_L[PATCH_SIZE] = {
+    0, 0, 0, 0, 0,
+    0, 1, 1, 0, 0,
+    0, 1, 3, 0, 0,
+    0, 1, 1, 0, 0,
+    0, 0, 0, 0, 0
+};
+static const int K2X2_R[PATCH_SIZE] = {
+    0, 0, 0, 0, 0,
+    0, 0, 1, 1, 0,
+    0, 0, 3, 1, 0,
+    0, 0, 1, 1, 0,
+    0, 0, 0, 0, 0
 };
 
-static const int K5X5[PATCH_SIZE] = {
+// 3x3 center and directional kernels
+static const int K3X3_C[PATCH_SIZE] = {
+    0, 0, 0, 0, 0,
+    0, 1, 2, 1, 0,
+    0, 2, 4, 2, 0,
+    0, 1, 2, 1, 0,
+    0, 0, 0, 0, 0
+};
+static const int K3X3_U[PATCH_SIZE] = {
+    0, 0, 0, 0, 0,
+    0, 1, 2, 1, 0,
+    0, 1, 2, 1, 0,
+    0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0
+};
+static const int K3X3_D[PATCH_SIZE] = {
+    0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+    0, 1, 2, 1, 0,
+    0, 1, 2, 1, 0,
+    0, 0, 0, 0, 0
+};
+static const int K3X3_L[PATCH_SIZE] = {
+    0, 0, 0, 0, 0,
+    0, 1, 1, 0, 0,
+    0, 2, 2, 0, 0,
+    0, 1, 1, 0, 0,
+    0, 0, 0, 0, 0
+};
+static const int K3X3_R[PATCH_SIZE] = {
+    0, 0, 0, 0, 0,
+    0, 0, 1, 1, 0,
+    0, 0, 2, 2, 0,
+    0, 0, 1, 1, 0,
+    0, 0, 0, 0, 0
+};
+
+// 4x4 center and directional kernels
+static const int K4X4_C[PATCH_SIZE] = {
+    1, 2, 2, 2, 1,
+    2, 4, 4, 4, 2,
+    2, 4, 4, 4, 2,
+    2, 4, 4, 4, 2,
+    1, 2, 2, 2, 1
+};
+static const int K4X4_U[PATCH_SIZE] = {
+    1, 2, 2, 2, 1,
+    2, 2, 4, 2, 2,
+    2, 2, 4, 2, 2,
+    0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0
+};
+static const int K4X4_D[PATCH_SIZE] = {
+    0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+    2, 2, 4, 2, 2,
+    2, 2, 4, 2, 2,
+    1, 2, 2, 2, 1
+};
+static const int K4X4_L[PATCH_SIZE] = {
+    1, 2, 2, 0, 0,
+    2, 2, 2, 0, 0,
+    2, 4, 4, 0, 0,
+    2, 2, 2, 0, 0,
+    1, 2, 2, 0, 0
+};
+static const int K4X4_R[PATCH_SIZE] = {
+    0, 0, 2, 2, 1,
+    0, 0, 2, 2, 2,
+    0, 0, 4, 4, 2,
+    0, 0, 2, 2, 2,
+    0, 0, 2, 2, 1
+};
+
+// 5x5 center and directional kernels
+static const int K5X5_C[PATCH_SIZE] = {
+    1, 2, 1, 2, 1,
     1, 1, 1, 1, 1,
+    2, 1, 2, 1, 2,
     1, 1, 1, 1, 1,
+    1, 2, 1, 2, 1
+};
+static const int K5X5_U[PATCH_SIZE] = {
     1, 1, 1, 1, 1,
+    1, 1, 2, 1, 1,
     1, 1, 1, 1, 1,
+    0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0
+};
+static const int K5X5_D[PATCH_SIZE] = {
+    0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+    1, 1, 1, 1, 1,
+    1, 1, 2, 1, 1,
     1, 1, 1, 1, 1
+};
+static const int K5X5_L[PATCH_SIZE] = {
+    1, 1, 1, 0, 0,
+    1, 1, 1, 0, 0,
+    1, 2, 1, 0, 0,
+    1, 1, 1, 0, 0,
+    1, 1, 1, 0, 0
+};
+static const int K5X5_R[PATCH_SIZE] = {
+    0, 0, 1, 1, 1,
+    0, 0, 1, 1, 1,
+    0, 0, 1, 2, 1,
+    0, 0, 1, 1, 1,
+    0, 0, 1, 1, 1
 };
 
 static const int ZERO[PATCH_SIZE] = {0};
-
-// Direction masks
-static const int MC[PATCH_SIZE] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
-static const int MU[PATCH_SIZE] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0};
-static const int MD[PATCH_SIZE] = {0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
-static const int ML[PATCH_SIZE] = {1,1,1,0,0,1,1,1,0,0,1,1,1,0,0,1,1,1,0,0,1,1,1,0,0};
-static const int MR[PATCH_SIZE] = {0,0,1,1,1,0,0,1,1,1,0,0,1,1,1,0,0,1,1,1,0,0,1,1,1};
 
 inline DirAvgResult compute_directional_avg(const Config& cfg,
                                              const s11_t patch_s11[PATCH_SIZE],
@@ -224,106 +332,125 @@ inline DirAvgResult compute_directional_avg(const Config& cfg,
     DirAvgResult result = {};
     int kt = select_kernel_type(cfg, win_size);
 
-    const int* k0;
-    const int* k1;
+    const int* k0_c, *k0_u, *k0_d, *k0_l, *k0_r;
+    const int* k1_c, *k1_u, *k1_d, *k1_l, *k1_r;
+    bool avg0_en, avg1_en;
+
     switch (kt) {
-        case 0: k0 = ZERO; k1 = K2X2; result.avg0_enable = false; result.avg1_enable = true; break;
-        case 1: k0 = K3X3; k1 = K2X2; result.avg0_enable = true; result.avg1_enable = true; break;
-        case 2: k0 = K4X4; k1 = K3X3; result.avg0_enable = true; result.avg1_enable = true; break;
-        case 3: k0 = K5X5; k1 = K4X4; result.avg0_enable = true; result.avg1_enable = true; break;
-        default: k0 = K5X5; k1 = ZERO; result.avg0_enable = true; result.avg1_enable = false; break;
+        case 0:
+            k0_c = ZERO; k0_u = ZERO; k0_d = ZERO; k0_l = ZERO; k0_r = ZERO;
+            k1_c = K2X2_C; k1_u = K2X2_U; k1_d = K2X2_D; k1_l = K2X2_L; k1_r = K2X2_R;
+            avg0_en = false; avg1_en = true;
+            break;
+        case 1:
+            k0_c = K2X2_C; k0_u = K2X2_U; k0_d = K2X2_D; k0_l = K2X2_L; k0_r = K2X2_R;
+            k1_c = K3X3_C; k1_u = K3X3_U; k1_d = K3X3_D; k1_l = K3X3_L; k1_r = K3X3_R;
+            avg0_en = true; avg1_en = true;
+            break;
+        case 2:
+            k0_c = K3X3_C; k0_u = K3X3_U; k0_d = K3X3_D; k0_l = K3X3_L; k0_r = K3X3_R;
+            k1_c = K4X4_C; k1_u = K4X4_U; k1_d = K4X4_D; k1_l = K4X4_L; k1_r = K4X4_R;
+            avg0_en = true; avg1_en = true;
+            break;
+        case 3:
+            k0_c = K4X4_C; k0_u = K4X4_U; k0_d = K4X4_D; k0_l = K4X4_L; k0_r = K4X4_R;
+            k1_c = K5X5_C; k1_u = K5X5_U; k1_d = K5X5_D; k1_l = K5X5_L; k1_r = K5X5_R;
+            avg0_en = true; avg1_en = true;
+            break;
+        default:
+            k0_c = K5X5_C; k0_u = K5X5_U; k0_d = K5X5_D; k0_l = K5X5_L; k0_r = K5X5_R;
+            k1_c = ZERO; k1_u = ZERO; k1_d = ZERO; k1_l = ZERO; k1_r = ZERO;
+            avg0_en = true; avg1_en = false;
+            break;
     }
 
-    // Compute masked kernels for avg0 (kernel * mask for each direction)
-    // Always compute avg0 values even when avg0_enable=false, per Python semantics
-    int mk0_c[PATCH_SIZE], mk0_u[PATCH_SIZE], mk0_d[PATCH_SIZE];
-    int mk0_l[PATCH_SIZE], mk0_r[PATCH_SIZE];
-    for (int i = 0; i < PATCH_SIZE; i++) {
-        mk0_c[i] = k0[i] * MC[i];
-        mk0_u[i] = k0[i] * MU[i];
-        mk0_d[i] = k0[i] * MD[i];
-        mk0_l[i] = k0[i] * ML[i];
-        mk0_r[i] = k0[i] * MR[i];
-    }
-    result.avg0_c = weighted_avg(patch_s11, mk0_c);
-    result.avg0_u = weighted_avg(patch_s11, mk0_u);
-    result.avg0_d = weighted_avg(patch_s11, mk0_d);
-    result.avg0_l = weighted_avg(patch_s11, mk0_l);
-    result.avg0_r = weighted_avg(patch_s11, mk0_r);
+    result.avg0_enable = avg0_en;
+    result.avg1_enable = avg1_en;
 
-    // Compute masked kernels for avg1
-    int mk1_c[PATCH_SIZE], mk1_u[PATCH_SIZE], mk1_d[PATCH_SIZE];
-    int mk1_l[PATCH_SIZE], mk1_r[PATCH_SIZE];
-    for (int i = 0; i < PATCH_SIZE; i++) {
-        mk1_c[i] = k1[i] * MC[i];
-        mk1_u[i] = k1[i] * MU[i];
-        mk1_d[i] = k1[i] * MD[i];
-        mk1_l[i] = k1[i] * ML[i];
-        mk1_r[i] = k1[i] * MR[i];
-    }
-    result.avg1_c = weighted_avg(patch_s11, mk1_c);
-    result.avg1_u = weighted_avg(patch_s11, mk1_u);
-    result.avg1_d = weighted_avg(patch_s11, mk1_d);
-    result.avg1_l = weighted_avg(patch_s11, mk1_l);
-    result.avg1_r = weighted_avg(patch_s11, mk1_r);
+    result.avg0_c = weighted_avg(patch_s11, k0_c);
+    result.avg0_u = weighted_avg(patch_s11, k0_u);
+    result.avg0_d = weighted_avg(patch_s11, k0_d);
+    result.avg0_l = weighted_avg(patch_s11, k0_l);
+    result.avg0_r = weighted_avg(patch_s11, k0_r);
+
+    result.avg1_c = weighted_avg(patch_s11, k1_c);
+    result.avg1_u = weighted_avg(patch_s11, k1_u);
+    result.avg1_d = weighted_avg(patch_s11, k1_d);
+    result.avg1_l = weighted_avg(patch_s11, k1_l);
+    result.avg1_r = weighted_avg(patch_s11, k1_r);
 
     return result;
 }
 
 //==============================================================================
-// Gradient Fusion
+// Gradient Fusion (Min-tracking algorithm per ref)
 //==============================================================================
 struct FusionResult {
     s11_t blend0;
     s11_t blend1;
 };
 
-inline void grad_inverse_remap(int g[5], int inv[5]) {
-    int idx[5] = {0, 1, 2, 3, 4};
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4 - i; j++) {
-            if (g[idx[j]] < g[idx[j+1]]) {
-                int t = idx[j]; idx[j] = idx[j+1]; idx[j+1] = t;
-            }
-        }
-    }
-    for (int i = 0; i < 5; i++) {
-        inv[idx[4-i]] = g[idx[i]];
-    }
-}
-
 inline FusionResult compute_gradient_fusion(const DirAvgResult& dir_avg,
                                            int grad_u, int grad_d,
                                            int grad_l, int grad_r, int grad_c) {
     FusionResult result;
+    // Order: u(0), d(1), l(2), r(3), c(4)
     int g[5] = {grad_u, grad_d, grad_l, grad_r, grad_c};
-    int inv[5];
-    grad_inverse_remap(g, inv);
+    int v0[5] = {(int)dir_avg.avg0_u, (int)dir_avg.avg0_d, (int)dir_avg.avg0_l,
+                 (int)dir_avg.avg0_r, (int)dir_avg.avg0_c};
+    int v1[5] = {(int)dir_avg.avg1_u, (int)dir_avg.avg1_d, (int)dir_avg.avg1_l,
+                 (int)dir_avg.avg1_r, (int)dir_avg.avg1_c};
 
-    int sum = inv[0] + inv[1] + inv[2] + inv[3] + inv[4];
-
-    int v0[5] = {(int)dir_avg.avg0_c, (int)dir_avg.avg0_u, (int)dir_avg.avg0_d,
-                 (int)dir_avg.avg0_l, (int)dir_avg.avg0_r};
-    int v1[5] = {(int)dir_avg.avg1_c, (int)dir_avg.avg1_u, (int)dir_avg.avg1_d,
-                 (int)dir_avg.avg1_l, (int)dir_avg.avg1_r};
-
-    int total0 = 0, total1 = 0;
-    for (int i = 0; i < 5; i++) {
-        total0 += v0[i] * inv[i];
-        total1 += v1[i] * inv[i];
+    // min0 tracking
+    int min0_grad = 2048;
+    int min0_grad_avg = 0;
+    if (g[0] <= min0_grad) {
+        min0_grad = g[0];
+        min0_grad_avg = v0[0];
+    }
+    if (g[2] <= min0_grad) {
+        min0_grad = g[2];
+        min0_grad_avg = round_div(v0[2] + min0_grad_avg + 1, 2);
+    }
+    if (g[4] <= min0_grad) {
+        min0_grad = g[4];
+        min0_grad_avg = round_div(v0[4] + min0_grad_avg + 1, 2);
+    }
+    if (g[3] <= min0_grad) {
+        min0_grad = g[3];
+        min0_grad_avg = round_div(v0[3] + min0_grad_avg + 1, 2);
+    }
+    if (g[1] <= min0_grad) {
+        min0_grad = g[1];
+        min0_grad_avg = round_div(v0[1] + min0_grad_avg + 1, 2);
     }
 
-    if (sum == 0) {
-        // When gradient sum is 0, use simple average of all directional values
-        // (matches Python: total = sum(avg_c + avg_u + avg_d + avg_l + avg_r))
-        int simple_sum0 = v0[0] + v0[1] + v0[2] + v0[3] + v0[4];
-        int simple_sum1 = v1[0] + v1[1] + v1[2] + v1[3] + v1[4];
-        result.blend0 = saturate_s11(round_div(simple_sum0, 5));
-        result.blend1 = saturate_s11(round_div(simple_sum1, 5));
-    } else {
-        result.blend0 = saturate_s11(round_div(total0, sum));
-        result.blend1 = saturate_s11(round_div(total1, sum));
+    // min1 tracking
+    int min1_grad = 2048;
+    int min1_grad_avg = 0;
+    if (g[0] <= min1_grad) {
+        min1_grad = g[0];
+        min1_grad_avg = v1[0];
     }
+    if (g[2] <= min1_grad) {
+        min1_grad = g[2];
+        min1_grad_avg = round_div(v1[2] + min1_grad_avg + 1, 2);
+    }
+    if (g[4] <= min1_grad) {
+        min1_grad = g[4];
+        min1_grad_avg = round_div(v1[4] + min1_grad_avg + 1, 2);
+    }
+    if (g[3] <= min1_grad) {
+        min1_grad = g[3];
+        min1_grad_avg = round_div(v1[3] + min1_grad_avg + 1, 2);
+    }
+    if (g[1] <= min1_grad) {
+        min1_grad = g[1];
+        min1_grad_avg = round_div(v1[1] + min1_grad_avg + 1, 2);
+    }
+
+    result.blend0 = saturate_s11(min0_grad_avg);
+    result.blend1 = saturate_s11(min1_grad_avg);
     return result;
 }
 
@@ -343,13 +470,13 @@ inline void mix_scalar(s11_t scalar, const s11_t src[PATCH_SIZE],
     }
 }
 
-// Blend factors (matching Python's BLEND_FACTOR_*)
+// Blend factors (per ref section 5.2)
 static const int F2X2[PATCH_SIZE] = {0,0,0,0,0,0,1,2,1,0,0,2,4,2,0,0,1,2,1,0,0,0,0,0,0};
 static const int F3X3[PATCH_SIZE] = {0,0,0,0,0,0,1,1,1,0,0,1,1,1,0,0,1,1,1,0,0,0,0,0,0};
-// Note: Python's AVG_FACTOR_C_4X4 has center element 8 (not 4)
-static const int F4X4[PATCH_SIZE] = {1,1,2,1,1,1,2,4,2,1,2,4,8,4,2,1,2,4,2,1,1,1,2,1,1};
-// Note: Python's AVG_FACTOR_C_5X5 is all 1s (not 4s)
-static const int F5X5[PATCH_SIZE] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
+// 4x4 per ref: center is 4, not 8
+static const int F4X4[PATCH_SIZE] = {1,2,2,2,1,2,4,4,4,2,2,4,4,4,2,2,4,4,4,2,1,2,2,2,1};
+// 5x5 per ref: all 4s
+static const int F5X5[PATCH_SIZE] = {4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4};
 static const int F_ORI_V[PATCH_SIZE] = {0,0,0,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,0,0,0};
 static const int F_ORI_H[PATCH_SIZE] = {0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0};
 
@@ -363,6 +490,8 @@ inline void compute_iir_blend(const Config& cfg, const s11_t src[PATCH_SIZE],
     s11_t b0_hor = saturate_s11(round_div((int)ratio * blend0_g + (64 - ratio) * avg0_u, 64));
     s11_t b1_hor = saturate_s11(round_div((int)ratio * blend1_g + (64 - ratio) * avg1_u, 64));
 
+    // G_H = |grad_v|, G_V = |grad_h| per ref
+    // If G_H > G_V (grad_v dominates), use vertical orientation
     bool vert_dom = std::abs(grad_v) > std::abs(grad_h);
     const int* f_orient = vert_dom ? F_ORI_V : F_ORI_H;
 
