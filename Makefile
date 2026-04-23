@@ -5,7 +5,7 @@
 WIDTH ?= 16
 HEIGHT ?= 16
 PATTERN ?= random
-PYTHON_DIR = verification
+PYTHON_DIR = python
 HLS_DIR = hls
 BUILD_DIR = build
 
