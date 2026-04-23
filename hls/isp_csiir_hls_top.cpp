@@ -513,6 +513,37 @@ void isp_csiir_top(
     grad_t current_grad = 0;
     grad_t grad_u, grad_d, grad_l, grad_r;
 
+    // 2-cycle delay buffer for grad values (to get grad_r)
+    grad_t grad_delay_buf[2][MAX_WIDTH];
+    #pragma HLS ARRAY_PARTITION variable=grad_delay_buf dim=1 complete
+    #pragma HLS RESOURCE variable=grad_delay_buf core=RAM_2P_BRAM
+
+    // Delayed stage2 results (need to store for 2 cycles)
+    ISPCSIIR::DirAvgResult dir_avg_delay[2];
+    #pragma HLS ARRAY_PARTITION variable=dir_avg_delay complete
+
+    // Delayed coordinates and win_size
+    unsigned int delay_row[2];
+    unsigned int delay_col[2];
+    int delay_win_size[2];
+    #pragma HLS ARRAY_PARTITION variable=delay_row complete
+    #pragma HLS ARRAY_PARTITION variable=delay_col complete
+    #pragma HLS ARRAY_PARTITION variable=delay_win_size complete
+
+    // Delayed fusion results
+    ISPCSIIR::FusionResult delay_fusion[2];
+    #pragma HLS ARRAY_PARTITION variable=delay_fusion complete
+
+    // Delayed filt_5x5 for stage4
+    s11_t delay_filt_5x5[2][PATCH_SIZE];
+    #pragma HLS ARRAY_PARTITION variable=delay_filt_5x5 complete
+
+    // Delayed grad_h, grad_v for stage4
+    grad_t delay_grad_h[2];
+    grad_t delay_grad_v[2];
+    #pragma HLS ARRAY_PARTITION variable=delay_grad_h complete
+    #pragma HLS ARRAY_PARTITION variable=delay_grad_v complete
+
     unsigned int total_pixels = (unsigned int)img_width * (unsigned int)img_height;
 
     // Initialize original line buffer
@@ -536,6 +567,12 @@ void isp_csiir_top(
             col_filt[i][j] = 0;
         }
     }
+    for (int i = 0; i < 5; i++) {
+        for (int j = 0; j < 5; j++) {
+            col_src[i][j] = 0;
+            col_filt[i][j] = 0;
+        }
+    }
     for (int i = 0; i < 2; i++) {
         for (int j = 0; j < MAX_WIDTH; j++) {
             #pragma HLS UNROLL factor=4
@@ -549,6 +586,27 @@ void isp_csiir_top(
         #pragma HLS UNROLL factor=4
         grad_next_row_delay[j] = 0;
     }
+    // Initialize delay buffers
+    for (int i = 0; i < 2; i++) {
+        delay_row[i] = 0;
+        delay_col[i] = 0;
+        delay_win_size[i] = 0;
+        delay_grad_h[i] = 0;
+        delay_grad_v[i] = 0;
+        for (int j = 0; j < PATCH_SIZE; j++) {
+            delay_filt_5x5[i][j] = 0;
+        }
+    }
+    dir_avg_delay[0].avg0_c = 0; dir_avg_delay[0].avg0_u = 0; dir_avg_delay[0].avg0_d = 0;
+    dir_avg_delay[0].avg0_l = 0; dir_avg_delay[0].avg0_r = 0;
+    dir_avg_delay[0].avg1_c = 0; dir_avg_delay[0].avg1_u = 0; dir_avg_delay[0].avg1_d = 0;
+    dir_avg_delay[0].avg1_l = 0; dir_avg_delay[0].avg1_r = 0;
+    dir_avg_delay[1].avg0_c = 0; dir_avg_delay[1].avg0_u = 0; dir_avg_delay[1].avg0_d = 0;
+    dir_avg_delay[1].avg0_l = 0; dir_avg_delay[1].avg0_r = 0;
+    dir_avg_delay[1].avg1_c = 0; dir_avg_delay[1].avg1_u = 0; dir_avg_delay[1].avg1_d = 0;
+    dir_avg_delay[1].avg1_l = 0; dir_avg_delay[1].avg1_r = 0;
+    delay_fusion[0].blend0 = 0; delay_fusion[0].blend1 = 0;
+    delay_fusion[1].blend0 = 0; delay_fusion[1].blend1 = 0;
 
     // Main processing loop - streaming pixel-by-pixel
     for (unsigned int pixel_idx = 0; pixel_idx < total_pixels; pixel_idx++) {
@@ -578,10 +636,10 @@ void isp_csiir_top(
         pixel_pack_t src_old_row2_pack = line_buf_src[2][col_val];
         pixel_pack_t src_old_row3_pack = line_buf_src[3][col_val];
 
-        pixel_t src_old_row0 = src_old_row0_pack.range(9, 0);
-        pixel_t src_old_row1 = src_old_row1_pack.range(9, 0);
-        pixel_t src_old_row2 = src_old_row2_pack.range(9, 0);
-        pixel_t src_old_row3 = src_old_row3_pack.range(9, 0);
+        pixel_t src_old_row0 = (pixel_t)src_old_row0_pack.range(9, 0).to_int();
+        pixel_t src_old_row1 = (pixel_t)src_old_row1_pack.range(9, 0).to_int();
+        pixel_t src_old_row2 = (pixel_t)src_old_row2_pack.range(9, 0).to_int();
+        pixel_t src_old_row3 = (pixel_t)src_old_row3_pack.range(9, 0).to_int();
 
         // Shift original line buffer down: row0<-row1<-row2<-row3<-din
         line_buf_src[0][col_val] = (pixel_pack_t)src_old_row1 << 0 | (pixel_pack_t)src_old_row0 << 10;
@@ -615,11 +673,11 @@ void isp_csiir_top(
         pixel_pack_t filt_old_row3_pack = line_buf_filt[3][col_val];
         pixel_pack_t filt_old_row4_pack = line_buf_filt[4][col_val];
 
-        pixel_t filt_old_row0 = filt_old_row0_pack.range(9, 0);
-        pixel_t filt_old_row1 = filt_old_row1_pack.range(9, 0);
-        pixel_t filt_old_row2 = filt_old_row2_pack.range(9, 0);
-        pixel_t filt_old_row3 = filt_old_row3_pack.range(9, 0);
-        pixel_t filt_old_row4 = filt_old_row4_pack.range(9, 0);
+        pixel_t filt_old_row0 = (pixel_t)filt_old_row0_pack.range(9, 0).to_int();
+        pixel_t filt_old_row1 = (pixel_t)filt_old_row1_pack.range(9, 0).to_int();
+        pixel_t filt_old_row2 = (pixel_t)filt_old_row2_pack.range(9, 0).to_int();
+        pixel_t filt_old_row3 = (pixel_t)filt_old_row3_pack.range(9, 0).to_int();
+        pixel_t filt_old_row4 = (pixel_t)filt_old_row4_pack.range(9, 0).to_int();
 
         // Shift filtered line buffer: rows shift down, current pixel filtered
         // value will be written AFTER computation (see below)
@@ -690,7 +748,7 @@ void isp_csiir_top(
         //======================================================================
         grad_t grad_next_row = grad_next_row_delay[col_val];
 
-        grad_u = grad_buf_pack[0][col_val].range(13, 0);
+        grad_u = (grad_t)grad_buf_pack[0][col_val].range(13, 0);
         // grad_l from shift register BEFORE update: grad_shift[0] = grad(i-2,j)
         grad_l = grad_l_for_win;
         grad_t grad_c = grad;
@@ -703,7 +761,7 @@ void isp_csiir_top(
         grad_shift[1] = grad_shift[2];
         grad_shift[2] = grad;
 
-        grad_buf_pack[0][col_val] = (grad_pack_t)grad << 0 | (grad_pack_t)grad_buf_pack[1][col_val].range(13, 0);
+        grad_buf_pack[0][col_val] = (grad_pack_t)grad << 0 | (grad_pack_t)grad_buf_pack[1][col_val].range(13, 0).to_int();
         grad_buf_pack[1][col_val] = (grad_pack_t)grad << 0 | (grad_pack_t)grad_next_row << 14;
 
         grad_next_row_delay[col_val] = current_grad;
@@ -756,20 +814,36 @@ void isp_csiir_top(
             }
         }
 
+        // Store values for potential delayed output
+        delay_grad_h[0] = grad_h;
+        delay_grad_v[0] = grad_v;
+        delay_fusion[0] = fusion;
+        delay_win_size[0] = win_size;
+        delay_row[0] = row_val;
+        delay_col[0] = col_val;
+        dir_avg_delay[0] = dir_avg;
+
         s11_t final_patch[PATCH_SIZE];
+        // Always use current values for now (output at same position as gradient)
         isp.compute_iir_blend(filt_5x5, win_size, fusion.blend0, fusion.blend1,
                               dir_avg.avg0_u, dir_avg.avg1_u,
                               (int)grad_h, (int)grad_v, final_patch);
 
-        pixel_t dout_pixel = s11_to_u10(final_patch[12]);
+        pixel_t dout_pixel;
 
-        //======================================================================
-        // Write back filtered value to line buffer (FEEDBACK)
-        //======================================================================
+        // Boundary handling: rows 0-1 output original input (passthrough)
+        // This matches Python behavior where rows 0-1 are copied from input
+        if (row_val < 2) {
+            // For boundary rows, output original pixel directly
+            dout_pixel = din.data;
+        } else {
+            // For rows 2+, output filtered result
+            dout_pixel = s11_to_u10(final_patch[12]);
+        }
         // Update line_buf_filt[4] with filtered value for current position
         // This makes the filtered value available for subsequent pixel processing
         pixel_pack_t filt_row4_pack = line_buf_filt[4][col_val];
-        pixel_t filt_row4_even = filt_row4_pack.range(9, 0);
+        pixel_t filt_row4_even = (pixel_t)filt_row4_pack.range(9, 0).to_int();
         line_buf_filt[4][col_val] = (pixel_pack_t)dout_pixel << 0 | (pixel_pack_t)filt_row4_even << 10;
         // Also update col_filt[4][4] so the next column sees the filtered value
         col_filt[4][4] = dout_pixel;
