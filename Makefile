@@ -7,6 +7,7 @@ HEIGHT ?= 16
 PATTERN ?= random
 SEED ?= 42
 PYTHON_DIR = python
+SCRIPTS_DIR = scripts
 HLS_DIR = hls
 BUILD_DIR = build
 CONFIG ?=  # Optional: config file (JSON)
@@ -52,7 +53,7 @@ $(BUILD_DIR):
 
 gen_config: $(BUILD_DIR)
 	@echo "Generating random config..."
-	@python3 $(PYTHON_DIR)/gen_config.py \
+	@python3 $(SCRIPTS_DIR)/gen_config.py \
 		--seed $(SEED) \
 		--width $(WIDTH) \
 		--height $(HEIGHT) \
@@ -97,14 +98,18 @@ run_hls: gen_input
 	@cd $(HLS_DIR) && $(MAKE) clean && $(MAKE) 2>&1 | tail -3
 	@echo ""
 	@echo "Running HLS model..."
+ifneq ($(CONFIG),)
+	@cd $(HLS_DIR) && ./hls_top_tb $(shell realpath $(INPUT_HEX)) $(shell realpath $(HLS_OUT)) $(shell realpath $(CONFIG)) 2>&1 | grep -v "WARNING:" | head -20
+else
 	@cd $(HLS_DIR) && ./hls_top_tb $(shell realpath $(INPUT_HEX)) $(shell realpath $(HLS_OUT)) 2>&1 | grep -v "WARNING:" | head -20
+endif
 	@echo ""
 	@echo "HLS output: $(HLS_OUT)"
 
 compare: run_python run_hls
 	@echo ""
 	@echo "Comparing outputs..."
-	@python3 $(PYTHON_DIR)/compare_outputs.py --python $(PYTHON_OUT) --hls $(HLS_OUT)
+	@python3 $(SCRIPTS_DIR)/compare_outputs.py --python $(PYTHON_OUT) --hls $(HLS_OUT)
 
 run: run_python run_hls compare
 

@@ -3,7 +3,7 @@
 //==============================================================================
 // Tests HLS top module with simple patterns
 // Optional: reads input from hex file, writes output to hex file
-// Usage: ./hls_top_tb [input.hex] [output.hex]
+// Usage: ./hls_top_tb [input.hex] [output.hex] [config.json]
 //==============================================================================
 
 #include <iostream>
@@ -13,6 +13,7 @@
 #include <string>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include "isp_csiir_hls_top.cpp"
 
 using namespace std;
@@ -99,10 +100,107 @@ bool save_output(const string& filename, uint16_t output[TEST_HEIGHT][TEST_WIDTH
 }
 
 //-----------------------------------------------------------------------------
+// Configurable parameters (can be overridden by JSON config)
+//-----------------------------------------------------------------------------
+struct TestConfig {
+    int width = TEST_WIDTH;
+    int height = TEST_HEIGHT;
+    uint8_t win_thresh[4] = {100, 200, static_cast<uint8_t>(400), static_cast<uint8_t>(800)};
+    uint8_t grad_clip[4] = {15, 23, 31, 39};
+    uint8_t blend_ratio[4] = {32, 32, 32, 32};
+    uint8_t edge_protect = 32;
+};
+
+//-----------------------------------------------------------------------------
+// Load config from JSON file
+//-----------------------------------------------------------------------------
+bool load_config(const string& filename, TestConfig& cfg) {
+    ifstream f(filename.c_str());
+    if (!f.is_open()) {
+        cerr << "Error: Cannot open config file: " << filename << endl;
+        return false;
+    }
+
+    // Simple JSON parser for our config format
+    string content((istreambuf_iterator<char>(f)), istreambuf_iterator<char>());
+    f.close();
+
+    // Parse width
+    size_t pos = content.find("\"width\"");
+    if (pos != string::npos) {
+        pos = content.find(":", pos);
+        cfg.width = atoi(content.c_str() + pos + 1);
+    }
+    // Parse height
+    pos = content.find("\"height\"");
+    if (pos != string::npos) {
+        pos = content.find(":", pos);
+        cfg.height = atoi(content.c_str() + pos + 1);
+    }
+    // Parse win_thresh array
+    pos = content.find("\"win_thresh\"");
+    if (pos != string::npos) {
+        pos = content.find("[", pos);
+        size_t end = content.find("]", pos);
+        string arr = content.substr(pos + 1, end - pos - 1);
+        int idx = 0;
+        size_t p = 0;
+        while (p < arr.size() && idx < 4) {
+            while (p < arr.size() && !isdigit(arr[p])) p++;
+            if (p < arr.size()) {
+                cfg.win_thresh[idx++] = atoi(arr.c_str() + p);
+                while (p < arr.size() && isdigit(arr[p])) p++;
+            }
+        }
+    }
+    // Parse grad_clip array
+    pos = content.find("\"grad_clip\"");
+    if (pos != string::npos) {
+        pos = content.find("[", pos);
+        size_t end = content.find("]", pos);
+        string arr = content.substr(pos + 1, end - pos - 1);
+        int idx = 0;
+        size_t p = 0;
+        while (p < arr.size() && idx < 4) {
+            while (p < arr.size() && !isdigit(arr[p])) p++;
+            if (p < arr.size()) {
+                cfg.grad_clip[idx++] = atoi(arr.c_str() + p);
+                while (p < arr.size() && isdigit(arr[p])) p++;
+            }
+        }
+    }
+    // Parse blend_ratio array
+    pos = content.find("\"blend_ratio\"");
+    if (pos != string::npos) {
+        pos = content.find("[", pos);
+        size_t end = content.find("]", pos);
+        string arr = content.substr(pos + 1, end - pos - 1);
+        int idx = 0;
+        size_t p = 0;
+        while (p < arr.size() && idx < 4) {
+            while (p < arr.size() && !isdigit(arr[p])) p++;
+            if (p < arr.size()) {
+                cfg.blend_ratio[idx++] = atoi(arr.c_str() + p);
+                while (p < arr.size() && isdigit(arr[p])) p++;
+            }
+        }
+    }
+    // Parse edge_protect
+    pos = content.find("\"edge_protect\"");
+    if (pos != string::npos) {
+        pos = content.find(":", pos);
+        cfg.edge_protect = atoi(content.c_str() + pos + 1);
+    }
+
+    return true;
+}
+
+//-----------------------------------------------------------------------------
 // Process with HLS top
 //-----------------------------------------------------------------------------
 void process_top(const uint16_t input[TEST_HEIGHT][TEST_WIDTH],
-                 uint16_t output[TEST_HEIGHT][TEST_WIDTH]) {
+                 uint16_t output[TEST_HEIGHT][TEST_WIDTH],
+                 const TestConfig& cfg) {
     stream<axis_pixel_t> din_stream;
     stream<axis_pixel_t> dout_stream;
 
@@ -117,13 +215,16 @@ void process_top(const uint16_t input[TEST_HEIGHT][TEST_WIDTH],
         }
     }
 
-    // Call HLS top
-    ap_uint<16> img_width = TEST_WIDTH;
-    ap_uint<16> img_height = TEST_HEIGHT;
-    ap_uint<8> win_thresh0 = 100, win_thresh1 = 200, win_thresh2 = 400, win_thresh3 = 800;
-    ap_uint<8> grad_clip0 = 15, grad_clip1 = 23, grad_clip2 = 31, grad_clip3 = 39;
-    ap_uint<8> blend_ratio0 = 32, blend_ratio1 = 32, blend_ratio2 = 32, blend_ratio3 = 32;
-    ap_uint<8> edge_protect = 32;
+    // Call HLS top with config parameters
+    ap_uint<16> img_width = cfg.width;
+    ap_uint<16> img_height = cfg.height;
+    ap_uint<8> win_thresh0 = cfg.win_thresh[0], win_thresh1 = cfg.win_thresh[1];
+    ap_uint<8> win_thresh2 = cfg.win_thresh[2], win_thresh3 = cfg.win_thresh[3];
+    ap_uint<8> grad_clip0 = cfg.grad_clip[0], grad_clip1 = cfg.grad_clip[1];
+    ap_uint<8> grad_clip2 = cfg.grad_clip[2], grad_clip3 = cfg.grad_clip[3];
+    ap_uint<8> blend_ratio0 = cfg.blend_ratio[0], blend_ratio1 = cfg.blend_ratio[1];
+    ap_uint<8> blend_ratio2 = cfg.blend_ratio[2], blend_ratio3 = cfg.blend_ratio[3];
+    ap_uint<8> edge_protect = cfg.edge_protect;
 
     isp_csiir_top(din_stream, dout_stream,
                   img_width, img_height,
@@ -147,18 +248,31 @@ void process_top(const uint16_t input[TEST_HEIGHT][TEST_WIDTH],
 int main(int argc, char* argv[]) {
     string input_file;
     string output_file;
+    string config_file;
 
-    // Parse arguments
+    // Parse arguments: [input.hex] [output.hex] [config.json]
     if (argc >= 2) {
         input_file = argv[1];
     }
     if (argc >= 3) {
         output_file = argv[2];
     }
+    if (argc >= 4) {
+        config_file = argv[3];
+    }
+
+    // Load config or use defaults
+    TestConfig cfg;
+    if (!config_file.empty()) {
+        cout << "\n--- Loading config from " << config_file << " ---" << endl;
+        if (!load_config(config_file, cfg)) {
+            return 1;
+        }
+    }
 
     cout << "ISP-CSIIR HLS Top Test" << endl;
     cout << "======================" << endl;
-    cout << "Image size: " << TEST_WIDTH << " x " << TEST_HEIGHT << endl;
+    cout << "Image size: " << cfg.width << " x " << cfg.height << endl;
 
     uint16_t input[TEST_HEIGHT][TEST_WIDTH];
     uint16_t output[TEST_HEIGHT][TEST_WIDTH];
@@ -184,7 +298,7 @@ int main(int argc, char* argv[]) {
     cout << "Input range: [" << min_in << ", " << max_in << "]" << endl;
 
     // Process
-    process_top(input, output);
+    process_top(input, output, cfg);
 
     // Compute output range
     int min_out = 1024, max_out = 0;
