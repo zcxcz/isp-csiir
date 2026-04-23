@@ -536,7 +536,7 @@ module common_lb_ctrl #(
     //   - rd_cycle[0] selects which pixel within the 2P to output
     //
     // col5x1 format: 5 pixels (one per row in 5x5 window)
-    //   pixel[4] = row y+2 (newest row)
+    //   pixel[4] = row y+2 (newest row) = cur/din
     //   pixel[3] = row y+1
     //   pixel[2] = row y   (center row)
     //   pixel[1] = row y-1
@@ -544,14 +544,14 @@ module common_lb_ctrl #(
     //
     // LB index remap based on rd_row_loop (circular shift):
     //   rd_row_loop=0: pixel[3]=lb3, pixel[2]=lb2, pixel[1]=lb1, pixel[0]=lb0
-    //   rd_row_loop=1: pixel[3]=lb0, pixel[2]=lb1, pixel[1]=lb2, pixel[0]=lb3
-    //   rd_row_loop=2: pixel[3]=lb1, pixel[2]=lb2, pixel[1]=lb3, pixel[0]=lb0
-    //   rd_row_loop=3: pixel[3]=lb2, pixel[2]=lb3, pixel[1]=lb0, pixel[0]=lb1
+    //   rd_row_loop=1: pixel[3]=lb0, pixel[2]=lb3, pixel[1]=lb2, pixel[0]=lb1
+    //   rd_row_loop=2: pixel[3]=lb1, pixel[2]=lb0, pixel[1]=lb3, pixel[0]=lb2
+    //   rd_row_loop=3: pixel[3]=lb2, pixel[2]=lb1, pixel[1]=lb0, pixel[0]=lb3
     //
     // Mapping based on valid_row_cnt:
-    //   valid_row_cnt=2: pixel[4]=cur, pixel[3]=lb1, pixel[2]=lb0, pixel[1]=pad, pixel[0]=pad
-    //   valid_row_cnt=3: pixel[4]=cur, pixel[3]=lb2, pixel[2]=lb1, pixel[1]=lb0, pixel[0]=pad
-    //   valid_row_cnt=4: pixel[4]=cur, pixel[3]=lb3, pixel[2]=lb2, pixel[1]=lb1, pixel[0]=lb0 (rd_row_loop=0)
+    //   valid_row_cnt=2: pixel[4]=din, pixel[3,2]=lb1,lb0, pixel[1,0]=padding
+    //   valid_row_cnt=3: pixel[4]=din, pixel[3,1]=lb2,lb1,lb0, pixel[0]=padding
+    //   valid_row_cnt=4: 所有 pixel 有效
     //=========================================================================
 
     // p2s_buf pixel extraction based on rd_cycle[0]
@@ -575,9 +575,9 @@ module common_lb_ctrl #(
 
     // Remapped LB indices for pixel[3:0] using direct case
     // rd_row_loop=0: pixel[3]=lb3, pixel[2]=lb2, pixel[1]=lb1, pixel[0]=lb0
-    // rd_row_loop=1: pixel[3]=lb0, pixel[2]=lb1, pixel[1]=lb2, pixel[0]=lb3
-    // rd_row_loop=2: pixel[3]=lb1, pixel[2]=lb2, pixel[1]=lb3, pixel[0]=lb0
-    // rd_row_loop=3: pixel[3]=lb2, pixel[2]=lb3, pixel[1]=lb0, pixel[0]=lb1
+    // rd_row_loop=1: pixel[3]=lb0, pixel[2]=lb3, pixel[1]=lb2, pixel[0]=lb1
+    // rd_row_loop=2: pixel[3]=lb1, pixel[2]=lb0, pixel[1]=lb3, pixel[0]=lb2
+    // rd_row_loop=3: pixel[3]=lb2, pixel[2]=lb1, pixel[1]=lb0, pixel[0]=lb3
     wire [1:0] remap_3, remap_2, remap_1, remap_0;
     always @(*) begin
         case (rd_row_loop_raw)
@@ -589,21 +589,21 @@ module common_lb_ctrl #(
             end
             2'd1: begin
                 remap_3 = 0;  // pixel[3] = lb0
-                remap_2 = 1;  // pixel[2] = lb1
+                remap_2 = 3;  // pixel[2] = lb3
                 remap_1 = 2;  // pixel[1] = lb2
-                remap_0 = 3;  // pixel[0] = lb3
+                remap_0 = 1;  // pixel[0] = lb1
             end
             2'd2: begin
                 remap_3 = 1;  // pixel[3] = lb1
-                remap_2 = 2;  // pixel[2] = lb2
+                remap_2 = 0;  // pixel[2] = lb0
                 remap_1 = 3;  // pixel[1] = lb3
-                remap_0 = 0;  // pixel[0] = lb0
+                remap_0 = 2;  // pixel[0] = lb2
             end
             default: begin  // 2'd3
                 remap_3 = 2;  // pixel[3] = lb2
-                remap_2 = 3;  // pixel[2] = lb3
+                remap_2 = 1;  // pixel[2] = lb1
                 remap_1 = 0;  // pixel[1] = lb0
-                remap_0 = 1;  // pixel[0] = lb1
+                remap_0 = 3;  // pixel[0] = lb3
             end
         endcase
     end
@@ -641,9 +641,9 @@ module common_lb_ctrl #(
         end else begin : gen_lb_plus_din
             // LB_PLUS_DIN mode: use LB data + current din
             // Mapping based on valid_row_cnt:
-            //   valid_row_cnt=2: pixel[4]=cur, pixel[3]=lb1, pixel[2]=lb0, pixel[1]=pad, pixel[0]=pad
-            //   valid_row_cnt=3: pixel[4]=cur, pixel[3]=lb2, pixel[2]=lb1, pixel[1]=lb0, pixel[0]=pad
-            //   valid_row_cnt=4: pixel[4]=cur, pixel[3]=lb3, pixel[2]=lb2, pixel[1]=lb1, pixel[0]=lb0
+            //   valid_row_cnt=2: pixel[4]=din, pixel[3,2]=lb1,lb0, pixel[1,0]=padding
+            //   valid_row_cnt=3: pixel[4]=din, pixel[3,1]=lb2,lb1,lb0, pixel[0]=padding
+            //   valid_row_cnt=4: 所有 pixel 有效
             always @(*) begin
                 case (valid_row_cnt_raw)
                     2'd1: begin
@@ -657,33 +657,31 @@ module common_lb_ctrl #(
                         };
                     end
                     2'd2: begin
-                        // valid_row_cnt=2: pixel[4]=cur, pixel[3]=lb1, pixel[2]=lb0, pixel[1,0]=pad
+                        // valid_row_cnt=2: pixel[4]=din, pixel[3,2]=lb1,lb0, pixel[1,0]=padding
                         // At rd_row_loop=0: remap_p3=lb3, remap_p2=lb2, remap_p1=lb1, remap_p0=lb0
-                        // But we need: pixel[3]=lb1, pixel[2]=lb0
-                        // So use remap_p1 for pixel[3] and remap_p0 for pixel[2]
+                        // pixel[3]=lb1 → remap_p1, pixel[2]=lb0 → remap_p0
                         col5x1 = {
-                            cur_col_pixel,  // pixel[4]
-                            {DATA_WIDTH{1'b0}},  // pixel[3] = lb1 (invalid at valid_row_cnt=2)
-                            {DATA_WIDTH{1'b0}},  // pixel[2] = lb0 (invalid at valid_row_cnt=2)
-                            remap_p1,   // pixel[1] = lb1
-                            remap_p0    // pixel[0] = lb0
+                            cur_col_pixel,  // pixel[4] = din
+                            remap_p1,   // pixel[3] = lb1
+                            remap_p0,   // pixel[2] = lb0
+                            {DATA_WIDTH{1'b0}},  // pixel[1] = padding
+                            {DATA_WIDTH{1'b0}}   // pixel[0] = padding
                         };
                     end
                     2'd3: begin
-                        // valid_row_cnt=3: pixel[4]=cur, pixel[3]=lb2, pixel[2]=lb1, pixel[1]=lb0, pixel[0]=pad
+                        // valid_row_cnt=3: pixel[4]=din, pixel[3,1]=lb2,lb1,lb0, pixel[0]=padding
                         col5x1 = {
-                            cur_col_pixel,  // pixel[4]
-                            {DATA_WIDTH{1'b0}},  // pixel[3] = lb2 (invalid at valid_row_cnt=3)
+                            cur_col_pixel,  // pixel[4] = din
+                            remap_p2,   // pixel[3] = lb2
                             remap_p1,   // pixel[2] = lb1
                             remap_p0,   // pixel[1] = lb0
                             {DATA_WIDTH{1'b0}}   // pixel[0] = padding
                         };
                     end
                     default: begin
-                        // valid_row_cnt=4: all LBs valid
-                        // pixel[3]=remap_p3, pixel[2]=remap_p2, pixel[1]=remap_p1, pixel[0]=remap_p0
+                        // valid_row_cnt=4: 所有 pixel 有效
                         col5x1 = {
-                            cur_col_pixel,  // pixel[4]
+                            cur_col_pixel,  // pixel[4] = din
                             remap_p3,   // pixel[3] = oldest LB
                             remap_p2,   // pixel[2]
                             remap_p1,   // pixel[1]
