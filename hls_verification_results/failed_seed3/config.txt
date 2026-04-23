@@ -1,6 +1,0 @@
-seed=3
-img_width=64
-img_height=64
-win_size_thresh=[np.int64(15), np.int64(17), np.int64(15), np.int64(40)]
-win_size_clip_y=[np.int64(42), np.int64(31), np.int64(9), np.int64(11)]
-blending_ratio=[np.int64(24), np.int64(29), np.int64(38), np.int64(31)]
