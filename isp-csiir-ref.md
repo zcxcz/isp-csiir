@@ -68,7 +68,7 @@ for (j = 0; j <= reg_pic_height_m1; j++)
 ```text
 grad_h(i, j) = (src_uv_u10_5x5 * sobel_x)
 grad_v(i, j) = (src_uv_u10_5x5 * sobel_y)
-grad(i, j)   = |grad_h(i, j)| / 5 + |grad_v(i, j)| / 5
+grad(i, j)   = clip(|grad_h(i, j)| / 5 + |grad_v(i, j)| / 5, 0, 127)
 ```
 
 说明：`grad_h` 和 `grad_v` 均基于原始无符号窗口 `src_uv_u10_5x5` 做卷积计算。
@@ -78,7 +78,7 @@ grad(i, j)   = |grad_h(i, j)| / 5 + |grad_v(i, j)| / 5
 LUT 输入为 `Max(grad(i-1, j), grad(i, j), grad(i+1, j))`，输出为 `win_size_grad(i, j)`，随后再做一次限幅得到 `win_size_clip(i, j)`。
 
 ```text
-win_size_clip_y   = [15, 23, 31, 39]
+win_size_clip_y   = [15, 23, 31, 39]z
 win_size_clip_sft = [2, 2, 2, 2]
 
 # LUT 定义：
@@ -116,66 +116,143 @@ avg_factor_c_2x2 = [
     [0, 1, 2, 1, 0],
     [0, 0, 0, 0, 0]
 ]
+avg_factor_u_2x2 = [
+    [0, 0, 0, 0, 0],
+    [0, 1, 1, 1, 0],
+    [0, 1, 3, 1, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0]
+]
+avg_factor_d_2x2 = [
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 1, 3, 1, 0],
+    [0, 1, 1, 1, 0],
+    [0, 0, 0, 0, 0]
+]
+avg_factor_l_2x2 = [
+    [0, 0, 0, 0, 0],
+    [0, 1, 1, 0, 0],
+    [0, 1, 3, 0, 0],
+    [0, 1, 1, 0, 0],
+    [0, 0, 0, 0, 0]
+]
+avg_factor_r_2x2 = [
+    [0, 0, 0, 0, 0],
+    [0, 0, 1, 1, 0],
+    [0, 0, 3, 1, 0],
+    [0, 0, 1, 1, 0],
+    [0, 0, 0, 0, 0]
+]
 
 # 3x3 核
 avg_factor_c_3x3 = [
     [0, 0, 0, 0, 0],
-    [0, 1, 1, 1, 0],
-    [0, 1, 1, 1, 0],
-    [0, 1, 1, 1, 0],
+    [0, 1, 2, 1, 0],
+    [0, 2, 4, 2, 0],
+    [0, 1, 2, 1, 0],
+    [0, 0, 0, 0, 0]
+]
+avg_factor_u_3x3 = [
+    [0, 0, 0, 0, 0],
+    [0, 1, 2, 1, 0],
+    [0, 1, 2, 1, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0]
+]
+avg_factor_d_3x3 = [
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [0, 1, 2, 1, 0],
+    [0, 1, 2, 1, 0],
+    [0, 0, 0, 0, 0]
+]
+avg_factor_l_3x3 = [
+    [0, 0, 0, 0, 0],
+    [0, 1, 1, 0, 0],
+    [0, 2, 2, 0, 0],
+    [0, 1, 1, 0, 0],
+    [0, 0, 0, 0, 0]
+]
+avg_factor_r_3x3 = [
+    [0, 0, 0, 0, 0],
+    [0, 0, 1, 1, 0],
+    [0, 0, 2, 2, 0],
+    [0, 0, 1, 1, 0],
     [0, 0, 0, 0, 0]
 ]
 
 # 4x4 核
 avg_factor_c_4x4 = [
-    [1, 1, 2, 1, 1],
-    [1, 2, 4, 2, 1],
-    [2, 4, 8, 4, 2],
-    [1, 2, 4, 2, 1],
-    [1, 1, 2, 1, 1]
+    [1, 2, 2, 2, 1],
+    [2, 4, 4, 4, 2],
+    [2, 4, 4, 4, 2],
+    [2, 4, 4, 4, 2],
+    [1, 2, 2, 2, 1]
 ]
+avg_factor_u_4x4 = [
+    [1, 2, 2, 2, 1],
+    [2, 2, 4, 2, 2],
+    [2, 2, 4, 2, 2],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0]
+]
+avg_factor_d_4x4 = [
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [2, 2, 4, 2, 2],
+    [2, 2, 4, 2, 2],
+    [1, 2, 2, 2, 1]
+]
+avg_factor_l_4x4 = [
+    [1, 2, 2, 0, 0],
+    [2, 2, 2, 0, 0],
+    [2, 4, 4, 0, 0],
+    [2, 2, 2, 0, 0],
+    [1, 2, 2, 0, 0]
+]
+avg_factor_r_4x4 = [
+    [0, 0, 2, 2, 1],
+    [0, 0, 2, 2, 2],
+    [0, 0, 4, 4, 2],
+    [0, 0, 2, 2, 2],
+    [0, 0, 2, 2, 1]
+]
+
 
 # 5x5 核
 avg_factor_c_5x5 = [
+    [1, 2, 1, 2, 1],
     [1, 1, 1, 1, 1],
+    [2, 1, 2, 1, 2],
     [1, 1, 1, 1, 1],
-    [1, 1, 1, 1, 1],
-    [1, 1, 1, 1, 1],
-    [1, 1, 1, 1, 1]
+    [1, 2, 1, 2, 1]
 ]
-```
-
-### 3.2 方向掩码
-
-```python
-avg_factor_u_mask = [  # 上
+avg_factor_u_5x5 = [
     [1, 1, 1, 1, 1],
-    [1, 1, 1, 1, 1],
+    [1, 1, 2, 1, 1],
     [1, 1, 1, 1, 1],
     [0, 0, 0, 0, 0],
     [0, 0, 0, 0, 0]
 ]
-
-avg_factor_d_mask = [  # 下
+avg_factor_d_5x5 = [
     [0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0]，
     [1, 1, 1, 1, 1],
-    [1, 1, 1, 1, 1],
+    [1, 1, 2, 1, 1],
     [1, 1, 1, 1, 1]
 ]
-
-avg_factor_l_mask = [  # 左
+avg_factor_l_5x5 = [
     [1, 1, 1, 0, 0],
     [1, 1, 1, 0, 0],
-    [1, 1, 1, 0, 0],
+    [1, 2, 1, 0, 0],
     [1, 1, 1, 0, 0],
     [1, 1, 1, 0, 0]
 ]
-
-avg_factor_r_mask = [  # 右
+avg_factor_r_5x5 = [
     [0, 0, 1, 1, 1],
     [0, 0, 1, 1, 1],
-    [0, 0, 1, 1, 1],
+    [0, 0, 1, 2, 1],
     [0, 0, 1, 1, 1],
     [0, 0, 1, 1, 1]
 ]
@@ -191,31 +268,59 @@ avg_factor_r_mask = [  # 右
 
 if (win_size_clip(i, j) < thresh0):
     avg0_factor_c = zeros(5, 5)
+    avg0_factor_u = zeros(5, 5)
+    avg0_factor_d = zeros(5, 5)
+    avg0_factor_l = zeros(5, 5)
+    avg0_factor_r = zeros(5, 5)
     avg1_factor_c = avg_factor_c_2x2
+    avg1_factor_u = avg_factor_u_2x2
+    avg1_factor_d = avg_factor_d_2x2
+    avg1_factor_l = avg_factor_l_2x2
+    avg1_factor_r = avg_factor_r_2x2
 elif (win_size_clip(i, j) < thresh1):
-    avg0_factor_c = avg_factor_c_3x3
-    avg1_factor_c = avg_factor_c_2x2
-elif (win_size_clip(i, j) < thresh2):
-    avg0_factor_c = avg_factor_c_4x4
+    avg0_factor_c = avg_factor_c_2x2
+    avg0_factor_u = avg_factor_u_2x2
+    avg0_factor_d = avg_factor_d_2x2
+    avg0_factor_l = avg_factor_l_2x2
+    avg0_factor_r = avg_factor_r_2x2
     avg1_factor_c = avg_factor_c_3x3
-elif (win_size_clip(i, j) < thresh3):
-    avg0_factor_c = avg_factor_c_5x5
+    avg1_factor_u = avg_factor_u_3x3
+    avg1_factor_d = avg_factor_d_3x3
+    avg1_factor_l = avg_factor_l_3x3
+    avg1_factor_r = avg_factor_r_3x3
+elif (win_size_clip(i, j) < thresh2):
+    avg0_factor_c = avg_factor_c_3x3
+    avg0_factor_u = avg_factor_u_3x3
+    avg0_factor_d = avg_factor_d_3x3
+    avg0_factor_l = avg_factor_l_3x3
+    avg0_factor_r = avg_factor_r_3x3
     avg1_factor_c = avg_factor_c_4x4
+    avg1_factor_u = avg_factor_u_4x4
+    avg1_factor_d = avg_factor_d_4x4
+    avg1_factor_l = avg_factor_l_4x4
+    avg1_factor_r = avg_factor_r_4x4
+elif (win_size_clip(i, j) < thresh3):
+    avg0_factor_c = avg_factor_c_4x4
+    avg0_factor_u = avg_factor_u_4x4
+    avg0_factor_d = avg_factor_d_4x4
+    avg0_factor_l = avg_factor_l_4x4
+    avg0_factor_r = avg_factor_r_4x4
+    avg1_factor_c = avg_factor_c_5x5
+    avg1_factor_u = avg_factor_u_5x5
+    avg1_factor_d = avg_factor_d_5x5
+    avg1_factor_l = avg_factor_l_5x5
+    avg1_factor_r = avg_factor_r_5x5
 else:
     avg0_factor_c = avg_factor_c_5x5
+    avg0_factor_u = avg_factor_u_5x5
+    avg0_factor_d = avg_factor_d_5x5
+    avg0_factor_l = avg_factor_l_5x5
+    avg0_factor_r = avg_factor_r_5x5
     avg1_factor_c = zeros(5, 5)
-```
-
-```text
-avg0_factor_u = avg0_factor_c * avg_factor_u_mask
-avg0_factor_d = avg0_factor_c * avg_factor_d_mask
-avg0_factor_l = avg0_factor_c * avg_factor_l_mask
-avg0_factor_r = avg0_factor_c * avg_factor_r_mask
-
-avg1_factor_u = avg1_factor_c * avg_factor_u_mask
-avg1_factor_d = avg1_factor_c * avg_factor_d_mask
-avg1_factor_l = avg1_factor_c * avg_factor_l_mask
-avg1_factor_r = avg1_factor_c * avg_factor_r_mask
+    avg1_factor_u = zeros(5, 5)
+    avg1_factor_d = zeros(5, 5)
+    avg1_factor_l = zeros(5, 5)
+    avg1_factor_r = zeros(5, 5)
 ```
 
 ### 3.4 平均值计算
@@ -271,66 +376,48 @@ else:
     grad_r = grad(i + 1, j)
 ```
 
-### 4.2 梯度逆序重映射
-
-```text
-# 保持原始方向关系不变，仅对五个方向的梯度值做逆序重映射：
-#   - 原始梯度较大者，在乘法中使用较小的权重值；
-#   - 原始梯度较小者，在乘法中使用较大的权重值。
-
-grad_pair = [
-    ("u", grad_u), ("d", grad_d), ("l", grad_l), ("r", grad_r), ("c", grad_c)
-]
-grad_pair_sorted = sort_desc_by_value(grad_pair)
-
-for (k = 0; k < 5; k++):
-    dir_k = grad_pair_sorted[k].dir
-    grad_inv(dir_k) = grad_pair_sorted[4 - k].value
-
-grad_sum = grad_inv_u + grad_inv_d + grad_inv_l + grad_inv_r + grad_inv_c
-```
-
 ### 4.3 梯度融合
 
-当 `grad_sum == 0` 时，退化为五个方向的等权平均；否则按逆序重映射后的梯度值加权融合。
-
+这里如果有两路滤波，则两路滤波需要分别根据自身 avg 值作如下运算：
 ```text
-if (grad_sum == 0):
-    if (avg0_enable(i, j)):
-        blend0_grad(i, j) = (
-                                 avg0_value_c +
-                                 avg0_value_u +
-                                 avg0_value_d +
-                                 avg0_value_l +
-                                 avg0_value_r
-                             ) / 5
-    if (avg1_enable(i, j)):
-        blend1_grad(i, j) = (
-                                 avg1_value_c +
-                                 avg1_value_u +
-                                 avg1_value_d +
-                                 avg1_value_l +
-                                 avg1_value_r
-                             ) / 5
-else:
-    if (avg0_enable(i, j)):
-        blend0_grad(i, j) = (
-                                 avg0_value_c * grad_inv_c +
-                                 avg0_value_u * grad_inv_u +
-                                 avg0_value_d * grad_inv_d +
-                                 avg0_value_l * grad_inv_l +
-                                 avg0_value_r * grad_inv_r
-                             ) / grad_sum
-    if (avg1_enable(i, j)):
-        blend1_grad(i, j) = (
-                                 avg1_value_c * grad_inv_c +
-                                 avg1_value_u * grad_inv_u +
-                                 avg1_value_d * grad_inv_d +
-                                 avg1_value_l * grad_inv_l +
-                                 avg1_value_r * grad_inv_r
-                             ) / grad_sum
-```
+min0_grad=2048
+min0_grad_avg=0
+if (grad_u <= min0_grad):
+    min0_grad=grad_u
+    min0_grad_avg=avg0_value_u
+if (grad_l <= min0_grad):
+    min0_grad=grad_l
+    min0_grad_avg=(avg0_value_l+min0_grad_avg+1)/2
+if (grad_c <= min0_grad):
+    min0_grad=grad_c
+    min0_grad_avg=(avg0_value_c+min0_grad_avg+1)/2
+if (grad_r <= min0_grad):
+    min0_grad=grad_r
+    min0_grad_avg=(avg0_value_r+min0_grad_avg+1)/2
+if (grad_d <= min0_grad):
+    min0_grad=grad_d
+    min0_grad_avg=(avg0_value_d+min0_grad_avg+1)/2
 
+min1_grad=2048
+min1_grad_avg=0
+if (grad_u <= min1_grad):
+    min1_grad=grad_u
+    min1_grad_avg=avg0_value_u
+if (grad_l <= min1_grad):
+    min1_grad=grad_l
+    min1_grad_avg=(avg0_value_l+min1_grad_avg+1)/2
+if (grad_c <= min1_grad):
+    min1_grad=grad_c
+    min1_grad_avg=(avg0_value_c+min1_grad_avg+1)/2
+if (grad_r <= min1_grad):
+    min1_grad=grad_r
+    min1_grad_avg=(avg0_value_r+min1_grad_avg+1)/2
+if (grad_d <= min1_grad):
+    min1_grad=grad_d
+    min1_grad_avg=(avg0_value_d+min1_grad_avg+1)/2
+
+blend0_grad = min0_grad_avg
+blend1_grad = min1_grad_avg
 ---
 
 ## 5. IIR 滤波与混合输出

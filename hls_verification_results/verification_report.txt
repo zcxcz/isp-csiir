@@ -4,20 +4,27 @@ HLS vs PYTHON REFERENCE VERIFICATION REPORT
 ============================================================
 
 Test Summary:
-  Total:   100
-  Passed:  100
-  Failed:  0
-  Pass Rate: 100.00%
+  Total:   10
+  Passed:  0
+  Failed:  10
+  Pass Rate: 0.00%
+
+Failed tests (worst 5):
+  seed=6: max_diff=1014, config=HLSConfig(64x64, thresh=[np.int64(28), np.int64(21), np.int64(45), np.int64(22)], clip_y=[np.int64(34), np.int64(22), np.int64(25), np.int64(47)])
+  seed=2: max_diff=810, config=HLSConfig(64x64, thresh=[np.int64(12), np.int64(19), np.int64(24), np.int64(40)], clip_y=[np.int64(26), np.int64(11), np.int64(21), np.int64(32)])
+  seed=5: max_diff=305, config=HLSConfig(64x64, thresh=[np.int64(8), np.int64(40), np.int64(26), np.int64(28)], clip_y=[np.int64(33), np.int64(19), np.int64(47), np.int64(10)])
+  seed=1: max_diff=303, config=HLSConfig(64x64, thresh=[np.int64(38), np.int64(46), np.int64(9), np.int64(13)], clip_y=[np.int64(40), np.int64(45), np.int64(17), np.int64(20)])
+  seed=3: max_diff=287, config=HLSConfig(64x64, thresh=[np.int64(15), np.int64(17), np.int64(15), np.int64(40)], clip_y=[np.int64(42), np.int64(31), np.int64(9), np.int64(11)])
 
 === COVERAGE REPORT ===
 
 Image sizes tested: 1
   64x64
 
-Kernel threshold combinations: 144
-Blend ratio entries: 167
+Kernel threshold combinations: 35
+Blend ratio entries: 35
 Gradient ranges: 1
 
 ============================================================
-ALL TESTS PASSED - Ready for coverage collection
+SOME TESTS FAILED - Fix before proceeding
 ============================================================

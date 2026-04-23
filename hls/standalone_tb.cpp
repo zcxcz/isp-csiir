@@ -185,6 +185,16 @@ int main(int argc, char* argv[]) {
             }
         }
         printf("Generated random input (seed=%d)\n", seed);
+        // Save generated input for verification
+        FILE* fin_save = fopen("/tmp/cpp_gen_input.hex", "w");
+        if (fin_save) {
+            for (int j = 0; j < img_height; j++) {
+                for (int i = 0; i < img_width; i++) {
+                    fprintf(fin_save, "%03x\n", input[j * img_width + i] & 0x3FF);
+                }
+            }
+            fclose(fin_save);
+        }
     }
 
     //==========================================================================

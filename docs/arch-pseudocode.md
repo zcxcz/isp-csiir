@@ -4,10 +4,10 @@
 
 - **din格式**: YUV422, UV交替输入
 - **数据宽度**: 1P = DATA_WIDTH bits
-- **merge = common_s2p**: 1P/cycle → 2P/2cycle
-- **写入粒度**: 2P/1T, linebuffer 数据宽度本来就是 2P, 不需要 half-write
-- **linebuffer职责**: 仅保留5条独立1P SRAM读写接口, 不含 assembler
-- **fifo_uv5x1**: 宽度 = 2P × 5 = 5个2P words
+- **SRAM类型**: 全部使用 1P SRAM (禁止使用2P SRAM)
+- **linebuffer控制**: gradient路径和filter路径各用独立模块控制
+  - `lb_ctrl_g`: 控制原图linebuffer的gradient读端口
+  - `lb_ctrl_f`: 控制原图linebuffer的filter读端口 + 滤波linebuffer
 - **模块间传递**: 仅传递 assembler 输出的 col5x1, 组装在各自模块内部完成
 
 ---
@@ -140,6 +140,15 @@ u_lb_src(原图linebuffer)    [4×SRAM, 含内部distribution逻辑]
   │                                                      u_grad(gradient) -- grad_wi_fb_t
   │                                                               │
   └───────────────────────────────────────────────────────────────┘
+
+din --data_wi_fb(10b)--> u_s2p_din_1x2(common_s2p)
+--data_wi_fb(20b)--> u_fifo_din_1x2(common_fifo) --data_wi_fb(20b)--> u_lb_ctrl_din_1x2(common_lb_ctrl)
+--> u_lb_din_4x2(common_lb)
+u_lb_din_4x2(common_lb) --data_wi_fb(80b) --> u_fifo_lb_din_4x2(common_fifo) --data_wi_fb(80b)-->
+u_p2s_din_4x1(common_p2s) --data_wi_fb(40b) --> u_fifo_din_4x1(common_fifo) --data_wi_fb(40b)--> u_grad_calc_5x5(grad_calc_5x5) --data_wi_fb(30b?)--> dout
+din --data_wi_fb(10b)--> u_fifo_din_1x1(common_fifo) --data_wi_fb(10b) --> u_grad_calc_5x5(grad_calc_5x5)
+
+其中，u_grad_calc_5x5 开始计算依赖于 u_fifo_din_1x1 与 u_fifo_din_4x1 两个 fifo 的数据均 ready；
 
 主线1输出: grad_h, grad_v, grad_max, win_size
 
@@ -282,38 +291,36 @@ u_lb(isp_csiir_linebuffer_5row)   [Patch写回]
 ### 4.2 common_fifo
 
 ```
-参数: DATA_WIDTH=20 (2P), DEPTH=N
+参数: DATA_WIDTH, DEPTH=N
 输入: data_wi_fb_t(in) {
         din_valid, din_ready,      // wr侧握手
-        din[DATA_WIDTH*2-1:0]       // 2P数据
+        din[DATA_WIDTH-1:0]        // 1P数据
       }
 输出: data_wi_fb_t(out) {
         dout_valid, dout_ready,    // rd侧握手
-        dout[DATA_WIDTH*2-1:0]      // 2P数据
+        dout[DATA_WIDTH-1:0]        // 1P数据
       }
 ```
 
 ### 4.3 isp_csiir_linebuffer_core
 
 ```
-集成distribution逻辑的5行SRAM存储, 含两个独立读端口
+集成distribution逻辑的5行1P SRAM存储
 
 配置参数:
   NUM_ROWS     = 5
   IMG_WIDTH, DATA_WIDTH, LINE_ADDR_WIDTH
-  SRAM_TYPE    = "2PORT"  // 双口SRAM支持两端同时读
+  SRAM_TYPE    = "1P"  // 1P SRAM，禁止使用2P
 
 内部状态:
   wr_row_ptr:     行写指针 (EOL时0→1→2→3→4→0循环)
   wr_col_ptr:     列写指针 (每像素+1)
   fifo_valid_row_cnt: 有效数据行计数 (0~5, EOL时+1)
-  // wr_row = wr_row_ptr, 内部自动路由
-  // wr_addr = wr_col_ptr, 内部自动递增
 
-写端口 (来自FIFO, 2P):
+写端口 (来自FIFO, 1P):
   输入: data_wi_fb_t(in) {
           din_valid, din_ready,
-          din[DATA_WIDTH*2-1:0]    // 2P: {odd, even}
+          din[DATA_WIDTH-1:0]    // 1P数据
         }
         eol                      // in: 行结束信号 (驱动wr_row_ptr递增)
         sof                      // in: 帧开始信号 (复位指针)
@@ -323,61 +330,55 @@ u_lb(isp_csiir_linebuffer_5row)   [Patch写回]
     - wr_row_ptr 控制片选 (wr_row = wr_row_ptr)
     - wr_col_ptr 生成 SRAM 写地址
     - EOL时 wr_row_ptr++, wr_col_ptr<=0, fifo_valid_row_cnt++
-    - din_to_bypass: 当fifo_valid_row_cnt == 5时, din绕过写入直通后级
 
   SRAM内部:
-    - wr_data = {din_odd, din_even} (2P packing)
+    - wr_data = din[DATA_WIDTH-1:0] (1P packing)
     - 每行独立使能: wr_row_N_en = (wr_row_ptr == N)
-    - 双口: Port A (gradient读), Port B (filter读)
+```
 
-读端口G (主线1: Gradient路径, 4行 + din):
-  输入: coord_2d_t(in) {
-          grad_row_rd_ptr[ROW_PTR_WIDTH-1:0],  // 行指针 (由外部管理)
-          grad_col_rd_ptr[LINE_ADDR_WIDTH-1:0]  // 列指针 (由外部管理)
-        }
-        grad_rd_req                       // in: 读请求
-  输出: data_wi_fb_t(out) {
-          grad_col_valid, grad_col_ready,  // 握手
-          grad_col_0~grad_col_3,           // 4行老数据 (1P)
-          grad_col_4,                      // 当前din (最新像素)
-          grad_center_x, grad_center_y    // 元数据
-        }
+### 4.3.1 lb_ctrl_g (Gradient读控制模块)
 
-  逻辑:
-    - grad_rd_req 时: 从 SRAM Port A 读出 grad_row_rd_ptr 对应的4行
-    - grad_col_4 = 当前din (延迟对齐后)
-    - 有效条件: fifo_valid_row_cnt >= 4
-    - rd_row_N = row_sub(wr_row_ptr, 5-N)  // 循环取4行老数据
+```
+独立控制原图linebuffer的gradient读端口
 
-读端口F (主线2: Filter路径, 5行):
-  输入: coord_2d_t(in) {
-          filt_row_rd_ptr[ROW_PTR_WIDTH-1:0],  // 行指针 (由外部管理)
-          filt_col_rd_ptr[LINE_ADDR_WIDTH-1:0]  // 列指针 (由外部管理)
-        }
-        filt_rd_req                       // in: 读请求
-  输出: data_wi_fb_t(out) {
-          filt_col_valid, filt_col_ready,  // 握手
-          filt_col_0~filt_col_4,          // 5行 (1P)
-          filt_center_x, filt_center_y   // 元数据
-        }
+职责:
+  - 管理原图linebuffer的读端口G
+  - 提供4行老数据 + 当前din组成的col5x1
+  - 独立反压链
 
-  逻辑:
-    - filt_rd_req 时: 从 SRAM Port B 读出 filt_row_rd_ptr 对应的5行
-    - 有效条件: fifo_valid_row_cnt >= 5
-    - rd_row_N = row_sub(wr_row_ptr, 5-N)
-
-Patch写回端口 (主线2→主线1):
-  输入: patch_wi_fb_t(in) {
-          patch_valid, patch_ready,
-          patch_center_x, patch_center_y,
-          patch_5x5[DATA_WIDTH*25-1:0]
-        }
-  逻辑: 将 patch_5x5 的列提取后写回 SRAM (优先级 > din写)
+输出: grad_col5x1_wi_fb_t {
+        grad_col_valid, grad_col_ready,  // 握手
+        grad_col_0~grad_col_3,           // 4行老数据 (1P)
+        grad_col_4,                       // 当前din (最新像素)
+        grad_center_x, grad_center_y     // 元数据
+      }
 
 关键约束:
-  - 两读端口独立: grad_rd_ptr 和 filt_rd_ptr 可指向不同位置
-  - 外部管理读指针: linebuffer 只负责在指定地址读出指定行
-  - 双口SRAM: 两端口同时读无冲突
+  - 外部管理 grad_row_rd_ptr 和 grad_col_rd_ptr
+  - 有效条件: orig_valid_row_cnt >= 4
+  - 独立反压: grad_col_ready → assembler_ready
+```
+
+### 4.3.2 lb_ctrl_f (Filter读控制模块)
+
+```
+独立控制原图linebuffer的filter读端口 + 滤波linebuffer
+
+职责:
+  - 管理原图linebuffer的读端口F (5行原图)
+  - 管理滤波linebuffer的读端口 (后续行滤波结果)
+  - 提供5行原图组成的col5x1
+
+输出: src_col5x1_wi_fb_t {
+        filt_col_valid, filt_col_ready,  // 握手
+        filt_col_0~filt_col_4,           // 5行 (1P, 原图)
+        filt_center_x, filt_center_y     // 元数据
+      }
+
+关键约束:
+  - 外部管理 filt_row_rd_ptr 和 filt_col_rd_ptr
+  - 有效条件: orig_valid_row_cnt >= 5
+  - 独立反压: filt_col_ready → assembler_ready
 ```
 
 ### 4.4 isp_csiir_linebuffer (wrapper)
@@ -386,9 +387,9 @@ Patch写回端口 (主线2→主线1):
 isp_csiir_linebuffer_core 的外层封装
 
 封装内容:
-  - 1P→2P serializer (common_s2p)
   - Patch写回FSM (将patch_5x5转换为列写)
   - 元数据管理 (sof/eol传递)
+  - 包含 lb_ctrl_g 和 lb_ctrl_f 两个独立控制模块
 
 对外接口:
   - 1P输入: din, din_valid, din_ready, sof, eol
@@ -641,14 +642,15 @@ dout_ready (外部消费者)
 
 | 模块 | 类型 | 大小 (bit) | 说明 |
 |------|------|------------|------|
-| u_lb_src (原图) | 4×SRAM 2PORT | 4×W×DATA_WIDTH×2 | 存原始图像，gradient/stage2共读 |
-| u_lb_filt (滤波) | 5×SRAM 2PORT | 5×W×DATA_WIDTH×2 | 存滤波中间结果，stage4写回 |
-| fifo (2P缓冲) | sync FIFO | DEPTH×20 | 解耦s2p和原图linebuffer |
-| common_fifo_uv5x1 | 4-entry FIFO | 4×20 | 缓冲din2P直到列读出 |
-| common_assembler (×2) | reg延迟线 | WIN_DELAY×5×DATA_WIDTH×2 | gradient+filter各1份 |
+| u_lb_src (原图) | 4×SRAM 1P | 4×W×DATA_WIDTH | 存原始图像，gradient/stage2共读 |
+| u_lb_filt (滤波) | 5×SRAM 1P | 5×W×DATA_WIDTH | 存滤波中间结果，stage4写回 |
+| fifo (1P缓冲) | sync FIFO | DEPTH×DATA_WIDTH | 解耦输入和原图linebuffer |
+| common_assembler (×2) | reg延迟线 | WIN_DELAY×5×DATA_WIDTH | gradient+filter各1份 |
 | stage3 | 2×BRAM row | 2×W×(grad+avg) | 1行延迟 |
 
-**注**: 两路 linebuffer 均升级为双口 SRAM (2PORT)，支持各两读端口同时独立访问。
+**注**:
+- 全部使用 1P SRAM，禁止使用 2P SRAM
+- 两路 linebuffer 均使用 1P SRAM (1PORT 或 1P 2PORT)
 
 ---
 
@@ -677,22 +679,29 @@ dout_ready (外部消费者)
 - `u_lb_filt`（5行）：存**滤波结果**，stage4 写滤波 patch，后续行读取构成邻域
 
 ### Q5: 两路 linebuffer 的读端口如何独立?
-**A**: 双口 SRAM (2PORT) 支持两端口同时读:
-- 原图 linebuffer (Port A): gradient 读 4 行 + din
-- 原图 linebuffer (Port B): filter 读 5 行原图
-- 滤波 linebuffer (Port A): 后续行读取滤波邻域
-- 滤波 linebuffer (Port B): stage4 patch 写回
-- 外部各自管理 `*_row_rd_ptr` 和 `*_col_rd_ptr`，可指向不同位置
+**A**: 两路独立控制模块 + 1P SRAM (1PORT):
+- `lb_ctrl_g`: 控制原图linebuffer的gradient读端口，输出4行+din
+- `lb_ctrl_f`: 控制原图linebuffer的filter读端口 + 滤波linebuffer
+- 各控制模块独立管理自己的 `*_row_rd_ptr` 和 `*_col_rd_ptr`
+- 原图linebuffer: gradient和filter各需读5行，但可分时复用同一SRAM或用1P 2PORT
+- 滤波linebuffer: 读端口(后续行)和写端口(stage4 patch)需分时复用
 
-### Q6: assembler 放在哪里?
+### Q6: 为什么禁止使用2P SRAM?
+**A**: 用户约束，全部使用1P SRAM:
+- 每个SRAM单元宽度 = DATA_WIDTH (1P)
+- 地址深度 = IMG_WIDTH
+- 原先2P SRAM方案已被否定，统一改为1P
+- FIFO也改为1P宽度缓冲
+
+### Q7: assembler 放在哪里?
 **A**: 外部, 两份:
 - u_asmb_g: gradient路径（读原图linebuffer）
 - u_asmb_f: filter路径（读原图linebuffer的5行）
 
-### Q7: 模块间传递什么?
+### Q8: 模块间传递什么?
 **A**: 仅传递 assembler 输出的 col5x1, 组装在各自模块内部完成
 
-### Q8: 后续行如何读取滤波邻域?
+### Q9: 后续行如何读取滤波邻域?
 **A**: 滤波邻域的构成方式:
 - 原图 linebuffer 提供当前行的 5 个像素（原图）
 - 滤波 linebuffer 提供上方 4 行的 5 个像素（滤波结果）
