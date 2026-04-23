@@ -1,8 +1,8 @@
 # ISP-CSIIR HLS Model Makefile
-# Supports both standalone g++ compilation and Vivado HLS synthesis
+# Supports both g++ compilation with HLS library and Vivado HLS synthesis
 
 CXX = g++
-CXXFLAGS = -std=c++17 -O2 -Wall -Wextra
+CXXFLAGS = -std=c++17 -O2 -Wall -Wextra -I./hls_lib
 HLS_DIR = .
 
 # Source files
@@ -12,11 +12,11 @@ HLS_TB = $(HLS_DIR)/isp_csiir_hls_top_tb.cpp
 # Output executables
 TB_EXE = $(HLS_DIR)/hls_top_tb
 
-# Default target
+# Default target: compile testbench
 all: $(TB_EXE)
 
-# Compile testbench (requires Vivado HLS headers for ap_fixed.h, hls_stream.h)
-$(TB_EXE): $(HLS_TB)
+# Compile testbench with HLS library
+$(TB_EXE): $(HLS_TB) $(HLS_SRC)
 	$(CXX) $(CXXFLAGS) -o $@ $(HLS_TB)
 
 # Run testbench

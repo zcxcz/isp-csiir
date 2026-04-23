@@ -129,7 +129,9 @@ public:
     ISPCSIIR() {}
     ISPCSIIR(const Config& c) : cfg(c) {}
 
-private:
+    //-------------------------------------------------------------------------
+    // Sobel Gradient (5x5)
+    //-------------------------------------------------------------------------
     //-------------------------------------------------------------------------
     // Sobel Gradient (5x5)
     //-------------------------------------------------------------------------
@@ -676,7 +678,7 @@ void isp_csiir_top(
         //======================================================================
         // Stage 2: Directional Average (reads ORIGINAL data)
         //======================================================================
-        DirAvgResult dir_avg = isp.compute_directional_avg(src_s11_5x5, win_size);
+        ISPCSIIR::DirAvgResult dir_avg = isp.compute_directional_avg(src_s11_5x5, win_size);
 
         //======================================================================
         // Stage 3: Gradient Fusion - neighbor gradients
@@ -685,7 +687,7 @@ void isp_csiir_top(
 
         grad_u = grad_buf_pack[0][col_val].range(13, 0);
         grad_l = grad_shift[1];
-        grad_c = grad;
+        grad_t grad_c = grad;
         grad_d = grad_next_row;
         grad_r = grad_shift[2];
 
@@ -698,7 +700,7 @@ void isp_csiir_top(
 
         grad_next_row_delay[col_val] = current_grad;
 
-        FusionResult fusion = isp.compute_gradient_fusion(dir_avg,
+        ISPCSIIR::FusionResult fusion = isp.compute_gradient_fusion(dir_avg,
             (int)grad_u, (int)grad_d, (int)grad_l, (int)grad_r, (int)grad_c);
 
         //======================================================================
