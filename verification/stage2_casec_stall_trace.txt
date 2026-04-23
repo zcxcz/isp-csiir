@@ -1,9 +1,0 @@
-5 ready=1 s1v=1 s1r=1 v4=0 v5=0 v6=0 outv=0 avg0c=0 avg1c=0 x=0 y=0 grad=0 win=0 center=0
-6 ready=1 s1v=0 s1r=1 v4=1 v5=0 v6=0 outv=0 avg0c=24 avg1c=24 x=0 y=0 grad=0 win=24 center=536
-7 ready=1 s1v=0 s1r=1 v4=0 v5=1 v6=0 outv=0 avg0c=24 avg1c=24 x=0 y=0 grad=0 win=24 center=536
-8 ready=0 s1v=0 s1r=0 v4=0 v5=0 v6=1 outv=0 avg0c=24 avg1c=24 x=0 y=0 grad=0 win=24 center=536
-9 ready=0 s1v=0 s1r=0 v4=0 v5=0 v6=1 outv=0 avg0c=24 avg1c=24 x=0 y=0 grad=0 win=24 center=536
-10 ready=0 s1v=0 s1r=0 v4=0 v5=0 v6=1 outv=0 avg0c=24 avg1c=24 x=0 y=0 grad=0 win=24 center=536
-11 ready=0 s1v=0 s1r=0 v4=0 v5=0 v6=1 outv=0 avg0c=24 avg1c=24 x=0 y=0 grad=0 win=24 center=536
-12 ready=1 s1v=0 s1r=1 v4=0 v5=0 v6=1 outv=0 avg0c=24 avg1c=24 x=0 y=0 grad=0 win=24 center=536
-13 ready=1 s1v=0 s1r=1 v4=0 v5=0 v6=0 outv=1 avg0c=24 avg1c=24 x=0 y=0 grad=0 win=24 center=536
