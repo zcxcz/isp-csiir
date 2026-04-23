@@ -13,6 +13,7 @@
 #include <ap_fixed.h>
 #include <hls_stream.h>
 #include <cstring>
+#include "isp_csiir_regs.hpp"
 
 //==============================================================================
 // Type Definitions - Fixed-Point Precision
@@ -422,54 +423,36 @@ public:
 };
 
 //==============================================================================
-// HLS Top Function - AXI-Stream Interface
+// HLS Top Function - AXI-Stream Interface with Register Struct
 //==============================================================================
 void isp_csiir_top(
     hls::stream<axis_pixel_t> &din_stream,
     hls::stream<axis_pixel_t> &dout_stream,
-    ap_uint<16> img_width,
-    ap_uint<16> img_height,
-    ap_uint<8> win_thresh0, ap_uint<8> win_thresh1,
-    ap_uint<8> win_thresh2, ap_uint<8> win_thresh3,
-    ap_uint<8> grad_clip0, ap_uint<8> grad_clip1,
-    ap_uint<8> grad_clip2, ap_uint<8> grad_clip3,
-    ap_uint<8> blend_ratio0, ap_uint<8> blend_ratio1,
-    ap_uint<8> blend_ratio2, ap_uint<8> blend_ratio3,
-    ap_uint<8> edge_protect
+    ISPCSIIR_Regs &regs
 ) {
     #pragma HLS INTERFACE axis port=din_stream
     #pragma HLS INTERFACE axis port=dout_stream
-    #pragma HLS INTERFACE s_axilite port=img_width bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=img_height bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=win_thresh0 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=win_thresh1 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=win_thresh2 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=win_thresh3 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=grad_clip0 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=grad_clip1 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=grad_clip2 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=grad_clip3 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=blend_ratio0 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=blend_ratio1 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=blend_ratio2 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=blend_ratio3 bundle=CTRL
-    #pragma HLS INTERFACE s_axilite port=edge_protect bundle=CTRL
+    #pragma HLS INTERFACE s_axilite port=regs bundle=CTRL
     #pragma HLS INTERFACE s_axilite port=return bundle=CTRL
     #pragma HLS INTERFACE ap_ctrl_hs port=return
 
     // Configure ISPCSIIR instance
     ISPCSIIR isp;
-    isp.cfg.img_width = (int)img_width;
-    isp.cfg.img_height = (int)img_height;
-    isp.cfg.win_size_thresh[0] = (int)win_thresh0;
-    isp.cfg.win_size_thresh[1] = (int)win_thresh1;
-    isp.cfg.win_size_thresh[2] = (int)win_thresh2;
-    isp.cfg.win_size_thresh[3] = (int)win_thresh3;
-    isp.cfg.blending_ratio[0] = (int)blend_ratio0;
-    isp.cfg.blending_ratio[1] = (int)blend_ratio1;
-    isp.cfg.blending_ratio[2] = (int)blend_ratio2;
-    isp.cfg.blending_ratio[3] = (int)blend_ratio3;
-    isp.cfg.reg_edge_protect = (int)edge_protect;
+    isp.cfg.img_width = (int)regs.img_width;
+    isp.cfg.img_height = (int)regs.img_height;
+    isp.cfg.win_size_thresh[0] = (int)regs.win_thresh0;
+    isp.cfg.win_size_thresh[1] = (int)regs.win_thresh1;
+    isp.cfg.win_size_thresh[2] = (int)regs.win_thresh2;
+    isp.cfg.win_size_thresh[3] = (int)regs.win_thresh3;
+    isp.cfg.blending_ratio[0] = (int)regs.blend_ratio0;
+    isp.cfg.blending_ratio[1] = (int)regs.blend_ratio1;
+    isp.cfg.blending_ratio[2] = (int)regs.blend_ratio2;
+    isp.cfg.blending_ratio[3] = (int)regs.blend_ratio3;
+    isp.cfg.reg_edge_protect = (int)regs.edge_protect;
+
+    // Local copies of dimensions for use in array indexing
+    const int img_width = (int)regs.img_width;
+    const int img_height = (int)regs.img_height;
 
     // Line buffer for ORIGINAL image (4 rows, used by gradient + stage2)
     // Stores raw input pixels - never modified during feedback

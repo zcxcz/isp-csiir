@@ -32,137 +32,6 @@ using namespace hls;
 #endif
 
 //==============================================================================
-// Register Class using HLS types
-//==============================================================================
-class ISPCSIIR_Registers {
-public:
-    // Image dimensions
-    ap_uint<16> img_width;
-    ap_uint<16> img_height;
-
-    // Window size thresholds [4]
-    ap_uint<8> win_thresh0;
-    ap_uint<8> win_thresh1;
-    ap_uint<8> win_thresh2;
-    ap_uint<8> win_thresh3;
-
-    // Gradient clipping [4]
-    ap_uint<8> grad_clip0;
-    ap_uint<8> grad_clip1;
-    ap_uint<8> grad_clip2;
-    ap_uint<8> grad_clip3;
-
-    // Blending ratios [4]
-    ap_uint<8> blend_ratio0;
-    ap_uint<8> blend_ratio1;
-    ap_uint<8> blend_ratio2;
-    ap_uint<8> blend_ratio3;
-
-    // Edge protection
-    ap_uint<8> edge_protect;
-
-    // Static instance for HLS synthesis
-    static ISPCSIIR_Registers& inst() {
-        static ISPCSIIR_Registers instance;
-        return instance;
-    }
-
-    // Set default values
-    void reset() {
-        img_width = TEST_WIDTH;
-        img_height = TEST_HEIGHT;
-        win_thresh0 = 100; win_thresh1 = 200; win_thresh2 = 400; win_thresh3 = 800;
-        grad_clip0 = 15; grad_clip1 = 23; grad_clip2 = 31; grad_clip3 = 39;
-        blend_ratio0 = 32; blend_ratio1 = 32; blend_ratio2 = 32; blend_ratio3 = 32;
-        edge_protect = 32;
-    }
-
-    // Load from JSON config file
-    bool load(const string& filename) {
-        ifstream f(filename.c_str());
-        if (!f.is_open()) {
-            cerr << "Error: Cannot open config file: " << filename << endl;
-            return false;
-        }
-
-        string content((istreambuf_iterator<char>(f)), istreambuf_iterator<char>());
-        f.close();
-
-        // Parse width
-        size_t pos = content.find("\"width\"");
-        if (pos != string::npos) {
-            pos = content.find(":", pos);
-            img_width = atoi(content.c_str() + pos + 1);
-        }
-        // Parse height
-        pos = content.find("\"height\"");
-        if (pos != string::npos) {
-            pos = content.find(":", pos);
-            img_height = atoi(content.c_str() + pos + 1);
-        }
-        // Parse win_thresh array
-        parse_array(content, "win_thresh", [&](int idx, int val) {
-            switch(idx) {
-                case 0: win_thresh0 = val; break;
-                case 1: win_thresh1 = val; break;
-                case 2: win_thresh2 = val; break;
-                case 3: win_thresh3 = val; break;
-            }
-        });
-        // Parse grad_clip array
-        parse_array(content, "grad_clip", [&](int idx, int val) {
-            switch(idx) {
-                case 0: grad_clip0 = val; break;
-                case 1: grad_clip1 = val; break;
-                case 2: grad_clip2 = val; break;
-                case 3: grad_clip3 = val; break;
-            }
-        });
-        // Parse blend_ratio array
-        parse_array(content, "blend_ratio", [&](int idx, int val) {
-            switch(idx) {
-                case 0: blend_ratio0 = val; break;
-                case 1: blend_ratio1 = val; break;
-                case 2: blend_ratio2 = val; break;
-                case 3: blend_ratio3 = val; break;
-            }
-        });
-        // Parse edge_protect
-        pos = content.find("\"edge_protect\"");
-        if (pos != string::npos) {
-            pos = content.find(":", pos);
-            edge_protect = atoi(content.c_str() + pos + 1);
-        }
-
-        return true;
-    }
-
-private:
-    ISPCSIIR_Registers() { reset(); }
-
-    // Helper to parse JSON array
-    template<typename F>
-    void parse_array(const string& content, const char* name, F&& setter) {
-        size_t pos = content.find(name);
-        if (pos != string::npos) {
-            pos = content.find("[", pos);
-            size_t end = content.find("]", pos);
-            string arr = content.substr(pos + 1, end - pos - 1);
-            int idx = 0;
-            size_t p = 0;
-            while (p < arr.size() && idx < 4) {
-                while (p < arr.size() && !isdigit(arr[p]) && arr[p] != '-') p++;
-                if (p < arr.size()) {
-                    int val = atoi(arr.c_str() + p);
-                    setter(idx++, val);
-                    while (p < arr.size() && (isdigit(arr[p]) || arr[p] == '-')) p++;
-                }
-            }
-        }
-    }
-};
-
-//==============================================================================
 // Load input from hex file
 //==============================================================================
 bool load_input(const string& filename, ap_uint<10> img[TEST_HEIGHT][TEST_WIDTH]) {
@@ -211,11 +80,11 @@ bool save_output(const string& filename, ap_uint<10> output[TEST_HEIGHT][TEST_WI
 }
 
 //==============================================================================
-// Process with HLS top using register class
+// Process with HLS top using register struct
 //==============================================================================
 void process_top(ap_uint<10> input[TEST_HEIGHT][TEST_WIDTH],
                  ap_uint<10> output[TEST_HEIGHT][TEST_WIDTH],
-                 ISPCSIIR_Registers& regs) {
+                 ISPCSIIR_Regs& regs) {
     stream<axis_pixel_t> din_stream;
     stream<axis_pixel_t> dout_stream;
 
@@ -230,13 +99,8 @@ void process_top(ap_uint<10> input[TEST_HEIGHT][TEST_WIDTH],
         }
     }
 
-    // Call HLS top with registers
-    isp_csiir_top(din_stream, dout_stream,
-                  regs.img_width, regs.img_height,
-                  regs.win_thresh0, regs.win_thresh1, regs.win_thresh2, regs.win_thresh3,
-                  regs.grad_clip0, regs.grad_clip1, regs.grad_clip2, regs.grad_clip3,
-                  regs.blend_ratio0, regs.blend_ratio1, regs.blend_ratio2, regs.blend_ratio3,
-                  regs.edge_protect);
+    // Call HLS top with register struct
+    isp_csiir_top(din_stream, dout_stream, regs);
 
     // Read output
     for (int y = 0; y < TEST_HEIGHT; y++) {
@@ -260,15 +124,61 @@ int main(int argc, char* argv[]) {
     if (argc >= 3) output_file = argv[2];
     if (argc >= 4) config_file = argv[3];
 
-    // Get register instance
-    ISPCSIIR_Registers& regs = ISPCSIIR_Registers::inst();
+    // Initialize registers with defaults
+    ISPCSIIR_Regs regs;
     regs.reset();
 
     // Load config if provided
     if (!config_file.empty()) {
         cout << "\n--- Loading config from " << config_file << " ---" << endl;
-        if (!regs.load(config_file)) {
+
+        ifstream f(config_file.c_str());
+        if (!f.is_open()) {
+            cerr << "Error: Cannot open config file: " << config_file << endl;
             return 1;
+        }
+
+        string content((istreambuf_iterator<char>(f)), istreambuf_iterator<char>());
+        f.close();
+
+        // Parse width
+        size_t pos = content.find("\"width\"");
+        if (pos != string::npos) {
+            pos = content.find(":", pos);
+            regs.img_width = atoi(content.c_str() + pos + 1);
+        }
+        // Parse height
+        pos = content.find("\"height\"");
+        if (pos != string::npos) {
+            pos = content.find(":", pos);
+            regs.img_height = atoi(content.c_str() + pos + 1);
+        }
+        // Parse win_thresh array
+        auto parse_array = [&](const char* name, ap_uint<8>* arr) {
+            size_t pos = content.find(name);
+            if (pos != string::npos) {
+                pos = content.find("[", pos);
+                size_t end = content.find("]", pos);
+                string arr_str = content.substr(pos + 1, end - pos - 1);
+                int idx = 0;
+                size_t p = 0;
+                while (p < arr_str.size() && idx < 4) {
+                    while (p < arr_str.size() && !isdigit(arr_str[p]) && arr_str[p] != '-') p++;
+                    if (p < arr_str.size()) {
+                        arr[idx++] = atoi(arr_str.c_str() + p);
+                        while (p < arr_str.size() && (isdigit(arr_str[p]) || arr_str[p] == '-')) p++;
+                    }
+                }
+            }
+        };
+        parse_array("win_thresh", &regs.win_thresh0);
+        parse_array("grad_clip", &regs.grad_clip0);
+        parse_array("blend_ratio", &regs.blend_ratio0);
+        // Parse edge_protect
+        size_t pos_ep = content.find("\"edge_protect\"");
+        if (pos_ep != string::npos) {
+            pos_ep = content.find(":", pos_ep);
+            regs.edge_protect = atoi(content.c_str() + pos_ep + 1);
         }
     }
 
