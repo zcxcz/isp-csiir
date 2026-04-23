@@ -2,21 +2,32 @@
 // ISP-CSIIR HLS Top Module Testbench
 //==============================================================================
 // Tests HLS top module with simple patterns
+// Optional: reads input from hex file, writes output to hex file
+// Usage: ./hls_top_tb [input.hex] [output.hex]
 //==============================================================================
 
 #include <iostream>
 #include <iomanip>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <cstdlib>
+#include <cstdint>
 #include "isp_csiir_hls_top.cpp"
 
 using namespace std;
 using namespace hls;
 
-// Image dimensions
-static const int TEST_WIDTH = 16;
-static const int TEST_HEIGHT = 16;
+// Image dimensions (can be overridden)
+#ifndef TEST_WIDTH
+#define TEST_WIDTH 16
+#endif
+#ifndef TEST_HEIGHT
+#define TEST_HEIGHT 16
+#endif
 
 //-----------------------------------------------------------------------------
-// Pattern generators
+// Pattern generators (used when no input file provided)
 //-----------------------------------------------------------------------------
 void generate_zeros(uint16_t img[TEST_HEIGHT][TEST_WIDTH]) {
     for (int y = 0; y < TEST_HEIGHT; y++)
@@ -35,6 +46,56 @@ void generate_random(uint16_t img[TEST_HEIGHT][TEST_WIDTH]) {
     for (int y = 0; y < TEST_HEIGHT; y++)
         for (int x = 0; x < TEST_WIDTH; x++)
             img[y][x] = rand() % 1024;
+}
+
+//-----------------------------------------------------------------------------
+// Load input from hex file
+//-----------------------------------------------------------------------------
+bool load_input(const string& filename, uint16_t img[TEST_HEIGHT][TEST_WIDTH]) {
+    ifstream f(filename.c_str());
+    if (!f.is_open()) {
+        cerr << "Error: Cannot open input file: " << filename << endl;
+        return false;
+    }
+
+    string line;
+    int idx = 0;
+    while (getline(f, line) && idx < TEST_WIDTH * TEST_HEIGHT) {
+        // Skip empty lines and comments
+        if (line.empty() || line[0] == '#' || line[0] == '/')
+            continue;
+        // Parse hex value
+        istringstream iss(line);
+        int val;
+        if (iss >> hex >> val) {
+            int y = idx / TEST_WIDTH;
+            int x = idx % TEST_WIDTH;
+            if (y < TEST_HEIGHT && x < TEST_WIDTH)
+                img[y][x] = val;
+            idx++;
+        }
+    }
+    f.close();
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+// Save output to hex file
+//-----------------------------------------------------------------------------
+bool save_output(const string& filename, uint16_t output[TEST_HEIGHT][TEST_WIDTH]) {
+    ofstream f(filename.c_str());
+    if (!f.is_open()) {
+        cerr << "Error: Cannot open output file: " << filename << endl;
+        return false;
+    }
+
+    for (int y = 0; y < TEST_HEIGHT; y++) {
+        for (int x = 0; x < TEST_WIDTH; x++) {
+            f << hex << output[y][x] << "\n";
+        }
+    }
+    f.close();
+    return true;
 }
 
 //-----------------------------------------------------------------------------
@@ -83,7 +144,18 @@ void process_top(const uint16_t input[TEST_HEIGHT][TEST_WIDTH],
 //-----------------------------------------------------------------------------
 // Main
 //-----------------------------------------------------------------------------
-int main() {
+int main(int argc, char* argv[]) {
+    string input_file;
+    string output_file;
+
+    // Parse arguments
+    if (argc >= 2) {
+        input_file = argv[1];
+    }
+    if (argc >= 3) {
+        output_file = argv[2];
+    }
+
     cout << "ISP-CSIIR HLS Top Test" << endl;
     cout << "======================" << endl;
     cout << "Image size: " << TEST_WIDTH << " x " << TEST_HEIGHT << endl;
@@ -91,14 +163,30 @@ int main() {
     uint16_t input[TEST_HEIGHT][TEST_WIDTH];
     uint16_t output[TEST_HEIGHT][TEST_WIDTH];
 
-    // Test Random pattern
-    cout << "\n--- Random Pattern ---" << endl;
-    generate_random(input);
+    // Load input or generate
+    if (!input_file.empty()) {
+        cout << "\n--- Loading from " << input_file << " ---" << endl;
+        if (!load_input(input_file, input)) {
+            return 1;
+        }
+    } else {
+        cout << "\n--- Random Pattern (built-in) ---" << endl;
+        generate_random(input);
+    }
 
+    // Compute input range
+    int min_in = 1024, max_in = 0;
+    for (int y = 0; y < TEST_HEIGHT; y++)
+        for (int x = 0; x < TEST_WIDTH; x++) {
+            min_in = min(min_in, (int)input[y][x]);
+            max_in = max(max_in, (int)input[y][x]);
+        }
+    cout << "Input range: [" << min_in << ", " << max_in << "]" << endl;
+
+    // Process
     process_top(input, output);
 
-    cout << "Input range: [" << 0 << ", " << 1023 << "]" << endl;
-
+    // Compute output range
     int min_out = 1024, max_out = 0;
     for (int y = 0; y < TEST_HEIGHT; y++)
         for (int x = 0; x < TEST_WIDTH; x++) {
@@ -114,6 +202,13 @@ int main() {
             cout << setw(4) << output[y][x] << " ";
         }
         cout << endl;
+    }
+
+    // Save output if filename provided
+    if (!output_file.empty()) {
+        if (save_output(output_file, output)) {
+            cout << "\nOutput written to: " << output_file << endl;
+        }
     }
 
     cout << "\nTest completed!" << endl;
